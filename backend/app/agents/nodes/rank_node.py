@@ -1,142 +1,111 @@
+import math
+from datetime import datetime
+
 from app.agents.state import AgentState
-from app.agents.schemas import BatchPaperScores
-from app.services.llm_client import get_llm
 from app.services.embeddings import embed_texts, similarity
 from app.config import settings
 
-PRE_FILTER_N = 10
+CURRENT_YEAR = datetime.now().year
+PRE_FILTER_N = 20
+MMR_LAMBDA = 0.85
 
 
-def add_embedding_scores(query: str, papers: list[dict]) -> list[dict]:
-    query_vec = embed_texts([query])[0]
-    abstracts = [p.get("summary", "")[:500] for p in papers]
-    abstract_vecs = embed_texts(abstracts)
-    for p, vec in zip(papers, abstract_vecs):
-        p["embedding_score"] = round(similarity(query_vec, vec), 3)
-    return papers
+def _citation_score(citations) -> float:
+    c = citations or 0
+    return math.log(1 + c) / math.log(1 + 100_000)
 
 
-def prefilter_candidates(papers: list[dict], n: int) -> list[dict]:
-    seminal = [p for p in papers if p.get("source") == "seminal_lookup"]
-    others = sorted(
-        (p for p in papers if p.get("source") != "seminal_lookup"),
-        key=lambda p: p.get("embedding_score", 0),
-        reverse=True,
-    )
-    return seminal + others[: max(0, n - len(seminal))]
+def _recency_score(published: str) -> float:
+    try:
+        year = int(str(published)[:4])
+    except (ValueError, TypeError):
+        return 0.3
+    age = max(CURRENT_YEAR - year, 0)
+    return max(0.0, 1 - age / 15)
 
 
-def select_diverse_topk(papers: list[dict], k: int) -> list[dict]:
-    ranked = sorted(papers, key=lambda p: p["blended_score"], reverse=True)
-    selected, selected_ids = [], set()
+def _infer_paper_type(title: str, citations: int, published: str) -> str:
+    t = title.lower()
+    if any(k in t for k in ("survey", "review", "overview")):
+        return "survey"
+    if any(k in t for k in ("benchmark", "evaluation", "comparison")):
+        return "evaluation"
+    if any(k in t for k in ("efficient", "accelerat", "compress", "optimiz")):
+        return "optimization"
+    try:
+        year = int(str(published)[:4])
+        if (citations or 0) > 3000 and (CURRENT_YEAR - year) > 3:
+            return "foundational"
+    except (ValueError, TypeError):
+        pass
+    return "application"
 
-    for p in ranked:
-        if p["paper_type"] in ("foundational", "survey"):
-            selected.append(p)
-            selected_ids.add(id(p))
-            break
 
-    type_counts = {}
-    for p in ranked:
-        if len(selected) >= k:
-            break
-        if id(p) in selected_ids:
-            continue
-        t = p["paper_type"]
-        if type_counts.get(t, 0) >= 2:
-            continue
-        selected.append(p)
-        selected_ids.add(id(p))
-        type_counts[t] = type_counts.get(t, 0) + 1
+def _weighted_score(paper: dict) -> float:
+    relevance = paper.get("embedding_score", 0)
+    citation = _citation_score(paper.get("citation_count", 0))
+    recency = _recency_score(paper.get("published", ""))
+    return 0.70 * relevance + 0.05 * citation + 0.25 * recency
 
-    for p in ranked:
-        if len(selected) >= k:
-            break
-        if id(p) not in selected_ids:
-            selected.append(p)
-            selected_ids.add(id(p))
 
-    return selected[:k]
+def _mmr_select(papers: list[dict], vecs_by_title: dict, k: int, lam: float = MMR_LAMBDA) -> list[dict]:
+    selected, remaining = [], list(papers)
+    while remaining and len(selected) < k:
+        if not selected:
+            best = max(remaining, key=lambda p: p["final_score"])
+        else:
+            def mmr(p):
+                sim_to_selected = max(
+                    similarity(vecs_by_title[p["title"]], vecs_by_title[s["title"]]) for s in selected
+                )
+                return lam * p["final_score"] - (1 - lam) * sim_to_selected
+            best = max(remaining, key=mmr)
+        selected.append(best)
+        remaining.remove(best)
+    return selected
 
 
 def rank_node(state: AgentState) -> AgentState:
     papers = state["raw_search_results"]
-
     if not papers:
         return {**state, "ranked_papers": [], "needs_retry": True}
 
-    papers = add_embedding_scores(state["query"], papers)
-    papers = prefilter_candidates(papers, PRE_FILTER_N)
+    terms = state.get("search_terms") or [state.get("refined_query") or state["query"]]
+    term_vecs = embed_texts(terms)
 
-    is_def = state.get("is_definitional", False)
-    weight = 0.7 if is_def else 0.4
+    abstracts = [p.get("summary", "")[:500] or p["title"] for p in papers]
+    abstract_vecs = embed_texts(abstracts)
 
-    llm = get_llm(temperature=0)
-    batch_llm = llm.with_structured_output(BatchPaperScores)
+    vecs_by_title = {}
+    for p, vec in zip(papers, abstract_vecs):
+        p["embedding_score"] = round(max(similarity(tv, vec) for tv in term_vecs), 3)
+        vecs_by_title[p["title"]] = vec
 
-    paper_block = "\n\n".join(
-        f"[{i}] Title: {p['title']}\n"
-        f"Citations: {p.get('citation_count', 'unknown')}\n"
-        f"Abstract: {p.get('summary', '')[:600]}"
-        for i, p in enumerate(papers)
-    )
+    for p in papers:
+        p["paper_type"] = _infer_paper_type(p["title"], p.get("citation_count", 0), p.get("published", ""))
+        p["final_score"] = round(_weighted_score(p), 3)
 
-    prompt = f"""Score EACH paper below against the query, RELATIVE TO EACH OTHER.
-Spread your scores meaningfully across the full 0-1 range — do not assign the same or near-identical
-scores to papers unless they are genuinely equally relevant. You are comparing {len(papers)} papers
-at once specifically so you can differentiate between them.
-
-Query: {state['query']}
-
-Papers:
-{paper_block}
-
-For each paper (referenced by its index above), return relevance_to_query, foundational_importance,
-paper_type, and a 1-sentence justification citing a specific detail from its abstract.
-"""
-
-    try:
-        result: BatchPaperScores = batch_llm.invoke(prompt)
-        score_map = {s.paper_index: s for s in result.scores}
-    except Exception:
-        score_map = {}
-
-    for i, paper in enumerate(papers):
-        s = score_map.get(i)
-        if s:
-            paper["relevance_to_query"] = s.relevance_to_query
-            paper["foundational_importance"] = s.foundational_importance
-            paper["paper_type"] = s.paper_type
-            paper["ranking_reasoning"] = s.justification
-            paper["relevance_score"] = round(
-                weight * s.foundational_importance + (1 - weight) * s.relevance_to_query, 3
-            )
-        else:
-            paper["relevance_to_query"] = 0.0
-            paper["foundational_importance"] = 0.0
-            paper["paper_type"] = "application"
-            paper["ranking_reasoning"] = "scoring failed"
-            paper["relevance_score"] = 0.0
-
-        paper["blended_score"] = round(
-            0.6 * paper["relevance_score"] + 0.4 * paper.get("embedding_score", 0), 3
-        )
-
-    seen_titles = set()
+    seen = set()
     deduped = []
-    for p in sorted(papers, key=lambda p: p["blended_score"], reverse=True):
-        norm_title = p["title"].strip().lower()
-        if norm_title in seen_titles:
+    for p in sorted(papers, key=lambda p: p["final_score"], reverse=True):
+        norm = p["title"].strip().lower()
+        if norm in seen:
             continue
-        seen_titles.add(norm_title)
+        seen.add(norm)
         deduped.append(p)
 
-    top_k = select_diverse_topk(deduped, settings.TOP_K_PAPERS)
+    prefiltered = deduped[:PRE_FILTER_N]
 
-    max_score = max((p.get("blended_score", 0) for p in top_k), default=0)
+    MIN_FINAL_SCORE = 0.45
+    prefiltered = [p for p in prefiltered if p["final_score"] >= MIN_FINAL_SCORE]
+
+    top_k = _mmr_select(prefiltered, vecs_by_title, settings.TOP_K_PAPERS) if prefiltered else []
+
+    max_score = max((p["final_score"] for p in top_k), default=0)
     needs_retry = (
-        max_score < 0.3
+        max_score < 0.25
         and state.get("search_attempts", 0) < state.get("max_search_attempts", 2)
     )
 
     return {**state, "ranked_papers": top_k, "needs_retry": needs_retry}
+

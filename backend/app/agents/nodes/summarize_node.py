@@ -1,6 +1,10 @@
+import json
+
+from langchain_core.messages import SystemMessage, HumanMessage
 from app.agents.state import AgentState
-from app.agents.schemas import PaperSummary, FinalAnswer
+from app.agents.schemas import BatchPaperSummaries, FinalAnswer
 from app.services.llm_client import get_llm
+from app.utils.text_cleaning import sanitize_abstract
 
 TYPE_ORDER = {
     "foundational": 0,
@@ -16,61 +20,110 @@ def order_for_synthesis(papers: list[dict]) -> list[dict]:
 
 
 def summarize_node(state: AgentState) -> AgentState:
-    llm = get_llm(temperature=0.2)
-    summary_llm = llm.with_structured_output(PaperSummary)
+    llm = get_llm(temperature=0)
+    papers = state["ranked_papers"]
 
-    summaries = {}
-    for i, paper in enumerate(state["ranked_papers"]):
-        text_excerpt = paper.get("text", paper.get("summary", ""))[:4000]
-        prompt = f"""Query context: {state['query']}
+    paper_parts = []
+    for i, p in enumerate(papers):
+        abstract = p.get('text', sanitize_abstract(p.get('summary', '')))
+        if len(abstract) < 20 or '\x02' in abstract or '\x01' in abstract:
+            abstract = f"[Abstract stripped for compatibility. Paper: {p['title']}]"
+        paper_parts.append(f"[paper_id={i}] Title: {p['title']}\nAbstract: {abstract[:2500]}")
+    paper_block = "\n\n".join(paper_parts)
 
-Paper title: {paper['title']}
-Paper content excerpt:
-{text_excerpt}
-
-Summarize this paper's contribution, methodology, and findings, and explain its relevance to the query.
-Use paper_id="{i}".
-"""
+    batch_messages = [
+        SystemMessage(content="You must summarize each paper using the BatchPaperSummaries function. Return a valid function call with no additional text before or after."),
+        HumanMessage(content=f"Query: {state['query']}\n\n{paper_block}"),
+    ]
+    try:
+        result: BatchPaperSummaries = llm.with_structured_output(BatchPaperSummaries).invoke(
+            batch_messages, config={"timeout": 20}
+        )
+        summaries = {s.paper_id: s.model_dump() for s in result.summaries}
+    except Exception:
         try:
-            summary: PaperSummary = summary_llm.invoke(prompt)
-            summaries[str(i)] = summary.model_dump()
-        except Exception as e:
-            summaries[str(i)] = {
-                "paper_id": str(i),
-                "key_contribution": "Could not summarize (LLM error)",
+            raw = llm.invoke(batch_messages, config={"timeout": 20})
+            clean = str(raw)
+            if "```" in clean:
+                clean = clean.split("```")[1]
+                if clean.startswith("json"):
+                    clean = clean[4:]
+            data = json.loads(clean)
+            result = BatchPaperSummaries(**data)
+            summaries = {s.paper_id: s.model_dump() for s in result.summaries}
+        except Exception:
+            summaries = {}
+
+    if not summaries:
+        summaries = {
+            str(i): {
+                "key_contribution": f"Paper '{p['title']}' – no abstract available.",
                 "methodology": "",
                 "findings": "",
-                "relevance_to_query": "",
+                "relevance_to_query": p.get("final_score", 0),
             }
+            for i, p in enumerate(papers)
+        }
 
-    ordered_papers = order_for_synthesis(state["ranked_papers"])
+    for i in range(len(papers)):
+        summaries.setdefault(str(i), {
+            "paper_id": str(i), "key_contribution": "not summarized",
+            "methodology": "", "findings": "", "relevance_to_query": ""
+        })
 
+    ordered_papers = order_for_synthesis(papers)
     paper_context = "\n\n".join(
         f"[{p.get('paper_type', 'application').upper()}] {p['title']}: "
-        f"Contribution: {summaries.get(str(state['ranked_papers'].index(p)), {}).get('key_contribution', '')}\n"
-        f"Methodology: {summaries.get(str(state['ranked_papers'].index(p)), {}).get('methodology', '')}\n"
-        f"Findings: {summaries.get(str(state['ranked_papers'].index(p)), {}).get('findings', '')}"
+        f"{summaries.get(str(papers.index(p)), {}).get('key_contribution', '')}"
         for p in ordered_papers
     )
 
-    final_llm = llm.with_structured_output(FinalAnswer)
+    present_terms = {p.get("_source_term") for p in papers if p.get("_source_term")}
+    requested_terms = set(state.get("search_terms", []))
+    missing_terms = sorted(requested_terms - present_terms)
 
-    answer_prompt = f"""User query: {state['query']}
+    final_prompt = f"""
+You are a research assistant. Answer the user's query using ONLY the information from the paper summaries provided below.
 
-Structure your answer in this order, using transitions that make the progression clear:
-1. Start with the CORE CONCEPT — define it using the foundational/survey paper(s) first.
-2. Then describe how it's been APPLIED or EXTENDED — application/optimization papers.
-3. End with how it's EVALUATED or its known LIMITATIONS — evaluation papers.
+Rules:
+- Every factual claim MUST be traceable to a specific paper summary.
+- If you cannot find sufficient information to answer a part of the query, state that clearly in the 'answer' field and list the missing concept in 'coverage_gaps'.
+- Do NOT invent facts, add external knowledge, or make general statements that are not backed by the provided summaries.
+- Use the 'papers_used' field to list the paper IDs that actually contributed to the answer.
 
-Do not present these as an unordered list of unrelated findings — each should build on the previous.
+User query: {state['query']}
 
-Papers (in the order to discuss them):
+Paper summaries:
 {paper_context}
-"""
-    final: FinalAnswer = final_llm.invoke(answer_prompt)
 
-    return {
-        **state,
-        "summaries": summaries,
-        "final_answer": final.answer,
-    }
+Now produce a FinalAnswer JSON object with fields: answer, confidence, papers_used, coverage_gaps.
+"""
+    final_messages = [
+        SystemMessage(content="You must synthesize an answer using the FinalAnswer function. Return a valid function call with no additional text."),
+        HumanMessage(content=final_prompt),
+    ]
+    try:
+        final: FinalAnswer = llm.with_structured_output(FinalAnswer).invoke(
+            final_messages, config={"timeout": 20}
+        )
+    except Exception:
+        try:
+            fallback_ans = llm.invoke(
+                f"Based on these paper summaries, answer the user's query. Be honest about gaps.\n\nSummaries:\n{paper_context}\n\nQuery: {state['query']}\n\nAnswer:",
+                config={"timeout": 20}
+            )
+            final = FinalAnswer(
+                answer=str(fallback_ans),
+                confidence=0.3,
+                papers_used=[str(i) for i in range(len(papers))],
+                coverage_gaps=list(requested_terms) or ["Answer generated via fallback; structured output failed."],
+            )
+        except Exception:
+            final = FinalAnswer(
+                answer="I could not synthesize the answer due to a processing error.",
+                confidence=0.0,
+                papers_used=[],
+                coverage_gaps=list(requested_terms),
+            )
+
+    return {**state, "summaries": summaries, "final_answer": final.answer, "coverage_gaps": final.coverage_gaps}

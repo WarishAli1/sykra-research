@@ -4,7 +4,6 @@ import io
 import hashlib
 import json
 from pathlib import Path
-from app.agents.schemas import PageClassification
 
 CACHE_DIR = Path("app/db/pdf_cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -13,7 +12,7 @@ MIN_TEXT_LENGTH_THRESHOLD = 200
 MIN_WORDS_PER_PAGE = 80
 MAX_FRONT_CONTENT_PAGES = 10
 MAX_FRONT_SCAN_LIMIT = 20
-BACK_SCAN_LIMIT = 15
+MAX_BACK_PAGES = 3
 MAX_PDF_SIZE = 20_000_000
 
 
@@ -108,55 +107,17 @@ def _extract_front_pages_ocr(doc) -> tuple[list[str], int]:
     return front_pages, scanned
 
 
-def _classify_page_llm(llm, page_text: str) -> PageClassification:
-    structured_llm = llm.with_structured_output(PageClassification)
-    prompt = (
-        "Classify which section of an academic paper this page most likely belongs to. "
-        f"Page content:\n\n{page_text[:1500]}"
-    )
-    return structured_llm.invoke(prompt)
-
-
-def _extract_conclusion_ocr(doc, scan_start: int, llm) -> str:
-    total = len(doc)
-    start = max(scan_start, total - BACK_SCAN_LIMIT)
-    kept = []
-    hit_conclusion = False
-
-    for i in range(start, total):
-        text = _ocr_page(doc[i])
-        try:
-            result = _classify_page_llm(llm, text)
-        except Exception:
-            continue
-
-        if result.section_type == "conclusion":
-            hit_conclusion = True
-            kept.append(text)
-        elif result.section_type == "references" and hit_conclusion:
-            break
-        elif result.section_type == "references" and not hit_conclusion:
-            break
-
-    return "\n".join(kept)
-
-
-def _extract_with_ocr(pdf_bytes: bytes, llm=None) -> str:
+def _extract_with_ocr(pdf_bytes: bytes) -> str:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     front_pages, scanned = _extract_front_pages_ocr(doc)
-
-    conclusion_text = ""
-    if llm is not None:
-        try:
-            conclusion_text = _extract_conclusion_ocr(doc, scanned, llm)
-        except Exception:
-            conclusion_text = ""
-
+    total = len(doc)
+    back_start = max(scanned, total - MAX_BACK_PAGES)
+    back_pages = [_ocr_page(doc[i]) for i in range(back_start, total)]
     doc.close()
-    return "\n".join(front_pages) + ("\n" + conclusion_text if conclusion_text else "")
+    return "\n".join(front_pages + back_pages)
 
 
-def download_and_extract(pdf_url: str, llm=None) -> dict:
+def download_and_extract(pdf_url: str) -> dict:
     cached = _get_cache(pdf_url)
     if cached:
         return cached
@@ -169,11 +130,17 @@ def download_and_extract(pdf_url: str, llm=None) -> dict:
     except (httpx.TimeoutException, httpx.HTTPError):
         return {"text": "", "extraction_method": "failed", "char_count": 0}
 
-    text = _extract_with_pymupdf(pdf_bytes)
+    try:
+        text = _extract_with_pymupdf(pdf_bytes)
+    except fitz.FileDataError:
+        return {"text": "", "extraction_method": "failed", "char_count": 0}
     method = "pymupdf"
 
     if len(text) < MIN_TEXT_LENGTH_THRESHOLD:
-        text = _extract_with_ocr(pdf_bytes, llm=llm)
+        try:
+            text = _extract_with_ocr(pdf_bytes)
+        except Exception:
+            return {"text": "", "extraction_method": "failed", "char_count": 0}
         method = "ocr_fallback"
     else:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -188,23 +155,11 @@ def download_and_extract(pdf_url: str, llm=None) -> dict:
     return result
 
 
-async def extract_all(pdf_urls: list[str], llm=None) -> list[dict]:
+async def extract_all(pdf_urls: list[str]) -> list[dict]:
     import asyncio
 
-    results = []
-    to_fetch = []
-    for url in pdf_urls:
-        cached = _get_cache(url)
-        if cached:
-            results.append({"url": url, **cached})
-        else:
-            to_fetch.append(url)
+    loop = asyncio.get_event_loop()
+    tasks = [loop.run_in_executor(None, download_and_extract, url) for url in pdf_urls]
+    extracted = await asyncio.gather(*tasks)
 
-    if to_fetch:
-        loop = asyncio.get_event_loop()
-        tasks = [loop.run_in_executor(None, download_and_extract, url, llm) for url in to_fetch]
-        extracted = await asyncio.gather(*tasks)
-        for url, result in zip(to_fetch, extracted):
-            results.append({"url": url, **result})
-
-    return results
+    return [{"url": url, **result} for url, result in zip(pdf_urls, extracted)]

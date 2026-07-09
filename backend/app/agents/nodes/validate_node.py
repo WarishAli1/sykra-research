@@ -4,7 +4,7 @@ from datetime import datetime
 from app.agents.state import AgentState
 
 
-def validate_arxiv_metadata(paper: dict) -> dict:
+def _validate_arxiv_metadata(paper: dict) -> dict:
     match = re.search(r'(\d{2})(\d{2})\.\d{4,5}', paper.get("link", ""))
     if not match:
         paper["_validation"] = "no_arxiv_id_found"
@@ -33,11 +33,7 @@ def validate_node(state: AgentState) -> AgentState:
     validated = []
     flags = []
     for p in state["raw_search_results"]:
-        if p.get("source") == "seminal_lookup":
-            p["_validation"] = "trusted_source"
-            validated.append(p)
-            continue
-        p = validate_arxiv_metadata(p)
+        p = _validate_arxiv_metadata(p)
         if p.get("_validation", "").startswith("MISMATCH") or p.get("_validation") == "unparseable_date":
             flags.append(f"{p.get('title', '?')}: {p['_validation']}")
             continue

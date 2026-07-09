@@ -6,6 +6,7 @@ class AgentState(TypedDict):
     use_uploaded_only: bool
 
     refined_query: Optional[str]
+    search_terms: list[str]
     is_definitional: bool
     search_attempts: int
     max_search_attempts: int
@@ -16,6 +17,7 @@ class AgentState(TypedDict):
     summaries: dict[str, dict]
 
     final_answer: str
+    coverage_gaps: list[str]
     citations: list[str]
 
     needs_retry: bool

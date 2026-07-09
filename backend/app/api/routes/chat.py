@@ -8,7 +8,7 @@ router = APIRouter()
 
 
 def eval_result_quality(papers: list[dict]) -> dict:
-    scores = [p.get("relevance_score", 0) for p in papers if p.get("relevance_score") is not None]
+    scores = [p.get("final_score", 0) for p in papers if p.get("final_score") is not None]
     years = [int(p["published"][:4]) for p in papers if p.get("published")]
     links = [p["link"] for p in papers if p.get("link")]
 
@@ -25,6 +25,7 @@ def chat(req: ChatRequest):
         "query": req.query,
         "use_uploaded_only": req.use_uploaded_only,
         "refined_query": None,
+        "search_terms": [],
         "is_definitional": False,
         "search_attempts": 0,
         "max_search_attempts": 2,
@@ -33,6 +34,7 @@ def chat(req: ChatRequest):
         "ranked_papers": [],
         "summaries": {},
         "final_answer": "",
+        "coverage_gaps": [],
         "citations": [],
         "needs_retry": False,
         "error": None,
@@ -61,7 +63,7 @@ def chat(req: ChatRequest):
             summary=p.get("summary", ""),
             link=p["link"],
             published=p.get("published"),
-            relevance_score=p.get("relevance_score"),
+            relevance_score=p.get("final_score"),
         )
         for p in final_state["ranked_papers"]
     ]
