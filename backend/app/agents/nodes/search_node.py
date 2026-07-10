@@ -6,14 +6,10 @@ from app.agents.state import AgentState
 from app.services.paper_search import search_arxiv, search_openalex
 from app.services.embeddings import embed_texts, similarity
 
-ACRONYM_EXPANSIONS = {
-    "GANs": "generative adversarial networks",
-    "RAG": "retrieval augmented generation",
-    "CFG": "classifier-free guidance",
-}
-
 _query_cache: dict[str, tuple[float, list[dict]]] = {}
 CACHE_TTL_SECONDS = 3600
+MAX_PER_TERM = 50
+MAX_TOTAL_CANDIDATES = 100
 
 
 def _get_cached(query: str) -> list[dict] | None:
@@ -29,15 +25,10 @@ def _set_cached(query: str, results: list[dict]):
     _query_cache[key] = (time.time(), results)
 
 
-def expand_term(term: str) -> list[str]:
-    if term in ACRONYM_EXPANSIONS:
-        return [term, ACRONYM_EXPANSIONS[term]]
-    return [term]
-
-
 def search_node(state: AgentState) -> AgentState:
-    raw_terms = state.get("search_terms") or [state.get("refined_query") or state["query"]]
-    terms = list(dict.fromkeys(e for t in raw_terms for e in expand_term(t)))
+    terms = list(dict.fromkeys(
+        state.get("search_terms") or [state.get("refined_query") or state["query"]]
+    ))
 
     to_fetch = []
     per_term_results = {}
@@ -83,7 +74,7 @@ def search_node(state: AgentState) -> AgentState:
         candidates = [p for _, p in sorted(scored, key=lambda x: x[0], reverse=True)]
         term_lower = term.lower()
         is_single_word = len(term_lower.split()) == 1
-        for p in candidates[:10]:
+        for p in candidates[:MAX_PER_TERM]:
             if not p.get("title", "").strip():
                 continue
             if is_single_word and term_lower not in p["title"].lower():
@@ -93,8 +84,32 @@ def search_node(state: AgentState) -> AgentState:
                 p["_source_term"] = term
                 all_results[key] = p
 
+    combined = list(all_results.values())[:MAX_TOTAL_CANDIDATES]
+
+    mandatory_kws = state.get("mandatory_domain_keywords")
+    domain_full = state.get("domain_full", "")
+
+    if mandatory_kws:
+        hard_filtered = [
+            p for p in combined
+            if any(kw in (p.get("title", "") + " " + p.get("summary", "")).lower() for kw in mandatory_kws)
+        ]
+        if len(hard_filtered) < 5 and domain_full:
+            soft_words = domain_full.lower().split()
+            soft_filtered = [
+                p for p in combined if p not in hard_filtered
+                and any(w in (p.get("title", "") + " " + p.get("summary", "")).lower() for w in soft_words)
+            ]
+            combined = hard_filtered + soft_filtered[:max(0, 5 - len(hard_filtered))]
+        else:
+            combined = hard_filtered
+
+    search_attempts = state.get("search_attempts", 0) + 1
+    needs_retry = len(combined) < 5 and search_attempts < state.get("max_search_attempts", 2)
+
     return {
         **state,
-        "raw_search_results": list(all_results.values()),
-        "search_attempts": state.get("search_attempts", 0) + 1,
+        "raw_search_results": combined,
+        "search_attempts": search_attempts,
+        "needs_retry": needs_retry,
     }

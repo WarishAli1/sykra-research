@@ -17,6 +17,7 @@ class ChatResponse(BaseModel):
     answer: str
     papers: list[PaperResult]
     citations: list[str]
+    coverage_gaps: list[str] = []
 
 class UploadResponse(BaseModel):
     filename: str

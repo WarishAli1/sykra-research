@@ -8,6 +8,9 @@ class AgentState(TypedDict):
     refined_query: Optional[str]
     search_terms: list[str]
     is_definitional: bool
+    domain_full: Optional[str]
+    domain_keywords: list[str]
+    mandatory_domain_keywords: Optional[list[str]]
     search_attempts: int
     max_search_attempts: int
 

@@ -15,12 +15,12 @@ class _StructuredFailoverRunner:
         self.temperature = temperature
         self.schema = schema
 
-    def invoke(self, prompt):
+    def invoke(self, prompt, **kwargs):
         last_exc = None
         for key in GROQ_KEYS:
             try:
                 llm = ChatGroq(api_key=key, model=self.model, temperature=self.temperature)
-                return llm.with_structured_output(self.schema).invoke(prompt)
+                return llm.with_structured_output(self.schema).invoke(prompt, **kwargs)
             except Exception as e:
                 if _is_rate_limit_error(e):
                     last_exc = e
@@ -37,11 +37,11 @@ class FailoverLLM:
     def with_structured_output(self, schema):
         return _StructuredFailoverRunner(self.model, self.temperature, schema)
 
-    def invoke(self, prompt):
+    def invoke(self, prompt, **kwargs):
         last_exc = None
         for key in GROQ_KEYS:
             try:
-                return ChatGroq(api_key=key, model=self.model, temperature=self.temperature).invoke(prompt)
+                return ChatGroq(api_key=key, model=self.model, temperature=self.temperature).invoke(prompt, **kwargs)
             except Exception as e:
                 if _is_rate_limit_error(e):
                     last_exc = e

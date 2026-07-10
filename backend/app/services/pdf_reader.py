@@ -3,6 +3,7 @@ import httpx
 import io
 import hashlib
 import json
+import time
 from pathlib import Path
 
 CACHE_DIR = Path("app/db/pdf_cache")
@@ -26,63 +27,6 @@ def _get_cache(pdf_url: str) -> dict | None:
 def _save_cache(pdf_url: str, result: dict):
     f = CACHE_DIR / f"{_hash_url(pdf_url)}.json"
     f.write_text(json.dumps(result))
-
-
-def _extract_with_pymupdf(pdf_bytes: bytes) -> str:
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    text = "\n".join(page.get_text() for page in doc)
-    doc.close()
-    return text.strip()
-
-
-def _detect_headings(doc) -> list[dict]:
-    headings = []
-    body_sizes = []
-
-    for page in doc:
-        for block in page.get_text("dict")["blocks"]:
-            for line in block.get("lines", []):
-                for span in line["spans"]:
-                    body_sizes.append(round(span["size"]))
-
-    if not body_sizes:
-        return []
-    baseline = max(set(body_sizes), key=body_sizes.count)
-
-    for page_num, page in enumerate(doc):
-        for block in page.get_text("dict")["blocks"]:
-            for line in block.get("lines", []):
-                line_text = "".join(s["text"] for s in line["spans"]).strip()
-                if not line_text or len(line_text) > 60:
-                    continue
-                max_size = max(s["size"] for s in line["spans"])
-                is_bold = any("bold" in s["font"].lower() for s in line["spans"])
-                if max_size > baseline + 1.5 or is_bold:
-                    headings.append({"page": page_num, "text": line_text})
-    return headings
-
-
-CONCLUSION_KEYWORDS = ("conclusion", "discussion", "future work", "summary", "concluding remarks")
-REFERENCE_KEYWORDS = ("references", "bibliography")
-
-def _trim_to_conclusion_pymupdf(doc, full_text_by_page: list[str]) -> str:
-    headings = _detect_headings(doc)
-    conclusion_page = None
-    reference_page = None
-
-    for h in headings:
-        low = h["text"].lower()
-        if conclusion_page is None and any(k in low for k in CONCLUSION_KEYWORDS):
-            conclusion_page = h["page"]
-        elif conclusion_page is not None and any(k in low for k in REFERENCE_KEYWORDS):
-            reference_page = h["page"]
-            break
-
-    if conclusion_page is None:
-        return ""
-
-    end = reference_page if reference_page else len(full_text_by_page)
-    return "\n".join(full_text_by_page[conclusion_page:end])
 
 
 def _ocr_page(page) -> str:
@@ -118,39 +62,47 @@ def _extract_with_ocr(pdf_bytes: bytes) -> str:
 
 
 def download_and_extract(pdf_url: str) -> dict:
+    t0 = time.time()
     cached = _get_cache(pdf_url)
     if cached:
+        print(f"[pdf_timing] {pdf_url[:60]} | CACHED")
         return cached
 
     try:
         resp = httpx.get(pdf_url, timeout=15, follow_redirects=True)
-        if resp.status_code != 200 or len(resp.content) > MAX_PDF_SIZE:
+        if resp.status_code != 200:
+            print(f"[pdf_timing] {pdf_url[:60]} | FAILED (status={resp.status_code})")
+            return {"text": "", "extraction_method": "failed", "char_count": 0}
+        if len(resp.content) > MAX_PDF_SIZE:
+            print(f"[pdf_timing] {pdf_url[:60]} | FAILED (too large: {len(resp.content)/1e6:.1f}MB)")
             return {"text": "", "extraction_method": "failed", "char_count": 0}
         pdf_bytes = resp.content
     except (httpx.TimeoutException, httpx.HTTPError):
+        print(f"[pdf_timing] {pdf_url[:60]} | FAILED (network exception)")
         return {"text": "", "extraction_method": "failed", "char_count": 0}
 
-    try:
-        text = _extract_with_pymupdf(pdf_bytes)
-    except fitz.FileDataError:
-        return {"text": "", "extraction_method": "failed", "char_count": 0}
+    t_download = time.time()
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pages_text = [p.get_text() for p in doc]
+    text = "\n".join(pages_text).strip()
     method = "pymupdf"
 
     if len(text) < MIN_TEXT_LENGTH_THRESHOLD:
+        doc.close()
         try:
             text = _extract_with_ocr(pdf_bytes)
         except Exception:
+            print(f"[pdf_timing] {pdf_url[:60]} | FAILED (ocr)")
             return {"text": "", "extraction_method": "failed", "char_count": 0}
         method = "ocr_fallback"
     else:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        pages_text = [p.get_text() for p in doc]
-        conclusion_only = _trim_to_conclusion_pymupdf(doc, pages_text)
         doc.close()
-        if conclusion_only:
-            text = text[:3000] + "\n...\n" + conclusion_only
+
+    t_extract = time.time()
 
     result = {"text": text, "extraction_method": method, "char_count": len(text)}
+    print(f"[pdf_timing] {pdf_url[:60]} | method={method} | download={round(t_download-t0,2)}s | extract={round(t_extract-t_download,2)}s")
     _save_cache(pdf_url, result)
     return result
 

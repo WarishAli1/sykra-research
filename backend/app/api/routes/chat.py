@@ -7,13 +7,15 @@ from app.agents.graph import research_graph
 router = APIRouter()
 
 
-def eval_result_quality(papers: list[dict]) -> dict:
+def eval_result_quality(papers: list[dict], num_concepts: int = 1) -> dict:
     scores = [p.get("final_score", 0) for p in papers if p.get("final_score") is not None]
     years = [int(p["published"][:4]) for p in papers if p.get("published")]
     links = [p["link"] for p in papers if p.get("link")]
 
+    variance_threshold = 0.15 if num_concepts <= 1 else 0.10
+
     return {
-        "score_variance_low": (max(scores) - min(scores)) < 0.15 if len(scores) > 1 else None,
+        "score_variance_low": (max(scores) - min(scores)) < variance_threshold if len(scores) > 1 else None,
         "recency_skew": (max(years) - min(years)) < 2 if len(years) > 1 else None,
         "duplicate_links": len(links) != len(set(links)) if links else None,
     }
@@ -27,6 +29,9 @@ def chat(req: ChatRequest):
         "refined_query": None,
         "search_terms": [],
         "is_definitional": False,
+        "domain_full": None,
+        "domain_keywords": [],
+        "mandatory_domain_keywords": None,
         "search_attempts": 0,
         "max_search_attempts": 2,
         "raw_search_results": [],
@@ -45,7 +50,7 @@ def chat(req: ChatRequest):
     final_state = research_graph.invoke(initial_state)
     elapsed = round(time.time() - t0, 1)
 
-    eval_quality = eval_result_quality(final_state["ranked_papers"])
+    eval_quality = eval_result_quality(final_state["ranked_papers"], num_concepts=len(final_state.get("search_terms", [1])))
 
     print(f"[timing] {elapsed}s | query='{req.query}'")
 
@@ -72,4 +77,5 @@ def chat(req: ChatRequest):
         answer=final_state["final_answer"],
         papers=papers,
         citations=final_state["citations"],
+        coverage_gaps=final_state.get("coverage_gaps", []),
     )

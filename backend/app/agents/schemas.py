@@ -8,6 +8,18 @@ class NormalizedQuery(BaseModel):
         "in the query. If the query is about a single concept, return just one term."
     )
     is_definitional: bool = Field(description="True if user wants foundational/overview understanding, not a narrow variant")
+    domain_full: Optional[str] = Field(
+        default=None,
+        description="If the query explicitly mentions a scientific domain (e.g., 'NLP', 'computer vision'), provide its full name (e.g., 'natural language processing', 'computer vision'). Otherwise null."
+    )
+    domain_keywords: list[str] = Field(
+        default_factory=list,
+        description="Short keywords/phrases that characterize the domain (e.g. ['language', 'text', 'nlp']). Empty list if no domain specified."
+    )
+    mandatory_domain_keywords: Optional[list[str]] = Field(
+        default=None,
+        description="If the query specifies a domain, list 2-3 words that MUST appear in a paper's abstract to be considered relevant. E.g., for NLP: ['language', 'text', 'nlp']. None if no domain."
+    )
 
 
 class PaperSummaryItem(BaseModel):

@@ -8,15 +8,30 @@ def normalize_query_node(state: AgentState) -> AgentState:
     llm = get_llm(temperature=0)
     structured_llm = llm.with_structured_output(NormalizedQuery)
 
-    prompt = f"""Break this query into 1-3 distinct technical search terms — one per
-distinct concept named. If the query is about a single concept, return just one term.
+    prompt = f"""Break the query into 5 distinct search phrases that could retrieve relevant papers.
+- Each phrase MUST include the domain or its synonyms if a domain is specified (e.g., 'in NLP').
+- Vary the phrasing: use full task names, abbreviations, related concepts.
+- If no domain is specified, just output 5 query variations.
+
+Also, if the query explicitly specifies a domain (e.g. 'in NLP', 'for computer vision'),
+output:
+- domain_full: the domain's full name (e.g. 'natural language processing', 'computer vision').
+- domain_keywords: a short list of 2-4 domain-specific keywords that characterize the field
+  (e.g. ['language', 'text', 'nlp'] for NLP, or ['vision', 'image', 'visual'] for CV).
+- mandatory_domain_keywords: 2-3 words that a paper's abstract MUST contain to be considered
+  relevant to this domain. For NLP: ['language', 'text', 'nlp'].
+If no domain is mentioned, set domain_full to null, domain_keywords to empty, and mandatory_domain_keywords to null.
+
+Always expand any acronym to its full technical name (e.g. "GAN" -> "generative adversarial network",
+"CFG" -> "classifier-free guidance", "RAG" -> "retrieval augmented generation") — do this for
+ANY acronym you recognize, not just common ones. If genuinely unsure what an acronym means,
+keep it as-is rather than guessing.
 
 User query: {state['query']}
 
 Examples:
-"explain RAG" -> ["Retrieval-Augmented Generation"]
-"explain AI agent and LangGraph and LangChain" -> ["AI agent architecture", "LangGraph", "LangChain"]
-"compare fine-tuning vs RAG" -> ["fine-tuning language models", "Retrieval-Augmented Generation"]
+"Explain few-shot learning in NLP" -> search_terms: ["few-shot learning natural language processing", "prompt-based few-shot learning text classification", "in-context learning language models", "few-shot NLP transfer learning", "meta-learning for NLP tasks"], is_definitional: true, domain_full: "natural language processing", domain_keywords: ["language", "text", "nlp"], mandatory_domain_keywords: ["language", "text", "nlp"]
+"Explain diffusion models and how they differ from GANs" -> search_terms: ["diffusion models", "generative adversarial networks", "score-based generative models", "diffusion vs GAN comparison", "denoising diffusion probabilistic models"], domain_full: null, domain_keywords: [], mandatory_domain_keywords: null
 """
     messages = [
         SystemMessage(content="You must extract search terms from the user query using the NormalizedQuery function. Return a valid function call with no additional text."),
@@ -27,4 +42,7 @@ Examples:
         **state,
         "search_terms": result.search_terms,
         "is_definitional": result.is_definitional,
+        "domain_full": result.domain_full,
+        "domain_keywords": result.domain_keywords,
+        "mandatory_domain_keywords": result.mandatory_domain_keywords,
     }

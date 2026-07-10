@@ -73,7 +73,7 @@ def summarize_node(state: AgentState) -> AgentState:
 
     ordered_papers = order_for_synthesis(papers)
     paper_context = "\n\n".join(
-        f"[{p.get('paper_type', 'application').upper()}] {p['title']}: "
+        f"type: {p.get('paper_type', 'application')} | {p['title']}: "
         f"{summaries.get(str(papers.index(p)), {}).get('key_contribution', '')}"
         for p in ordered_papers
     )
@@ -83,20 +83,19 @@ def summarize_node(state: AgentState) -> AgentState:
     missing_terms = sorted(requested_terms - present_terms)
 
     final_prompt = f"""
-You are a research assistant. Answer the user's query using ONLY the information from the paper summaries provided below.
-
-Rules:
-- Every factual claim MUST be traceable to a specific paper summary.
-- If you cannot find sufficient information to answer a part of the query, state that clearly in the 'answer' field and list the missing concept in 'coverage_gaps'.
-- Do NOT invent facts, add external knowledge, or make general statements that are not backed by the provided summaries.
-- Use the 'papers_used' field to list the paper IDs that actually contributed to the answer.
+You are a research assistant. Write a detailed answer to the query, synthesizing information from ALL the provided paper summaries.
+- Use every paper at least once.
+- Compare and contrast findings.
+- Explain concepts clearly, as if to a graduate student.
+- Cite papers by index ([0], [1], ...).
+- If a paper is only slightly related, still mention any useful insight, but note its limited scope.
+- Be honest about gaps; list them in coverage_gaps.
+- The answer should be at least 3-4 paragraphs.
 
 User query: {state['query']}
 
 Paper summaries:
 {paper_context}
-
-Now produce a FinalAnswer JSON object with fields: answer, confidence, papers_used, coverage_gaps.
 """
     final_messages = [
         SystemMessage(content="You must synthesize an answer using the FinalAnswer function. Return a valid function call with no additional text."),
