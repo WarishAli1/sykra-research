@@ -9,9 +9,6 @@ CURRENT_YEAR = datetime.now().year
 PRE_FILTER_N = 20
 MMR_LAMBDA = 0.85
 MIN_ABSTRACT_LENGTH = 50
-MIN_TERM_MATCH_SCORE = 0.35
-WEAK_MATCH_BUFFER = 0.05
-FULL_QUERY_THRESHOLD = 0.4
 
 
 def _has_valid_abstract(paper: dict) -> bool:
@@ -34,9 +31,9 @@ def _recency_score(published: str) -> float:
 
 def _infer_paper_type(title: str, citations: int, published: str) -> str:
     t = title.lower()
-    if any(k in t for k in ("survey", "review", "overview")):
+    if any(k in t for k in ("survey", "review", "overview", "systematic review", "meta-analysis")):
         return "survey"
-    if any(k in t for k in ("benchmark", "evaluation", "comparison")):
+    if any(k in t for k in ("benchmark", "evaluation", "comparison", "randomized controlled trial", "clinical trial")):
         return "evaluation"
     if any(k in t for k in ("efficient", "accelerat", "compress", "optimiz")):
         return "optimization"
@@ -49,20 +46,11 @@ def _infer_paper_type(title: str, citations: int, published: str) -> str:
     return "application"
 
 
-def _penalize_domain(ds: float) -> float:
-    if ds < 0.25:
-        return 0.1
-    if ds < 0.35:
-        return ds * 0.3
-    return ds
-
-
 def _weighted_score(paper: dict) -> float:
     relevance = paper.get("embedding_score", 0)
     citation = _citation_score(paper.get("citation_count", 0))
     recency = _recency_score(paper.get("published", ""))
-    domain = _penalize_domain(paper.get("domain_score", 1.0))
-    return 0.40 * relevance + 0.05 * citation + 0.20 * recency + 0.35 * domain
+    return 0.70 * relevance + 0.05 * citation + 0.25 * recency
 
 
 def _mmr_select(papers: list[dict], vecs_by_title: dict, k: int, lam: float = MMR_LAMBDA) -> list[dict]:
@@ -85,29 +73,10 @@ def _mmr_select(papers: list[dict], vecs_by_title: dict, k: int, lam: float = MM
 def rank_node(state: AgentState) -> AgentState:
     papers = state["raw_search_results"]
     if not papers:
-        return {**state, "ranked_papers": [], "needs_retry": True}
-
-    query_vec = embed_texts([state["query"]])[0]
-    q_abstracts = [p.get("summary", "")[:500] or p["title"] for p in papers]
-    q_abstract_vecs = embed_texts(q_abstracts)
-
-    filtered = []
-    for i, p in enumerate(papers):
-        sim = similarity(query_vec, q_abstract_vecs[i])
-        if sim >= FULL_QUERY_THRESHOLD:
-            p["full_query_similarity"] = round(sim, 3)
-            filtered.append(p)
-
-    if not filtered:
-        return {**state, "ranked_papers": [], "needs_retry": True}
-    papers = filtered
+        return {**state, "ranked_papers": [], "needs_retry": True, "papers_below_threshold": 0}
 
     terms = state.get("search_terms") or [state.get("refined_query") or state["query"]]
     term_vecs = embed_texts(terms)
-
-    domain_full = state.get("domain_full")
-    if domain_full:
-        domain_vec = embed_texts([domain_full])[0]
 
     valid_papers = [p for p in papers if _has_valid_abstract(p)]
     invalid_papers = [p for p in papers if not _has_valid_abstract(p)]
@@ -118,27 +87,18 @@ def rank_node(state: AgentState) -> AgentState:
         abstract_vecs = embed_texts(abstracts)
         for p, vec in zip(valid_papers, abstract_vecs):
             p["embedding_score"] = round(max(similarity(tv, vec) for tv in term_vecs), 3)
-            if domain_full:
-                p["domain_score"] = round(similarity(domain_vec, vec), 3)
-            else:
-                p["domain_score"] = 1.0
             vecs_by_title[p["title"]] = vec
 
     for p in invalid_papers:
         p["embedding_score"] = 0.0
-        p["domain_score"] = 0.0
         p["_no_abstract"] = True
 
     all_papers = valid_papers + invalid_papers
-
     for p in all_papers:
         p["paper_type"] = _infer_paper_type(p["title"], p.get("citation_count", 0), p.get("published", ""))
         p["final_score"] = round(_weighted_score(p), 3)
         if p.get("_no_abstract"):
             p["final_score"] = min(p["final_score"], 0.2)
-        if p.get("_source_term") and p["embedding_score"] < MIN_TERM_MATCH_SCORE:
-            p["_weak_term_match"] = True
-            p["final_score"] = min(p["final_score"], p["embedding_score"] + WEAK_MATCH_BUFFER)
 
     seen = set()
     deduped = []
@@ -149,15 +109,21 @@ def rank_node(state: AgentState) -> AgentState:
         seen.add(norm)
         deduped.append(p)
 
-    MIN_FINAL_SCORE = 0.45
-    prefiltered = [p for p in deduped if p["final_score"] >= MIN_FINAL_SCORE][:PRE_FILTER_N]
+    prefiltered_before_threshold = deduped[:PRE_FILTER_N]
+    prefiltered = [p for p in prefiltered_before_threshold if p["final_score"] >= settings.MIN_FINAL_SCORE]
+    dropped_count = len(prefiltered_before_threshold) - len(prefiltered)
 
-    top_k = _mmr_select(prefiltered, vecs_by_title, settings.TOP_K_PAPERS) if prefiltered else []
+    target_k = min(len(prefiltered), settings.TOP_K_PAPERS_MAX)
+    top_k = _mmr_select(prefiltered, vecs_by_title, target_k) if prefiltered else []
 
-    max_score = max((p["final_score"] for p in top_k), default=0)
-    rank_needs_retry = (
-        max_score < 0.25
+    needs_retry = (
+        len(top_k) < settings.TOP_K_PAPERS_MIN
         and state.get("search_attempts", 0) < state.get("max_search_attempts", 2)
     )
 
-    return {**state, "ranked_papers": top_k, "needs_retry": state.get("needs_retry", False) or rank_needs_retry}
+    return {
+        **state,
+        "ranked_papers": top_k,
+        "needs_retry": state.get("needs_retry", False) or needs_retry,
+        "papers_below_threshold": dropped_count,
+    }

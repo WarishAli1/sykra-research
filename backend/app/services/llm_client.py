@@ -1,3 +1,4 @@
+import time
 from langchain_groq import ChatGroq
 from app.config import settings
 
@@ -17,13 +18,15 @@ class _StructuredFailoverRunner:
 
     def invoke(self, prompt, **kwargs):
         last_exc = None
-        for key in GROQ_KEYS:
+        for i, key in enumerate(GROQ_KEYS):
             try:
                 llm = ChatGroq(api_key=key, model=self.model, temperature=self.temperature)
                 return llm.with_structured_output(self.schema).invoke(prompt, **kwargs)
             except Exception as e:
                 if _is_rate_limit_error(e):
                     last_exc = e
+                    if i < len(GROQ_KEYS) - 1:
+                        time.sleep(0.5)
                     continue
                 raise
         raise last_exc or RuntimeError("All Groq keys exhausted")
@@ -39,12 +42,14 @@ class FailoverLLM:
 
     def invoke(self, prompt, **kwargs):
         last_exc = None
-        for key in GROQ_KEYS:
+        for i, key in enumerate(GROQ_KEYS):
             try:
                 return ChatGroq(api_key=key, model=self.model, temperature=self.temperature).invoke(prompt, **kwargs)
             except Exception as e:
                 if _is_rate_limit_error(e):
                     last_exc = e
+                    if i < len(GROQ_KEYS) - 1:
+                        time.sleep(0.5)
                     continue
                 raise
         raise last_exc
@@ -52,3 +57,7 @@ class FailoverLLM:
 
 def get_llm(temperature: float = 0.2):
     return FailoverLLM(temperature=temperature)
+
+
+def get_cheap_llm(temperature: float = 0.0):
+    return FailoverLLM(model="llama-3.1-8b-instant", temperature=temperature)

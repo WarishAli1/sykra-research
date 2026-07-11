@@ -43,7 +43,8 @@ def search_node(state: AgentState) -> AgentState:
         with ThreadPoolExecutor(max_workers=min(len(to_fetch) * 2, 6)) as ex:
             futures = {}
             for term in to_fetch:
-                futures[ex.submit(search_arxiv, term)] = ("arxiv", term)
+                if state.get("likely_cs_relevant", True):
+                    futures[ex.submit(search_arxiv, term)] = ("arxiv", term)
                 futures[ex.submit(search_openalex, term, 10, True)] = ("openalex", term)
 
             gathered = {term: [] for term in to_fetch}

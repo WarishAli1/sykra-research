@@ -3,11 +3,13 @@ from typing import TypedDict, Optional
 
 class AgentState(TypedDict):
     query: str
+    session_id: str
     use_uploaded_only: bool
 
     refined_query: Optional[str]
     search_terms: list[str]
     is_definitional: bool
+    likely_cs_relevant: bool
     domain_full: Optional[str]
     domain_keywords: list[str]
     mandatory_domain_keywords: Optional[list[str]]
@@ -19,8 +21,12 @@ class AgentState(TypedDict):
     ranked_papers: list[dict]
     summaries: dict[str, dict]
 
+    term_coverage: dict[str, bool]
+    papers_below_threshold: int
+
     final_answer: str
     coverage_gaps: list[str]
+    domain_caveat: Optional[str]
     citations: list[str]
 
     needs_retry: bool

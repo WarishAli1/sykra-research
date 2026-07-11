@@ -4,10 +4,15 @@ from typing import Literal, Optional
 
 class NormalizedQuery(BaseModel):
     search_terms: list[str] = Field(
-        description="1-3 distinct technical search terms — one per distinct concept named "
-        "in the query. If the query is about a single concept, return just one term."
+        description="5 distinct technical search phrases — one per distinct concept named "
+        "in the query. Vary phrasing: use full names, abbreviations, related concepts."
     )
     is_definitional: bool = Field(description="True if user wants foundational/overview understanding, not a narrow variant")
+    likely_cs_relevant: bool = Field(
+        default=True,
+        description="True if arXiv (CS/physics/math preprints) is a sensible source for this query. "
+        "False for health, medical, biology, law, social science, business, or other non-CS domains."
+    )
     domain_full: Optional[str] = Field(
         default=None,
         description="If the query explicitly mentions a scientific domain (e.g., 'NLP', 'computer vision'), provide its full name (e.g., 'natural language processing', 'computer vision'). Otherwise null."
@@ -43,9 +48,21 @@ class FinalAnswer(BaseModel):
         description="Named concepts from the query with little/no dedicated source material found — "
         "state this honestly instead of silently substituting adjacent content."
     )
+    domain_caveat: Optional[str] = Field(
+        default=None,
+        description="For health/medical/legal/financial queries: a brief honest note that this is "
+        "not verified medical/legal/financial advice and the papers found may not reflect current "
+        "clinical/legal consensus."
+    )
 
 
 class RetryDecision(BaseModel):
     should_retry: bool
     refined_query: Optional[str] = Field(default=None, description="Better search query if retrying")
     reason: str
+
+
+class FollowupAnswer(BaseModel):
+    answer: str
+    sources_used: list[str] = Field(description="Paper titles that directly informed this answer")
+    grounded: bool = Field(description="False if the retrieved chunks don't actually answer the question")

@@ -9,7 +9,9 @@ from app.agents.nodes.validate_node import validate_node
 from app.agents.nodes.rank_node import rank_node
 from app.agents.nodes.retry_node import retry_node
 from app.agents.nodes.fetch_pdf_node import fetch_pdf_node
+from app.agents.nodes.coverage_check_node import coverage_check_node
 from app.agents.nodes.summarize_node import summarize_node
+from app.agents.nodes.ingest_node import ingest_node
 from app.agents.nodes.citation_node import citation_node
 
 
@@ -40,7 +42,9 @@ def build_graph():
     graph.add_node("rank", timed("rank")(rank_node))
     graph.add_node("retry", timed("retry")(retry_node))
     graph.add_node("fetch_pdf", timed("fetch_pdf")(fetch_pdf_node))
+    graph.add_node("coverage_check", timed("coverage_check")(coverage_check_node))
     graph.add_node("summarize", timed("summarize")(summarize_node))
+    graph.add_node("ingest", timed("ingest")(ingest_node))
     graph.add_node("cite", timed("cite")(citation_node))
 
     graph.set_entry_point("normalize_query")
@@ -55,8 +59,10 @@ def build_graph():
     )
 
     graph.add_edge("retry", "search")
-    graph.add_edge("fetch_pdf", "summarize")
-    graph.add_edge("summarize", "cite")
+    graph.add_edge("fetch_pdf", "coverage_check")
+    graph.add_edge("coverage_check", "summarize")
+    graph.add_edge("summarize", "ingest")
+    graph.add_edge("ingest", "cite")
     graph.add_edge("cite", END)
 
     return graph.compile()
