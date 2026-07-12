@@ -66,3 +66,30 @@ class FollowupAnswer(BaseModel):
     answer: str
     sources_used: list[str] = Field(description="Paper titles that directly informed this answer")
     grounded: bool = Field(description="False if the retrieved chunks don't actually answer the question")
+
+
+class ComparisonAspect(BaseModel):
+    aspect: str = Field(description="e.g. 'Methodology', 'Dataset', 'Key Findings', 'Limitations'")
+    paper_values: dict[str, str] = Field(description="paper title -> value for this aspect")
+
+
+class PaperComparison(BaseModel):
+    aspects: list[ComparisonAspect]
+    overview: str = Field(description="2-3 sentence overview of the most important differences")
+    recommendation: Optional[str] = Field(
+        default=None,
+        description="If the papers represent competing approaches, a brief note on trade-offs"
+    )
+
+
+class ClusterSection(BaseModel):
+    theme: str = Field(description="Short label for what unites this group of papers")
+    content: str = Field(description="3-5 sentences of substantive content about this cluster's papers, with [paper_id] markers on every claim")
+    paper_ids: list[str]
+
+
+class ClusteredFinalAnswer(BaseModel):
+    sections: list[ClusterSection]
+    overview: str = Field(description="1-2 sentence framing of how these clusters relate to the overall query")
+    confidence: float = Field(ge=0, le=1)
+    coverage_gaps: list[str] = Field(default_factory=list)

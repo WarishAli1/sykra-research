@@ -8,6 +8,8 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     GROQ_API_KEY_2: str = ""
+    CEREBRAS_API_KEY: str = ""
+    CEREBRAS_API_KEY_2: str = ""
     CHROMA_PERSIST_DIR: str = str(_BACKEND_DIR / "app" / "db" / "vector_db")
     EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
     TOP_K_PAPERS_MAX: int = 8

@@ -6,7 +6,7 @@ from app.services.llm_client import get_llm
 
 
 def retry_node(state: AgentState) -> AgentState:
-    llm = get_llm(temperature=0.4)
+    llm = get_llm(temperature=0.4, task="light")
 
     prompt = f"""Original query: "{state['query']}" returned few or no relevant papers.
 Domain (if any): {state.get('domain_full', 'none')}

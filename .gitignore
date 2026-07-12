@@ -8,7 +8,6 @@ env/
 
 .env
 
-app/
 backend/app/db/vector_db/
 backend/app/db/pdf_cache/
 

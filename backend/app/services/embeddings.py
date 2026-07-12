@@ -1,12 +1,22 @@
-from sentence_transformers import SentenceTransformer
+import numpy as np
+from chromadb.utils import embedding_functions
 from app.config import settings
 
-_model = SentenceTransformer(settings.EMBEDDING_MODEL)
+_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+    model_name=settings.EMBEDDING_MODEL
+)
+
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    return _model.encode(texts, convert_to_numpy=True).tolist()
+    if not texts:
+        return []
+    return _ef(texts)
 
-def similarity(a: list[float], b: list[float]) -> float:
-    import numpy as np
-    a, b = np.array(a), np.array(b)
-    return float(a.dot(b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+def similarity(vec_a: list[float], vec_b: list[float]) -> float:
+    a = np.array(vec_a)
+    b = np.array(vec_b)
+    norm = np.linalg.norm(a) * np.linalg.norm(b)
+    if norm == 0:
+        return 0.0
+    return float(np.dot(a, b) / norm)

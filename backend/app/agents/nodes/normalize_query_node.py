@@ -1,11 +1,11 @@
 from langchain_core.messages import SystemMessage, HumanMessage
 from app.agents.state import AgentState
 from app.agents.schemas import NormalizedQuery
-from app.services.llm_client import get_cheap_llm
+from app.services.llm_client import get_llm
 
 
 def normalize_query_node(state: AgentState) -> AgentState:
-    llm = get_cheap_llm(temperature=0)
+    llm = get_llm(temperature=0, task="light")
     structured_llm = llm.with_structured_output(NormalizedQuery)
 
     prompt = f"""Break the query into 5 distinct search phrases that could retrieve relevant papers.
