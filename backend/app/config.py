@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     MIN_FINAL_SCORE: float = 0.55
     COVERAGE_THRESHOLD: float = 0.35
     ARXIV_MAX_RESULTS: int = 15
+    NEO4J_URI: str = ""
+    NEO4J_USER: str = "neo4j"
+    NEO4J_PASSWORD: str = ""
 
     class Config:
         env_file = str(_BACKEND_DIR / ".env")

@@ -6,7 +6,7 @@ import json
 import time
 from pathlib import Path
 
-CACHE_DIR = Path("app/db/pdf_cache")
+CACHE_DIR = Path(__file__).resolve().parent.parent / "db" / "pdf_cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 MIN_TEXT_LENGTH_THRESHOLD = 200
@@ -26,6 +26,7 @@ def _get_cache(pdf_url: str) -> dict | None:
 
 def _save_cache(pdf_url: str, result: dict):
     f = CACHE_DIR / f"{_hash_url(pdf_url)}.json"
+    f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps(result))
 
 
@@ -83,7 +84,12 @@ def download_and_extract(pdf_url: str) -> dict:
 
     t_download = time.time()
 
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except (fitz.FileDataError, RuntimeError, ValueError, Exception):
+        print(f"[pdf_timing] {pdf_url[:60]} | FAILED (invalid pdf stream)")
+        return {"text": "", "extraction_method": "failed", "char_count": 0}
+
     pages_text = [p.get_text() for p in doc]
     text = "\n".join(pages_text).strip()
     method = "pymupdf"

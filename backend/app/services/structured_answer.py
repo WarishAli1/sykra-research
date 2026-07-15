@@ -64,12 +64,15 @@ def get_followup_answer(llm, messages, question: str, context_block: str, fallba
 
     try:
         raw = llm.invoke(
-            f"Answer the question using only the excerpts below. If they don't cover it, say so honestly.\n\n"
+            f"Answer the question using only the excerpts below. If they don't cover it, answer ONLY with: 'NOT_GROUNDED'.\n\n"
             f"Question: {question}\n\nExcerpts:\n{context_block}\n\nAnswer:",
             config={"timeout": 20}
         )
-        answer_text = _extract_content(raw)
-        return FollowupAnswer(answer=answer_text, sources_used=fallback_sources, grounded=True)
+        answer_text = _extract_content(raw).strip()
+        grounded = not answer_text.upper().startswith("NOT_GROUNDED")
+        if not grounded:
+            answer_text = "The uploaded document does not contain enough information to answer this question."
+        return FollowupAnswer(answer=answer_text, sources_used=fallback_sources, grounded=grounded)
     except Exception as e:
         print(f"[followup] tier3 (plain text) failed: {type(e).__name__}: {e}")
 
