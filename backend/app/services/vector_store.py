@@ -1,14 +1,20 @@
 import hashlib
 
 import chromadb
+from chromadb.config import Settings as ChromaSettings
 from chromadb.utils import embedding_functions
 from app.config import settings
+
+
 from app.services.chunking import chunk_text
 
 
 class VectorStore:
     def __init__(self):
-        self.client = chromadb.PersistentClient(path=settings.CHROMA_PERSIST_DIR)
+        self.client = chromadb.PersistentClient(
+            path=settings.CHROMA_PERSIST_DIR,
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
         self.embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name=settings.EMBEDDING_MODEL
         )
@@ -54,6 +60,9 @@ class VectorStore:
             n_results=n_results,
             where={"session_id": session_id},
         )
+
+    def query_uploaded_documents(self, session_id: str, query: str, k: int = 5) -> dict:
+        return self.query_session(query, session_id, n_results=k)
 
     def get_session_papers(self, session_id: str) -> list[dict]:
         results = self.collection.get(where={"session_id": session_id})

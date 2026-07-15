@@ -1,10 +1,11 @@
-from typing import TypedDict, Optional
+from typing import Literal, Optional, TypedDict
 
 
 class AgentState(TypedDict):
     query: str
     session_id: str
-    use_uploaded_only: bool
+    include_uploaded: bool
+    upload_mode: Literal["none", "blend", "grounded_only"]
 
     refined_query: Optional[str]
     search_terms: list[str]
@@ -21,6 +22,8 @@ class AgentState(TypedDict):
     ranked_papers: list[dict]
     summaries: dict[str, dict]
 
+    uploaded_context: list[dict]
+
     term_coverage: dict[str, bool]
     papers_below_threshold: int
 
@@ -32,3 +35,6 @@ class AgentState(TypedDict):
     needs_retry: bool
     error: Optional[str]
     validation_results: list[str]
+
+    graph_contradictions: list[dict]
+    graph_entities: list[dict]

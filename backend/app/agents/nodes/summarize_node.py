@@ -27,11 +27,6 @@ def _flag_ungrounded_overreach(answer: str, uncovered_terms: list[str]) -> list[
     return violations
 
 
-def _count_citations(answer: str) -> int:
-    import re
-    return len(set(re.findall(r'\[(\d+)\]', answer)))
-
-
 def _is_near_duplicate(a: str, b: str, threshold: float = 0.6) -> bool:
     return SequenceMatcher(None, a.lower(), b.lower()).ratio() > threshold
 
@@ -59,7 +54,7 @@ def summarize_node(state: AgentState) -> AgentState:
         abstract = p.get("text", sanitize_abstract(p.get("summary", "")))
         if len(abstract) < 20 or "\x02" in abstract or "\x01" in abstract:
             abstract = f"[Abstract stripped for compatibility. Paper: {p['title']}]"
-        paper_parts.append(f"[paper_id={i}] Title: {p['title']}\nAbstract: {abstract[:2500]}")
+        paper_parts.append(f"[paper_id={i}] Title: {p['title']}\nAbstract: {abstract[:1500]}")
     paper_block = "\n\n".join(paper_parts)
 
     batch_messages = [
@@ -132,29 +127,24 @@ def summarize_node(state: AgentState) -> AgentState:
     n_clusters = len(clusters)
     final_prompt = f"""You are a research assistant. Answer the user's query using ONLY the paper summaries below.
 
+CRITICAL RULES FOR UPLOADED DOCUMENTS:
+- If the user uploaded a document and the query is about it, answer STRICTLY from the uploaded document. Do not use external knowledge.
+- You MUST include page numbers in your citations when referencing the uploaded document (e.g., "According to the document [Page 3]...").
+- If the uploaded document does not contain the answer, state that clearly.
+
 The following concepts HAVE supporting evidence in the retrieved papers: {covered_terms or "none"}
 The following concepts DO NOT have supporting evidence in the retrieved papers: {uncovered_terms or "none"}
 
-MANDATORY CITATION RULE: Every substantive claim in your answer MUST be immediately
-followed by its source marker in the form [paper_id], e.g. "CNNs use convolutional
-layers to extract spatial features [2]." Do not write any factual claim without a
-[paper_id] marker attached. If you cannot attach a marker to a claim, do not include
-that claim.
+Write a clear, concept-first explanation — not a paper-by-paper inventory.
+Organise your answer around the main themes, using the pre-grouped clusters as a guide.
+For each concept that is **not** covered, simply state: "The retrieved papers do not contain information about <concept>."
+Do not include any inline citation markers (like [paper_id]). The full list of sources will be provided separately.
 
 The papers have been pre-grouped into {n_clusters} thematic clusters below.
 Produce exactly {n_clusters} sections in your response — one per cluster, no more, no fewer.
-Each section's content must be 3-5 sentences and substantively discuss what's specific
-to THAT cluster's papers, with a [paper_id] marker on every claim.
+Each section should be a cohesive paragraph of 3-5 sentences, not a list of paper summaries.
 
 This query has multiple parts: {parts_str}
-
-Rules:
-- Only write substantive claims about concepts listed as HAVING evidence.
-- For each concept listed as NOT having evidence, write exactly this sentence and nothing more
-  about that concept: "The retrieved papers do not contain information about {{concept}}."
-  Do not add explanation, inference, or comparison involving that concept afterward.
-- If this query touches health, legal, financial, or safety-critical topics, be extra conservative:
-  only state claims with direct, explicit support in the summaries below.
 
 User query: {state['query']}
 
@@ -227,40 +217,7 @@ For coverage_gaps, use exactly this list: {uncovered_terms}
         print("[WARN] overview duplicates first section content, dropping overview")
         final.overview = ""
 
-    # --- Verification pass: check citation coverage ---
     answer_text = _stitch_answer(final)
-    unique_cited = _count_citations(answer_text)
-    min_expected = max(3, len(papers) // 2)
-    if unique_cited < min_expected and len(papers) >= 3 and final.sections:
-        print(f"[summarize] verification: only {unique_cited}/{len(papers)} papers cited, regenerating")
-        try:
-            verify_prompt = final_prompt + f"""
-
-Your previous draft only cited {unique_cited} out of {len(papers)} papers across {n_clusters} clusters.
-This is not acceptable. You MUST rewrite the answer to substantively engage with
-and cite at least {min_expected} different papers using [paper_id] markers.
-Every factual claim must have a [paper_id] immediately after it.
-"""
-            verify_messages = [
-                SystemMessage(content=f"Respond with ONLY a function call to ClusteredFinalAnswer with exactly {n_clusters} sections."),
-                HumanMessage(content=verify_prompt),
-            ]
-            verified: ClusteredFinalAnswer = llm.with_structured_output(ClusteredFinalAnswer).invoke(
-                verify_messages, config={"timeout": 20}
-            )
-            verified.coverage_gaps = uncovered_terms
-            if verified.sections and _is_near_duplicate(verified.overview, verified.sections[0].content):
-                verified.overview = ""
-            verified_answer = _stitch_answer(verified)
-            verified_count = _count_citations(verified_answer)
-            if verified_count > unique_cited:
-                print(f"[summarize] verification improved: {verified_count}/{len(papers)} papers cited")
-                final = verified
-                answer_text = verified_answer
-            else:
-                print(f"[summarize] verification did not improve, keeping original")
-        except Exception:
-            print("[summarize] verification failed, keeping original")
 
     overreach = _flag_ungrounded_overreach(answer_text, uncovered_terms)
     if overreach:

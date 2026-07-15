@@ -1,3 +1,4 @@
+import time
 from langchain_groq import ChatGroq
 from langchain_cerebras import ChatCerebras
 from app.config import settings
@@ -5,7 +6,8 @@ from app.config import settings
 
 def _is_rate_limit_error(e: Exception) -> bool:
     msg = str(e).lower()
-    return "rate_limit" in msg or "429" in msg or "quota" in msg or "capacity" in msg
+    return ("rate_limit" in msg or "429" in msg or "413" in msg or
+            "quota" in msg or "capacity" in msg or "too many requests" in msg)
 
 
 _call_counts = {"groq_key1": 0, "groq_key2": 0, "cerebras_key1": 0, "cerebras_key2": 0}
@@ -16,11 +18,13 @@ def _build_providers(temperature: float, preferred_order: list[str] | None = Non
 
     if settings.GROQ_API_KEY:
         all_providers["groq_key1"] = lambda: ChatGroq(
-            api_key=settings.GROQ_API_KEY, model="llama-3.3-70b-versatile", temperature=temperature
+            api_key=settings.GROQ_API_KEY, model="llama-3.3-70b-versatile",
+            temperature=temperature, request_timeout=30
         )
     if settings.GROQ_API_KEY_2:
         all_providers["groq_key2"] = lambda: ChatGroq(
-            api_key=settings.GROQ_API_KEY_2, model="llama-3.3-70b-versatile", temperature=temperature
+            api_key=settings.GROQ_API_KEY_2, model="llama-3.3-70b-versatile",
+            temperature=temperature, request_timeout=30
         )
     if settings.CEREBRAS_API_KEY:
         all_providers["cerebras_key1"] = lambda: ChatCerebras(
@@ -43,7 +47,8 @@ class _StructuredFailoverRunner:
 
     def invoke(self, prompt, **kwargs):
         last_exc = None
-        for name, build in _build_providers(self.temperature, self.preferred_order):
+        providers = _build_providers(self.temperature, self.preferred_order)
+        for attempt, (name, build) in enumerate(providers):
             try:
                 result = build().with_structured_output(self.schema).invoke(prompt, **kwargs)
                 _call_counts[name] += 1
@@ -51,6 +56,12 @@ class _StructuredFailoverRunner:
             except Exception as e:
                 print(f"[llm_client] {name} failed: {type(e).__name__}: {e}")
                 last_exc = e
+                if _is_rate_limit_error(e):
+                    wait = min(2 ** (attempt + 1), 10)
+                    print(f"[llm_client] Rate limited on {name}, waiting {wait}s...")
+                    time.sleep(wait)
+                else:
+                    time.sleep(0.5)
                 continue
         raise last_exc or RuntimeError("All LLM providers exhausted")
 
@@ -65,7 +76,8 @@ class FailoverLLM:
 
     def invoke(self, prompt, **kwargs):
         last_exc = None
-        for name, build in _build_providers(self.temperature, self.preferred_order):
+        providers = _build_providers(self.temperature, self.preferred_order)
+        for attempt, (name, build) in enumerate(providers):
             try:
                 result = build().invoke(prompt, **kwargs)
                 _call_counts[name] += 1
@@ -73,13 +85,19 @@ class FailoverLLM:
             except Exception as e:
                 print(f"[llm_client] {name} failed: {type(e).__name__}: {e}")
                 last_exc = e
+                if _is_rate_limit_error(e):
+                    wait = min(2 ** (attempt + 1), 10)
+                    print(f"[llm_client] Rate limited on {name}, waiting {wait}s...")
+                    time.sleep(wait)
+                else:
+                    time.sleep(0.5)
                 continue
         raise last_exc or RuntimeError("All LLM providers exhausted")
 
 
 ORDER_MAP = {
     "light": ["cerebras_key1", "cerebras_key2", "groq_key1", "groq_key2"],
-    "default": ["groq_key1", "cerebras_key1", "groq_key2", "cerebras_key2"],
+    "default": ["groq_key1", "groq_key2", "cerebras_key1", "cerebras_key2"],
 }
 
 
