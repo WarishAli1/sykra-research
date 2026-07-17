@@ -1,3 +1,14 @@
+export type ResponseMode = "normal" | "researched";
+
+export interface ReferenceEntry {
+  id: number;
+  title: string;
+  authors: string[];
+  link: string;
+  published?: string | null;
+  source: string;
+}
+
 export type Paper = {
   title: string;
   authors: string[];
@@ -5,6 +16,9 @@ export type Paper = {
   link: string;
   published?: string | null;
   relevance_score?: number | null;
+  source?: string;
+  is_uploaded?: boolean;
+  file_url?: string | null;
 };
 
 export type ChatTurn = {
@@ -18,6 +32,8 @@ export type ChatTurn = {
   domainCaveat?: string | null;
   papersBelowThreshold?: number;
   kind?: "chat" | "followup";
+  references?: ReferenceEntry[];
+  responseMode?: ResponseMode;
 };
 
 export type ChatRequest = {
@@ -25,6 +41,7 @@ export type ChatRequest = {
   session_id?: string;
   upload_mode?: "none" | "blend" | "grounded_only";
   include_uploaded?: boolean;
+  response_mode: ResponseMode;
 };
 
 export type ChatResponse = {
@@ -37,25 +54,30 @@ export type ChatResponse = {
   papers_below_threshold: number;
   graph_contradictions?: Array<Record<string, unknown>>;
   graph_entities?: Array<Record<string, unknown>>;
+  response_mode: ResponseMode;
+  references: ReferenceEntry[];
 };
 
 export type FollowupRequest = {
   session_id: string;
   question: string;
+  response_mode: ResponseMode;
 };
 
 export type FollowupResponse = {
   answer: string;
   sources: string[];
+  references: ReferenceEntry[];
 };
 
 export type UploadResponse = {
   filename: string;
   chunks_indexed: number;
   status: string;
+  file_url: string;
+  link: string;
 };
 
-// --- Graph / /research API ---
 
 export type ResearchRequest = {
   query: string;
@@ -108,7 +130,15 @@ export type ContradictionsResponse = {
 export type SessionPapersResponse = {
   papers: GraphPaperNode[];
 };
-
 export type GraphNode = { id: string; name: string; type: string; val: number };
 export type GraphLink = { source: string; target: string; type: string };
 export type FullGraphData = { nodes: GraphNode[]; links: GraphLink[] };
+
+export interface PdfExportRequest {
+  session_id: string;
+  format: "standard" | "latex";
+  answer: string;
+  references: ReferenceEntry[];
+  title?: string;
+  turn_id?: string;
+}

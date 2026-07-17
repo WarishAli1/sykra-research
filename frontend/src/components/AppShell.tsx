@@ -49,6 +49,20 @@ export function AppShell() {
   async function handleUpload(file: File) {
     const res = await api.uploadPdf(file, sessionId);
     setUploadedFilename(res.filename);
+
+    handleNewPapers([
+      {
+        title: res.filename,
+        authors: [],
+        summary: "",
+        link: res.link,
+        published: null,
+        relevance_score: null,
+        source: "user_upload",
+        is_uploaded: true,
+        file_url: res.file_url,
+      },
+    ]);
   }
 
   useEffect(() => {

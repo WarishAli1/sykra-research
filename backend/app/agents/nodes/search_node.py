@@ -1,46 +1,39 @@
 import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
-
 from app.agents.state import AgentState
 from app.services.paper_search import search_arxiv, search_openalex
 from app.services.embeddings import embed_texts, similarity
 
 _query_cache: dict[str, tuple[float, list[dict]]] = {}
 CACHE_TTL_SECONDS = 3600
-MAX_PER_TERM = 50
-MAX_TOTAL_CANDIDATES = 100
-
+MAX_PER_TERM = 30 # Reduced per term since we have more terms
+MAX_TOTAL_CANDIDATES = 150
 
 def _get_cached(query: str) -> list[dict] | None:
     key = hashlib.sha256(query.lower().encode()).hexdigest()
     entry = _query_cache.get(key)
-    if entry and (time.time() - entry[0]) < CACHE_TTL_SECONDS:
-        return entry[1]
+    if entry and (time.time() - entry[0]) < CACHE_TTL_SECONDS: return entry[1]
     return None
-
 
 def _set_cached(query: str, results: list[dict]):
     key = hashlib.sha256(query.lower().encode()).hexdigest()
     _query_cache[key] = (time.time(), results)
 
-
 def search_node(state: AgentState) -> AgentState:
-    terms = list(dict.fromkeys(
-        state.get("search_terms") or [state.get("refined_query") or state["query"]]
-    ))
+    # Use the expanded search queries from the planning node
+    terms = state.get("search_queries") or state.get("search_terms") or [state["query"]]
+    terms = list(dict.fromkeys(terms))
 
     to_fetch = []
     per_term_results = {}
     for term in terms:
         cached = _get_cached(term)
-        if cached is not None:
-            per_term_results[term] = cached
-        else:
-            to_fetch.append(term)
+        if cached is not None: per_term_results[term] = cached
+        else: to_fetch.append(term)
 
     if to_fetch:
-        with ThreadPoolExecutor(max_workers=min(len(to_fetch) * 2, 6)) as ex:
+        with ThreadPoolExecutor(max_workers=min(len(to_fetch) * 2, 8)) as ex:
             futures = {}
             for term in to_fetch:
                 if state.get("likely_cs_relevant", True):
@@ -60,36 +53,47 @@ def search_node(state: AgentState) -> AgentState:
             per_term_results[term] = results
             _set_cached(term, results)
 
+    # Merge and Deduplicate using IDs and Title
+    seen_ids = set()
+    seen_titles = set()
     all_results = {}
+
     for term, results in per_term_results.items():
-        if not results:
-            continue
+        if not results: continue
+
+        # Light semantic filter per term to avoid garbage
         term_vec = embed_texts([term])[0]
-        abstracts = [p.get("summary", "")[:500] or p["title"] for p in results]
+        abstracts = [p.get("summary", "")[:300] or p["title"] for p in results]
         abstract_vecs = embed_texts(abstracts)
-        scored = []
+
         for p, vec in zip(results, abstract_vecs):
             sim = similarity(term_vec, vec)
-            if sim >= 0.4:
-                scored.append((sim, p))
-        candidates = [p for _, p in sorted(scored, key=lambda x: x[0], reverse=True)]
-        term_lower = term.lower()
-        is_single_word = len(term_lower.split()) == 1
-        for p in candidates[:MAX_PER_TERM]:
-            if not p.get("title", "").strip():
-                continue
-            if is_single_word and term_lower not in p["title"].lower():
-                continue
-            key = p["title"].strip().lower()
-            if key not in all_results or p.get("citation_count", 0) > all_results[key].get("citation_count", 0):
-                p["_source_term"] = term
-                all_results[key] = p
+            if sim < 0.35: continue # Slightly relaxed threshold since we have more queries
+
+            arxiv_id = p.get("arxiv_id")
+            openalex_id = p.get("openalex_id")
+            norm_title = p.get("title", "").strip().lower()
+
+            if not norm_title: continue
+
+            # Deduplication logic
+            if arxiv_id and arxiv_id in seen_ids: continue
+            if openalex_id and openalex_id in seen_ids: continue
+            if norm_title in seen_titles: continue
+
+            if arxiv_id: seen_ids.add(arxiv_id)
+            if openalex_id: seen_ids.add(openalex_id)
+            seen_titles.add(norm_title)
+
+            p["_source_term"] = term
+            p["_initial_sim"] = sim
+            all_results[norm_title] = p
 
     combined = list(all_results.values())[:MAX_TOTAL_CANDIDATES]
 
+    # Domain keyword filtering (kept from original)
     mandatory_kws = state.get("mandatory_domain_keywords")
     domain_full = state.get("domain_full", "")
-
     if mandatory_kws:
         hard_filtered = [
             p for p in combined

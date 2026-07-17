@@ -7,6 +7,7 @@ import type {
   FollowupRequest,
   FollowupResponse,
   FullGraphData,
+  PdfExportRequest,
   ResearchRequest,
   ResearchResponse,
   SessionPapersResponse,
@@ -49,6 +50,23 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
   }
 
   return (await response.json()) as T;
+}
+
+async function requestBlob(path: string, init: RequestInit): Promise<Blob> {
+  const response = await fetch(`${API_BASE_URL}${path}`, { ...init });
+
+  if (!response.ok) {
+    let message = `Request failed with status ${response.status}`;
+    try {
+      const data = (await response.json()) as { detail?: string };
+      if (typeof data.detail === "string") message = data.detail;
+    } catch {
+      // response wasn't JSON (likely a real PDF error page) — keep default message
+    }
+    throw new ApiError(message, response.status);
+  }
+
+  return await response.blob();
 }
 
 function queryString(params: Record<string, string | undefined>): string {
@@ -126,6 +144,14 @@ export const api = {
   getFullGraph(sessionId: string): Promise<FullGraphData> {
     return request<FullGraphData>(`/graph/${encodeURIComponent(sessionId)}/full`, {
       method: "GET",
+    });
+  },
+
+  exportPdf(payload: PdfExportRequest): Promise<Blob> {
+    return requestBlob("/export/pdf", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
   },
 };

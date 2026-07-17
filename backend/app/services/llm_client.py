@@ -18,12 +18,12 @@ def _build_providers(temperature: float, preferred_order: list[str] | None = Non
 
     if settings.GROQ_API_KEY:
         all_providers["groq_key1"] = lambda: ChatGroq(
-            api_key=settings.GROQ_API_KEY, model="llama-3.3-70b-versatile",
+            api_key=settings.GROQ_API_KEY, model="openai/gpt-oss-120b",
             temperature=temperature, request_timeout=30
         )
     if settings.GROQ_API_KEY_2:
         all_providers["groq_key2"] = lambda: ChatGroq(
-            api_key=settings.GROQ_API_KEY_2, model="llama-3.3-70b-versatile",
+            api_key=settings.GROQ_API_KEY_2, model="openai/gpt-oss-120b",
             temperature=temperature, request_timeout=30
         )
     if settings.CEREBRAS_API_KEY:
