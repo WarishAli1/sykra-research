@@ -1,12 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Loader2 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { api } from "@/lib/api";
 import type { FullGraphData } from "@/lib/types";
 
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
+
+const NODE_COLORS: Record<string, string> = {
+  paper: "#6366f1",
+  concept: "#10b981",
+  method: "#f59e0b",
+};
 
 export function GraphView({ sessionId }: { sessionId: string }) {
   const [graphData, setGraphData] = useState<FullGraphData | null>(null);
@@ -20,6 +26,76 @@ export function GraphView({ sessionId }: { sessionId: string }) {
       .catch(console.error)
       .finally(() => setLoading(false));
   }, [sessionId]);
+
+  const paintNode = useCallback((node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
+    const radius = node.type === "paper" ? 6 : 4;
+    const color = NODE_COLORS[node.type] ?? "#94a3b8";
+
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI, false);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.15)";
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+
+    const fontSize = Math.max(3.2, 11 / globalScale);
+    const rawLabel: string = node.name ?? "";
+    const maxChars = node.type === "paper" ? 28 : 18;
+    const label = rawLabel.length > maxChars ? rawLabel.slice(0, maxChars - 1) + "\u2026" : rawLabel;
+
+    ctx.font = `${node.type === "paper" ? "600" : "400"} ${fontSize}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+
+    const textWidth = ctx.measureText(label).width;
+    const padX = 2, padY = 1;
+    ctx.fillStyle = "rgba(255,255,255,0.82)";
+    ctx.fillRect(
+      node.x - textWidth / 2 - padX,
+      node.y + radius + 1,
+      textWidth + padX * 2,
+      fontSize + padY * 2
+    );
+
+    ctx.fillStyle = "#1e1e2e";
+    ctx.fillText(label, node.x, node.y + radius + 1 + padY);
+
+    node.__bckgDimensions = [textWidth + padX * 2, fontSize + padY * 2];
+  }, []);
+
+  const paintNodePointerArea = useCallback((node: any, color: string, ctx: CanvasRenderingContext2D) => {
+    const radius = node.type === "paper" ? 6 : 4;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, radius + 2, 0, 2 * Math.PI, false);
+    ctx.fill();
+  }, []);
+
+  const paintLink = useCallback((link: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
+    const start = link.source;
+    const end = link.target;
+    if (typeof start !== "object" || typeof end !== "object") return;
+
+    const midX = (start.x + end.x) / 2;
+    const midY = (start.y + end.y) / 2;
+
+    const fontSize = Math.max(2.6, 8 / globalScale);
+    const label = link.type ?? "";
+    if (!label) return;
+
+    ctx.font = `${fontSize}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    const textWidth = ctx.measureText(label).width;
+    const padX = 1.5, padY = 0.5;
+    ctx.fillStyle = "rgba(255,255,255,0.75)";
+    ctx.fillRect(midX - textWidth / 2 - padX, midY - fontSize / 2 - padY, textWidth + padX * 2, fontSize + padY * 2);
+
+    ctx.fillStyle = link.type === "cites" ? "#4f46e5" : "#64748b";
+    ctx.fillText(label, midX, midY);
+  }, []);
 
   if (loading)
     return (
@@ -41,15 +117,24 @@ export function GraphView({ sessionId }: { sessionId: string }) {
       <ForceGraph2D
         graphData={graphData}
         nodeAutoColorBy="type"
-        nodeLabel={(node: any) =>
-          `<div class="text-xs bg-paper p-1 rounded shadow">${node.name}</div>`
-        }
+        nodeCanvasObject={paintNode}
+        nodePointerAreaPaint={paintNodePointerArea}
+        linkCanvasObject={paintLink}
+        linkCanvasObjectMode={() => "after"}
         linkDirectionalArrowLength={6}
         linkDirectionalArrowRelPos={0.9}
         linkColor={(link: any) => (link.type === "cites" ? "#6366f1" : "#94a3b8")}
         width={800}
         height={600}
       />
+      <div className="flex items-center gap-4 px-3 py-2 text-[10.5px] text-ink-soft border-t border-line">
+        {Object.entries(NODE_COLORS).map(([type, color]) => (
+          <span key={type} className="flex items-center gap-1">
+            <span className="h-2 w-2 rounded-full" style={{ background: color }} />
+            {type}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

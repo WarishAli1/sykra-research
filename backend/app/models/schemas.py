@@ -7,6 +7,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     upload_mode: Literal["none", "blend", "grounded_only"] = "none"
     include_uploaded: bool = False
+    response_mode: Literal["normal", "researched"] = "normal"
 
 
 class PaperResult(BaseModel):
@@ -16,6 +17,9 @@ class PaperResult(BaseModel):
     link: str
     published: Optional[str] = None
     relevance_score: Optional[float] = None
+    source: Literal["arxiv", "openalex", "user_upload", "unknown"] = "unknown"
+    is_uploaded: bool = False
+    file_url: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -28,19 +32,46 @@ class ChatResponse(BaseModel):
     papers_below_threshold: int = 0
     graph_contradictions: list[dict] = []
     graph_entities: list[dict] = []
+    response_mode: Literal["normal", "researched"] = "normal"
+    references: list["ReferenceEntry"] = []
+
+
+class ReferenceEntry(BaseModel):
+    id: int
+    title: str
+    authors: list[str]
+    link: str
+    published: Optional[str] = None
+    source: str = "unknown"
 
 
 class FollowupRequest(BaseModel):
     session_id: str
     question: str = Field(..., min_length=3)
+    response_mode: Literal["normal", "researched"] = "normal"
 
 
 class FollowupResponse(BaseModel):
     answer: str
     sources: list[str]
+    references: list[ReferenceEntry] = []
 
 
 class UploadResponse(BaseModel):
     filename: str
     chunks_indexed: int
     status: str
+    file_url: str
+    link: str
+
+
+class PdfExportRequest(BaseModel):
+    session_id: str
+    format: Literal["latex", "standard"] = "standard"
+    turn_id: Optional[str] = None
+    title: Optional[str] = None
+    answer: str
+    references: list[ReferenceEntry] = []
+
+
+ChatResponse.model_rebuild()

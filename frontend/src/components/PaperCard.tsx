@@ -34,15 +34,22 @@ export function PaperCard({
       </p>
 
       <div className="mt-3 flex items-center justify-between">
-        <RelevanceStack score={paper.relevance_score} />
-        {paper.link && (
+        <div className="flex items-center gap-2">
+          <RelevanceStack score={paper.relevance_score} />
+          {paper.is_uploaded && (
+            <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+              Uploaded
+            </span>
+          )}
+        </div>
+        {(paper.link || paper.file_url) && (
           <a
-            href={paper.link}
+            href={paper.file_url ?? paper.link}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
             className="flex items-center gap-1 text-[11.5px] font-medium text-indigo hover:text-indigo-dark"
           >
-            Open <ExternalLink className="h-3 w-3" />
+            {paper.is_uploaded ? "Open PDF" : "View source"} <ExternalLink className="h-3 w-3" />
           </a>
         )}
       </div>

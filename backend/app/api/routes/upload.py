@@ -5,10 +5,12 @@ import fitz
 from PIL import Image
 import pytesseract
 from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse
 
 from app.models.schemas import UploadResponse
 from app.services.vector_store import vector_store
 from app.services.graph_store import graph_store
+from app.config import settings
 
 router = APIRouter()
 UPLOAD_DIR = "uploads"
@@ -16,6 +18,8 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 _SCANNED_PAGE_CHAR_THRESHOLD = 50
 _DPI = 150
+
+_BACKEND_PUBLIC_URL = getattr(settings, "BACKEND_PUBLIC_URL", "http://localhost:8000")
 
 
 def _is_scanned_page(text: str) -> bool:
@@ -79,12 +83,18 @@ def extract_text_from_pdf(content: bytes) -> dict:
     }
 
 
+def _safe_filename(filename: str) -> str:
+    base = os.path.basename(filename)
+    return re.sub(r"[^\w\-. ]", "_", base)
+
+
 @router.post("/upload", response_model=UploadResponse)
 async def upload_pdf(file: UploadFile = File(...), session_id: str = "default"):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
-    print(f"[upload] Processing file: {file.filename} for session: {session_id}")
+    safe_name = _safe_filename(file.filename)
+    print(f"[upload] Processing file: {safe_name} for session: {session_id}")
 
     content = await file.read()
 
@@ -101,15 +111,16 @@ async def upload_pdf(file: UploadFile = File(...), session_id: str = "default"):
 
     session_dir = os.path.join(UPLOAD_DIR, session_id)
     os.makedirs(session_dir, exist_ok=True)
-    file_path = os.path.join(session_dir, file.filename)
+    file_path = os.path.join(session_dir, safe_name)
     with open(file_path, "wb") as f:
         f.write(content)
 
-    file_url = f"http://localhost:8000/api/uploads/{session_id}/{file.filename}"
+    file_url = f"{_BACKEND_PUBLIC_URL}/api/uploads/{session_id}/{safe_name}"
 
     paper = {
-        "title": file.filename,
+        "title": safe_name,
         "link": file_url,
+        "file_url": file_url,
         "text": text,
         "summary": text[:500],
         "source": "user_upload",
@@ -123,7 +134,25 @@ async def upload_pdf(file: UploadFile = File(...), session_id: str = "default"):
     chunk_count = max(len(text.split()) // 500, 1)
 
     return UploadResponse(
-        filename=file.filename,
+        filename=safe_name,
         chunks_indexed=chunk_count,
-        status="indexed"
+        status="indexed",
+        file_url=file_url,
+        link=file_url,
     )
+
+
+@router.get("/uploads/{session_id}/{filename}")
+async def serve_uploaded_pdf(session_id: str, filename: str):
+    """This route did not previously exist — file_url pointed at it but nothing
+    served it, so 'open PDF' from the Library always 404'd. Path components are
+    taken as-is from the URL; combined with _safe_filename() at write time, and
+    os.path.basename() here, this blocks '../' traversal on read."""
+    safe_session = os.path.basename(session_id)
+    safe_name = os.path.basename(filename)
+    file_path = os.path.join(UPLOAD_DIR, safe_session, safe_name)
+
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="File not found.")
+
+    return FileResponse(file_path, media_type="application/pdf", filename=safe_name)

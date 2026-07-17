@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, Paperclip, Loader2, Sparkles, Network } from "lucide-react";
+import { ArrowUp, Paperclip, Loader2, Sparkles, Network, Microscope } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import type { ChatTurn, Paper } from "@/lib/types";
 import { ChatMessage } from "./ChatMessage";
@@ -28,6 +28,7 @@ export function ChatPanel({
   const [error, setError] = useState<string | null>(null);
   const [uploadMode, setUploadMode] = useState<"none" | "blend" | "grounded_only">("none");
   const [researchMode, setResearchMode] = useState(false);
+  const [responseMode, setResponseMode] = useState<"normal" | "researched">("normal");
   const [uploading, setUploading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -97,6 +98,7 @@ export function ChatPanel({
             session_id: sessionId,
             upload_mode: uploadMode,
             include_uploaded: uploadMode !== "none",
+            response_mode: responseMode,
           });
           onNewPapers(res.papers ?? []);
           setTurns((t) => [
@@ -110,12 +112,18 @@ export function ChatPanel({
               coverageGaps: res.coverage_gaps,
               domainCaveat: res.domain_caveat,
               papersBelowThreshold: res.papers_below_threshold,
+              references: res.references,
+              responseMode: res.response_mode,
               kind: "chat",
             },
           ]);
         }
       } else {
-        const res = await api.followup({ session_id: sessionId, question: query });
+        const res = await api.followup({
+          session_id: sessionId,
+          question: query,
+          response_mode: responseMode,
+        });
         setTurns((t) => [
           ...t,
           {
@@ -123,6 +131,8 @@ export function ChatPanel({
             id: crypto.randomUUID(),
             text: res.answer,
             sources: res.sources,
+            references: res.references,
+            responseMode: responseMode,
             kind: "followup",
           },
         ]);
@@ -175,6 +185,32 @@ export function ChatPanel({
               </select>
             </div>
           )}
+
+          <div className="flex items-center rounded-full bg-paper-dim p-0.5 text-[11px]">
+            <button
+              onClick={() => setResponseMode("normal")}
+              disabled={hasConversation}
+              className={`rounded-full px-2.5 py-1 font-medium transition-colors disabled:opacity-50 ${
+                responseMode === "normal" ? "bg-indigo text-ink shadow-sm" : "text-ink-soft hover:text-ink"
+              }`}
+              aria-pressed={responseMode === "normal"}
+            >
+              Normal
+            </button>
+            <button
+              onClick={() => setResponseMode("researched")}
+              disabled={hasConversation}
+              className={`flex items-center gap-1 rounded-full px-2.5 py-1 font-medium transition-colors disabled:opacity-50 ${
+                responseMode === "researched" ? "bg-indigo text-white shadow-sm" : "text-ink-soft hover:text-ink"
+              }`}
+              aria-pressed={responseMode === "researched"}
+              title="Full structured report with inline citations and references"
+            >
+              <Microscope className="h-3 w-3" />
+              Researched
+            </button>
+          </div>
+
           <button
             onClick={() => {
               setResearchMode((prev) => !prev);
@@ -200,12 +236,13 @@ export function ChatPanel({
             <p className="font-serif text-[15px] text-ink mb-1">Ask about the research</p>
             <p className="text-[12.5px] text-ink-soft max-w-[220px]">
               Search papers, ask follow-ups, or upload a PDF to ground answers in it.
+              {" "}Toggle <b>Researched</b> for a full detailed report with references.
             </p>
           </div>
         )}
 
         {turns.map((t) => (
-          <ChatMessage key={t.id} turn={t} />
+          <ChatMessage key={t.id} turn={t} sessionId={sessionId} />
         ))}
 
         {loading && (
@@ -215,7 +252,9 @@ export function ChatPanel({
               ? "Finding an answer in this session\u2026"
               : researchMode
                 ? "Running the research pipeline and building the graph\u2026"
-                : "Searching papers\u2026"}
+                : responseMode === "researched"
+                  ? "Compiling a full researched report\u2026"
+                  : "Searching papers\u2026"}
           </div>
         )}
 

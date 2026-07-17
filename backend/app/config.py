@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
     TOP_K_PAPERS_MAX: int = 8
     TOP_K_PAPERS_MIN: int = 3
-    MIN_FINAL_SCORE: float = 0.55
+    MIN_FINAL_SCORE: float = 0.42
     COVERAGE_THRESHOLD: float = 0.35
     ARXIV_MAX_RESULTS: int = 15
     NEO4J_URI: str = ""
