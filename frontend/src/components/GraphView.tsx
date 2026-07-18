@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Loader2 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { api } from "@/lib/api";
@@ -17,6 +17,8 @@ const NODE_COLORS: Record<string, string> = {
 export function GraphView({ sessionId }: { sessionId: string }) {
   const [graphData, setGraphData] = useState<FullGraphData | null>(null);
   const [loading, setLoading] = useState(true);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [dims, setDims] = useState({ width: 800, height: 600 });
 
   useEffect(() => {
     setLoading(true);
@@ -26,6 +28,16 @@ export function GraphView({ sessionId }: { sessionId: string }) {
       .catch(console.error)
       .finally(() => setLoading(false));
   }, [sessionId]);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => setDims({ width: el.clientWidth, height: el.clientHeight });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [graphData]);
 
   const paintNode = useCallback((node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
     const radius = node.type === "paper" ? 6 : 4;
@@ -112,22 +124,26 @@ export function GraphView({ sessionId }: { sessionId: string }) {
       </div>
     );
 
+  const LEGEND_HEIGHT = 33;
+
   return (
-    <div className="w-full h-full min-h-[400px] bg-paper-dim/30">
-      <ForceGraph2D
-        graphData={graphData}
-        nodeAutoColorBy="type"
-        nodeCanvasObject={paintNode}
-        nodePointerAreaPaint={paintNodePointerArea}
-        linkCanvasObject={paintLink}
-        linkCanvasObjectMode={() => "after"}
-        linkDirectionalArrowLength={6}
-        linkDirectionalArrowRelPos={0.9}
-        linkColor={(link: any) => (link.type === "cites" ? "#6366f1" : "#94a3b8")}
-        width={800}
-        height={600}
-      />
-      <div className="flex items-center gap-4 px-3 py-2 text-[10.5px] text-ink-soft border-t border-line">
+    <div className="w-full h-full min-h-[400px] bg-paper-dim/30 flex flex-col">
+      <div ref={containerRef} className="flex-1 min-h-0">
+        <ForceGraph2D
+          graphData={graphData}
+          nodeAutoColorBy="type"
+          nodeCanvasObject={paintNode}
+          nodePointerAreaPaint={paintNodePointerArea}
+          linkCanvasObject={paintLink}
+          linkCanvasObjectMode={() => "after"}
+          linkDirectionalArrowLength={6}
+          linkDirectionalArrowRelPos={0.9}
+          linkColor={(link: any) => (link.type === "cites" ? "#6366f1" : "#94a3b8")}
+          width={dims.width}
+          height={Math.max(dims.height - LEGEND_HEIGHT, 200)}
+        />
+      </div>
+      <div className="flex items-center gap-4 px-3 py-2 text-[10.5px] text-ink-soft border-t border-line shrink-0">
         {Object.entries(NODE_COLORS).map(([type, color]) => (
           <span key={type} className="flex items-center gap-1">
             <span className="h-2 w-2 rounded-full" style={{ background: color }} />

@@ -10,10 +10,8 @@ import {
   ExternalLink,
   AlertTriangle,
   RefreshCw,
-  Orbit,
 } from "lucide-react";
 import { useResearchGraph } from "@/lib/useResearchGraph";
-import { GraphView } from "@/components/GraphView";
 
 export function ExplorePanel({ projectId }: { projectId: string }) {
   const {
@@ -31,7 +29,6 @@ export function ExplorePanel({ projectId }: { projectId: string }) {
     closeFocus,
   } = useResearchGraph(projectId);
   const [openCluster, setOpenCluster] = useState<string | null>(null);
-  const [visualMode, setVisualMode] = useState(false);
 
   // ---- Focus mode (single paper + direct citation network) ----
   if (focusLink) {
@@ -136,41 +133,12 @@ export function ExplorePanel({ projectId }: { projectId: string }) {
     );
   }
 
-  // ---- Visual graph mode ----
-  if (visualMode) {
-    return (
-      <div className="flex h-full flex-col">
-        <div className="flex items-center gap-2 border-b border-line px-4 py-3">
-          <Network className="h-4 w-4 text-indigo" />
-          <span className="font-serif text-[15px] font-semibold text-ink">Explore</span>
-          <button
-            onClick={() => setVisualMode(false)}
-            className="ml-auto flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium bg-paper-dim text-ink-soft hover:text-ink"
-          >
-            <Orbit className="h-3 w-3" />
-            List
-          </button>
-        </div>
-        <div className="flex-1 min-h-0">
-          <GraphView sessionId={projectId} />
-        </div>
-      </div>
-    );
-  }
-
   // ---- Macro view (clusters + known contradictions) ----
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 border-b border-line px-4 py-3">
         <Network className="h-4 w-4 text-indigo" />
         <span className="font-serif text-[15px] font-semibold text-ink">Explore</span>
-        <button
-          onClick={() => setVisualMode(true)}
-          className="ml-auto flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium bg-paper-dim text-ink-soft hover:text-ink"
-        >
-          <Orbit className="h-3 w-3" />
-          Visual
-        </button>
         <button
           onClick={loadOverview}
           aria-label="Refresh graph"

@@ -77,7 +77,7 @@ export function LibraryPanel({
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search sources\u2026"
+            placeholder="Search sources"
             className="w-full bg-transparent text-[12.5px] text-ink placeholder:text-ink-soft/60 focus:outline-none"
           />
           <div className="relative" ref={filterRef}>

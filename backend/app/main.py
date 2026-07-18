@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.api.routes import chat, upload, followup, research
+from app.api.routes import chat, upload, followup, research, export
 from app.services.graph_store import graph_store
 
 Path("uploads").mkdir(exist_ok=True)
@@ -33,6 +33,7 @@ app.include_router(chat.router, prefix="/api")
 app.include_router(upload.router, prefix="/api")
 app.include_router(followup.router, prefix="/api")
 app.include_router(research.router, prefix="/api")
+app.include_router(export.router, prefix="/api")
 
 app.mount("/api/uploads", StaticFiles(directory="uploads"), name="uploads")
 

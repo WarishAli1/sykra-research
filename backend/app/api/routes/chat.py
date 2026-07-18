@@ -2,16 +2,24 @@ import time
 import uuid
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from app.models.schemas import ChatRequest, ChatResponse, PaperResult, ReferenceEntry
+from app.models.schemas import (
+    ChatRequest, ChatResponse, PaperResult, ReferenceEntry, RegenerateRequest,
+    FollowupRequest, FollowupResponse,
+)
 from app.agents.graph import research_graph
+from app.agents.state import AgentState
 from app.services.vector_store import vector_store
 from app.services.graph_store import graph_store
 from app.services.llm_client import get_llm
 from app.services.structured_answer import get_followup_answer
 from app.services.embeddings import embed_texts, similarity
 from app.services.reference_builder import build_references, format_reference_block
+from app.services import cancellation
+from app.services.sse import sse_event, progress_event, stream_text_chunks
+from app.utils.text_cleaning import normalize_dashes
 
 router = APIRouter()
 
@@ -19,14 +27,8 @@ GROUNDED_MAX_TOTAL_CHARS = 24000
 GROUNDED_MAX_CHUNK_CHARS = 2000
 
 
-@router.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
-    session_id = req.session_id or str(uuid.uuid4())
-
-    if req.upload_mode == "grounded_only":
-        return _handle_uploaded_only(req, session_id)
-
-    initial_state = {
+def _build_initial_state(req: ChatRequest, session_id: str) -> dict:
+    return {
         "query": req.query,
         "session_id": session_id,
         "include_uploaded": req.include_uploaded,
@@ -34,9 +36,9 @@ def chat(req: ChatRequest):
         "response_mode": req.response_mode,
         "refined_query": None,
         "search_terms": [],
-        "search_queries": [], # NEW
-        "query_understanding": None, # NEW
-        "query_plan": None, # NEW
+        "search_queries": [],
+        "query_understanding": None,
+        "query_plan": None,
         "is_definitional": False,
         "likely_cs_relevant": True,
         "domain_full": None,
@@ -48,28 +50,30 @@ def chat(req: ChatRequest):
         "extracted_papers": [],
         "ranked_papers": [],
         "summaries": {},
-        "uploaded_context": [],
-        "term_coverage": {},
-        "papers_below_threshold": 0,
         "final_answer": "",
+        "citations": [],
         "coverage_gaps": [],
         "domain_caveat": None,
-        "citations": [],
-        "references": [],
-        "low_confidence_results": False,
-        "needs_retry": False,
-        "error": None,
-        "validation_results": [],
+        "papers_below_threshold": 0,
         "graph_contradictions": [],
         "graph_entities": [],
+        "search_terms": [],
+        "conversation_history": req.conversation_history,
+        "low_confidence_results": False,
+        "references": [],
     }
 
+
+def _run_research_graph(req: ChatRequest, session_id: str) -> ChatResponse:
+    initial_state = _build_initial_state(req, session_id)
     t0 = time.time()
     final_state = research_graph.invoke(initial_state)
     elapsed = round(time.time() - t0, 1)
-
     print(f"[timing] {elapsed}s | mode={req.response_mode} | query='{req.query}'")
+    return _finalize_chat_response(req, session_id, final_state)
 
+
+def _finalize_chat_response(req: ChatRequest, session_id: str, final_state: dict) -> ChatResponse:
     ranked_papers = final_state["ranked_papers"]
 
     papers = [
@@ -96,7 +100,7 @@ def chat(req: ChatRequest):
             print(f"[chat] vector_store persistence failed for '{p.get('title', '?')}': {e}")
 
     return ChatResponse(
-        answer=final_state["final_answer"],
+        answer=normalize_dashes(final_state.get("final_answer", "")),
         session_id=session_id,
         papers=papers,
         citations=final_state["citations"],
@@ -108,6 +112,119 @@ def chat(req: ChatRequest):
         response_mode=req.response_mode,
         references=references,
     )
+
+
+@router.post("/chat", response_model=ChatResponse)
+def chat(req: ChatRequest):
+    session_id = req.session_id or str(uuid.uuid4())
+
+    if req.upload_mode == "grounded_only":
+        return _handle_uploaded_only(req, session_id)
+
+    return _run_research_graph(req, session_id)
+
+
+@router.post("/chat/stream")
+def chat_stream(req: ChatRequest):
+    if req.upload_mode == "grounded_only":
+        raise HTTPException(
+            status_code=400,
+            detail="Streaming isn't available for PDF-only (grounded_only) requests yet. Use /chat.",
+        )
+
+    if not req.request_id:
+        raise HTTPException(status_code=400, detail="request_id is required for /chat/stream.")
+
+    request_id = req.request_id
+    session_id = req.session_id or str(uuid.uuid4())
+
+    def event_stream():
+        cancellation.register(request_id)
+        try:
+            if req.response_mode == "graph_research":
+                graph_store.clear_session(session_id)
+
+            state: AgentState = _build_initial_state(req, session_id)
+
+            t0 = time.time()
+            try:
+                for update in research_graph.stream(state, stream_mode="updates"):
+                    if cancellation.is_cancelled(request_id):
+                        yield sse_event("cancelled")
+                        return
+
+                    for node_name, delta in update.items():
+                        state.update(delta)
+                        yield progress_event(node_name)
+            except Exception as e:
+                print(f"[chat_stream] graph execution failed: {type(e).__name__}: {e}")
+                yield sse_event("error", message="Something went wrong while generating this answer.")
+                return
+
+            elapsed = round(time.time() - t0, 1)
+            print(f"[timing] {elapsed}s | mode={req.response_mode} | query='{req.query}' | streamed")
+
+            response = _finalize_chat_response(req, session_id, state)
+
+            completed = yield from stream_text_chunks(
+                response.answer,
+                cancel_check=lambda: cancellation.is_cancelled(request_id),
+            )
+            if not completed:
+                yield sse_event("cancelled")
+                return
+
+            yield sse_event("result", payload=response.model_dump())
+        finally:
+            cancellation.cleanup(request_id)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/chat/cancel/{request_id}")
+def chat_cancel(request_id: str):
+    found = cancellation.cancel(request_id)
+    if not found:
+        return {"cancelled": False}
+    return {"cancelled": True}
+
+
+@router.post("/chat/regenerate", response_model=ChatResponse)
+def regenerate(req: RegenerateRequest):
+    if req.is_followup:
+        followup_req = FollowupRequest(
+            session_id=req.session_id,
+            question=req.query,
+            response_mode=req.response_mode,
+        )
+        from app.api.routes.followup import followup as run_followup
+        result: FollowupResponse = run_followup(followup_req)
+        return ChatResponse(
+            answer=result.answer,
+            session_id=req.session_id,
+            papers=[],
+            citations=result.sources,
+            response_mode=req.response_mode,
+            references=result.references,
+        )
+
+    chat_req = ChatRequest(
+        query=req.query,
+        session_id=req.session_id,
+        upload_mode=req.upload_mode,
+        include_uploaded=req.include_uploaded,
+        response_mode=req.response_mode,
+    )
+    if chat_req.upload_mode == "grounded_only":
+        return _handle_uploaded_only(chat_req, req.session_id)
+    return _run_research_graph(chat_req, req.session_id)
 
 
 def _handle_uploaded_only(req: ChatRequest, session_id: str) -> ChatResponse:
@@ -128,73 +245,69 @@ def _handle_uploaded_only(req: ChatRequest, session_id: str) -> ChatResponse:
 
     is_generic_query = any(
         word in req.query.lower()
-        for word in ["explain", "this paper", "summarize", "what is", "tell me about"]
+        for word in ("what is", "explain", "tell me about", "what are", "describe", "overview")
     )
-    if max_sim < 0.15 and not is_generic_query:
-        return ChatResponse(
-            answer="The uploaded PDFs do not appear to contain information relevant to your question. Please rephrase or upload a different document.",
-            session_id=session_id,
-            papers=[],
-            citations=[],
-            coverage_gaps=["Uploaded PDFs don't cover this question"],
-            domain_caveat=None,
-            response_mode=req.response_mode,
-            references=[],
+
+    if max_sim > 0.4 or is_generic_query:
+        print(f"[grounded] generic query detected (max_sim={max_sim:.3f}), using LLM answer")
+        context_block = "\n\n".join(
+            f"[{meta['title']}]: {doc}"
+            for doc, meta in zip(documents, metadatas)
         )
+        llm = get_llm(temperature=0.0)
+        prompt = f"""Answer the user's question using ONLY the provided PDF context. If the context does not contain enough information, say so honestly.
 
-    ranked = sorted(zip(documents, metadatas, sims), key=lambda x: x[2], reverse=True)
-
-    parts = []
-    total_chars = 0
-    for doc, meta, _sim in ranked:
-        if total_chars >= GROUNDED_MAX_TOTAL_CHARS:
-            break
-        chunk = doc[:GROUNDED_MAX_CHUNK_CHARS]
-        page_info = f" - Page {meta.get('chunk_index', '?')}" if meta.get('chunk_index') else ""
-        parts.append(f"[{meta['title']}{page_info}]: {chunk}")
-        total_chars += len(chunk) + 50
-
-    context_block = "\n\n".join(parts)
-
-    llm = get_llm(temperature=0.0)
-
-    depth_instruction = (
-        "Write a full, detailed, well-structured explanation covering all relevant excerpts. "
-        "Do not compress into a couple of sentences — this is researched mode."
-        if req.response_mode == "researched"
-        else "Keep the answer concise and to the point."
-    )
-
-    prompt = f"""Answer using ONLY the excerpts below.
-
-If they lack enough information, set grounded=false and say: "The uploaded document does not provide enough information to answer this question."
-
-{depth_instruction}
+Context:
+{context_block}
 
 Question: {req.query}
+"""
+        messages = [
+            SystemMessage(content="Answer concisely based on the provided PDF excerpts. Use [n] citations."),
+            HumanMessage(content=prompt),
+        ]
+        result = get_followup_answer(llm, messages, req.query, context_block, [])
+    else:
+        print(f"[grounded] specific query (max_sim={max_sim:.3f}), retrieving relevant excerpts")
+
+        combined = []
+        seen_titles = set()
+        for i in sorted(range(len(sims)), key=lambda j: sims[j], reverse=True):
+            meta = metadatas[i]
+            title = meta["title"]
+            if title in seen_titles:
+                continue
+            seen_titles.add(title)
+            combined.append({
+                "title": title,
+                "authors": [],
+                "summary": documents[i][:500],
+                "link": meta.get("file_url") or meta.get("link", ""),
+                "published": None,
+                "source": "user_upload",
+                "file_url": meta.get("file_url") or meta.get("link", ""),
+            })
+            if len(combined) >= 5:
+                break
+
+        sorted_docs = sorted(zip(documents, metadatas, sims), key=lambda x: x[2], reverse=True)[:5]
+        top_context = "\n\n".join(
+            f"[{meta['title']}]: {doc}"
+            for doc, meta, _ in sorted_docs
+        )
+        llm = get_llm(temperature=0.0)
+        prompt = f"""Answer using ONLY the PDF excerpts below. Be specific and cite the source document name.
 
 Excerpts:
-{context_block}
+{top_context}
+
+Question: {req.query}
 """
-    messages = [
-        SystemMessage(content="You MUST respond with valid JSON only. Never quote the excerpts. Never reproduce the document. Never output equations or markdown. Use the FollowupAnswer function."),
-        HumanMessage(content=prompt),
-    ]
-
-    fallback_sources = list({meta["title"] for meta in metadatas})
-    result = get_followup_answer(llm, messages, req.query, context_block, fallback_sources)
-
-    if not result.grounded:
-        return ChatResponse(
-            answer=result.answer,
-            session_id=session_id,
-            papers=[],
-            citations=[],
-            coverage_gaps=["Uploaded PDFs don't fully cover this question"],
-            domain_caveat=None,
-            response_mode=req.response_mode,
-            references=[],
-        )
+        messages = [
+            SystemMessage(content="Answer precisely using only the provided PDF excerpts."),
+            HumanMessage(content=prompt),
+        ]
+        result = get_followup_answer(llm, messages, req.query, top_context, [])
 
     paper_dicts = []
     seen_titles = set()
@@ -222,8 +335,8 @@ Excerpts:
         }, session_id)
 
     references = build_references(paper_dicts)
-    answer_text = result.answer
-    if req.response_mode == "researched" and references:
+    answer_text = normalize_dashes(result.answer)
+    if req.response_mode in ("researched", "graph_research") and references:
         answer_text = answer_text + "\n\n---\n\n**References**\n\n" + format_reference_block(references)
 
     papers = [

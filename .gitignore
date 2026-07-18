@@ -10,6 +10,8 @@ env/
 
 backend/app/db/vector_db/
 backend/app/db/pdf_cache/
+backend/uploads/
+backend/exports/
 
 .DS_Store
 
