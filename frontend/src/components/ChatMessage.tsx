@@ -1,13 +1,95 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { AlertTriangle, BookMarked, Download, Loader2 } from "lucide-react";
+import {
+  AlertTriangle,
+  BookMarked,
+  Download,
+  Loader2,
+  Share2,
+  Copy,
+  Check,
+  ThumbsUp,
+  ThumbsDown,
+  MoreHorizontal,
+  RefreshCw,
+  FileText,
+  FileDown,
+  GraduationCap,
+  OctagonX,
+} from "lucide-react";
 import type { ChatTurn } from "@/lib/types";
 import { api, ApiError } from "@/lib/api";
 
-export function ChatMessage({ turn, sessionId }: { turn: ChatTurn; sessionId: string }) {
-  const [exporting, setExporting] = useState<"standard" | "latex" | null>(null);
+function stripReferencesBlock(text: string): string {
+  const marker = "\n\n---\n\n**References**";
+  const idx = text.indexOf(marker);
+  return idx === -1 ? text : text.slice(0, idx).trim();
+}
+
+function stripMarkdown(text: string): string {
+  let s = text;
+  s = s.replace(/\*\*(.+?)\*\*/g, "$1");
+  s = s.replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, "$1");
+  s = s.replace(/`([^`]+?)`/g, "$1");
+  s = s.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+  s = s.replace(/^#{1,6}\s+/gm, "");
+  s = s.replace(/^\s*[-*+]\s+/gm, "");
+  s = s.replace(/^\s*\d+[.)]\s+/gm, "");
+  s = s.replace(/\n{3,}/g, "\n\n");
+  return s.trim();
+}
+
+function formatRefPlain(ref: { id: number; title: string; authors?: string[]; link?: string; published?: string | null }): string {
+  const authors = ref.authors?.length ? ref.authors.slice(0, 3).join(", ") + ". " : "";
+  const year = ref.published ? ` (${ref.published})` : "";
+  return `[${ref.id}] ${authors}${ref.title}${year}. ${ref.link ?? ""}`;
+}
+
+function formatRefMarkdown(ref: { id: number; title: string; authors?: string[]; link?: string; published?: string | null }): string {
+  const authors = ref.authors?.length ? ` — ${ref.authors.slice(0, 3).join(", ")}` : "";
+  const year = ref.published ? ` (${ref.published})` : "";
+  return `${ref.id}. [${ref.title}](${ref.link ?? ""})${authors}${year}`;
+}
+
+function downloadTextFile(filename: string, content: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export function ChatMessage({
+  turn,
+  sessionId,
+  onRegenerate,
+}: {
+  turn: ChatTurn;
+  sessionId: string;
+  onRegenerate?: () => void | Promise<void>;
+}) {
+  const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function onClickOutside(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, []);
 
   if (turn.role === "user") {
     return (
@@ -21,9 +103,13 @@ export function ChatMessage({ turn, sessionId }: { turn: ChatTurn; sessionId: st
 
   const isResearched = turn.responseMode === "researched";
   const showReferencesInline = !!turn.references?.length;
+  const isStreaming = !!turn.streaming;
+  const isStopped = !!turn.stopped;
+  const hasText = turn.text.trim().length > 0;
+  const showMetadata = !isStreaming;
 
   async function handleExport(format: "standard" | "latex") {
-    setExporting(format);
+    setExporting(true);
     setExportError(null);
     try {
       const blob = await api.exportPdf({
@@ -44,32 +130,114 @@ export function ChatMessage({ turn, sessionId }: { turn: ChatTurn; sessionId: st
     } catch (e) {
       setExportError(e instanceof ApiError ? e.message : "Could not generate PDF.");
     } finally {
-      setExporting(null);
+      setExporting(false);
+      setMenuOpen(false);
     }
+  }
+
+  function handleExportMarkdown() {
+    const body = stripReferencesBlock(turn.text);
+    let content = body;
+    if (turn.references?.length) {
+      content += "\n\n---\n\n## References\n";
+      for (const r of turn.references) {
+        content += "\n" + formatRefMarkdown(r);
+      }
+    }
+    downloadTextFile("answer.md", content, "text/markdown");
+    setMenuOpen(false);
+  }
+
+  function handleExportText() {
+    let body = stripReferencesBlock(turn.text);
+    body = stripMarkdown(body);
+    let content = body;
+    if (turn.references?.length) {
+      content += "\n\nReferences\n";
+      for (const r of turn.references) {
+        content += "\n" + formatRefPlain(r);
+      }
+    }
+    downloadTextFile("answer.txt", content, "text/plain");
+    setMenuOpen(false);
+  }
+
+  async function handleRegenerateClick() {
+    if (!onRegenerate) return;
+    setMenuOpen(false);
+    setRegenerating(true);
+    try {
+      await onRegenerate();
+    } finally {
+      setRegenerating(false);
+    }
+  }
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(stripReferencesBlock(turn.text));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+    }
+  }
+
+  async function handleShare() {
+    const shareText = stripReferencesBlock(turn.text);
+    if (navigator.share) {
+      try {
+        await navigator.share({ text: shareText });
+        return;
+      } catch {
+      }
+    }
+    await handleCopy();
   }
 
   return (
     <div className="animate-fade-up space-y-3">
       <div className="rounded-2xl rounded-bl-sm border border-line bg-paper/85 px-4 py-3 shadow-sm shadow-black/5">
-        <div className="prose-chat text-[13.5px] leading-relaxed text-ink">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.text}</ReactMarkdown>
-        </div>
+        {isStreaming && turn.statusLabel && !hasText && (
+          <div className="flex items-center gap-2 text-[12.5px] text-ink-soft">
+            <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+            <span>{turn.statusLabel}</span>
+          </div>
+        )}
 
-        {turn.domainCaveat && (
+        {hasText && (
+          <div className="prose-chat text-[13.5px] leading-relaxed text-ink">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.text}</ReactMarkdown>
+            {isStreaming && (
+              <span
+                aria-hidden="true"
+                className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-indigo/70"
+              />
+            )}
+          </div>
+        )}
+
+        {isStopped && (
+          <div className="mt-2 flex items-center gap-1.5 text-[11.5px] text-ink-soft">
+            <OctagonX className="h-3 w-3 shrink-0" />
+            <span>Generation stopped.</span>
+          </div>
+        )}
+
+        {showMetadata && turn.domainCaveat && (
           <div className="mt-3 flex items-start gap-2 rounded-md bg-gold-tint px-2.5 py-2 text-[12px] text-ink-soft">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gold" />
             <span>{turn.domainCaveat}</span>
           </div>
         )}
 
-        {!!turn.coverageGaps?.length && (
+        {showMetadata && !!turn.coverageGaps?.length && (
           <div className="mt-2 text-[12px] text-ink-soft">
             <span className="font-medium text-ink">Coverage gaps: </span>
             {turn.coverageGaps.join("; ")}
           </div>
         )}
 
-        {!!turn.sources?.length && (
+        {showMetadata && !!turn.sources?.length && (
           <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-line pt-2.5">
             <BookMarked className="h-3.5 w-3.5 text-ink-soft" />
             {turn.sources.map((s, i) => (
@@ -83,7 +251,7 @@ export function ChatMessage({ turn, sessionId }: { turn: ChatTurn; sessionId: st
           </div>
         )}
 
-        {showReferencesInline && (
+        {showMetadata && showReferencesInline && (
           <div className="mt-3 border-t border-line pt-2.5">
             <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-soft">
               <BookMarked className="h-3.5 w-3.5" />
@@ -117,46 +285,143 @@ export function ChatMessage({ turn, sessionId }: { turn: ChatTurn; sessionId: st
           </div>
         )}
 
-        {!showReferencesInline && !!turn.references?.length && (
+        {showMetadata && !showReferencesInline && !!turn.references?.length && (
           <div className="mt-2 text-[11.5px] text-ink-soft">
             {turn.references.length} reference{turn.references.length === 1 ? "" : "s"} added to Library.
           </div>
         )}
 
-        {!!turn.papers?.length && (
+        {showMetadata && !!turn.papers?.length && (
           <div className="mt-3 flex items-center gap-1.5 border-t border-line pt-2.5 text-[11.5px] text-ink-soft">
             <BookMarked className="h-3.5 w-3.5 shrink-0" />
             {turn.papers.length} paper{turn.papers.length === 1 ? "" : "s"} added to Library
           </div>
         )}
 
-        <div className="mt-3 flex items-center gap-2 border-t border-line pt-2.5">
-          <button
-            onClick={() => handleExport("standard")}
-            disabled={exporting !== null}
-            className="flex items-center gap-1 rounded-md bg-paper-dim px-2 py-1 text-[11px] text-ink-soft hover:text-indigo disabled:opacity-50"
-          >
-            {exporting === "standard" ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <Download className="h-3 w-3" />
-            )}
-            PDF
-          </button>
-          <button
-            onClick={() => handleExport("latex")}
-            disabled={exporting !== null}
-            className="flex items-center gap-1 rounded-md bg-paper-dim px-2 py-1 text-[11px] text-ink-soft hover:text-indigo disabled:opacity-50"
-            title="Academic-style layout"
-          >
-            {exporting === "latex" ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <Download className="h-3 w-3" />
-            )}
-            PDF (Academic style)
-          </button>
-        </div>
+        {regenerating && (
+          <div className="mt-3 flex items-center gap-2 border-t border-line pt-2.5 text-[11.5px] text-ink-soft">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Regenerating this answer…
+          </div>
+        )}
+
+        {showMetadata && !regenerating && (
+          <div className="mt-3 flex items-center gap-1 border-t border-line pt-2.5">
+            <button
+              onClick={() => handleExport("standard")}
+              disabled={exporting}
+              aria-label="Download standard PDF"
+              title="Download standard PDF"
+              className="flex items-center gap-1 rounded-md bg-paper-dim px-2 py-1 text-[11px] text-ink-soft hover:text-indigo disabled:opacity-50"
+            >
+              {exporting ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <Download className="h-3 w-3" />
+              )}
+              PDF
+            </button>
+
+            <button
+              onClick={handleShare}
+              aria-label="Share answer"
+              title="Share"
+              className="flex h-6 w-6 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-indigo"
+            >
+              <Share2 className="h-3.5 w-3.5" />
+            </button>
+
+            <button
+              onClick={handleCopy}
+              aria-label="Copy answer"
+              title="Copy"
+              className="flex h-6 w-6 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-indigo"
+            >
+              {copied ? <Check className="h-3.5 w-3.5 text-green-600" /> : <Copy className="h-3.5 w-3.5" />}
+            </button>
+
+            <button
+              onClick={() => setFeedback((f) => (f === "up" ? null : "up"))}
+              aria-label="Good response"
+              aria-pressed={feedback === "up"}
+              title="Good response"
+              className={`flex h-6 w-6 items-center justify-center rounded-md hover:bg-paper-dim ${
+                feedback === "up" ? "text-indigo" : "text-ink-soft hover:text-indigo"
+              }`}
+            >
+              <ThumbsUp className="h-3.5 w-3.5" />
+            </button>
+
+            <button
+              onClick={() => setFeedback((f) => (f === "down" ? null : "down"))}
+              aria-label="Bad response"
+              aria-pressed={feedback === "down"}
+              title="Bad response"
+              className={`flex h-6 w-6 items-center justify-center rounded-md hover:bg-paper-dim ${
+                feedback === "down" ? "text-danger" : "text-ink-soft hover:text-danger"
+              }`}
+            >
+              <ThumbsDown className="h-3.5 w-3.5" />
+            </button>
+
+            <div className="relative ml-1" ref={menuRef}>
+              <button
+                onClick={() => setMenuOpen((o) => !o)}
+                aria-label="More actions"
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                title="More actions"
+                className="flex h-6 w-6 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-indigo"
+              >
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </button>
+
+              {menuOpen && (
+                <div
+                  role="menu"
+                  className="absolute left-0 bottom-full z-20 mb-1.5 w-48 rounded-lg border border-line bg-paper shadow-lg shadow-black/10 py-1"
+                >
+                  <button
+                    role="menuitem"
+                    onClick={handleExportMarkdown}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-ink hover:bg-paper-dim"
+                  >
+                    <FileText className="h-3.5 w-3.5 text-ink-soft" />
+                    Export Markdown
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={handleExportText}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-ink hover:bg-paper-dim"
+                  >
+                    <FileDown className="h-3.5 w-3.5 text-ink-soft" />
+                    Export Text
+                  </button>
+                  {onRegenerate && (
+                    <button
+                      role="menuitem"
+                      onClick={handleRegenerateClick}
+                      disabled={regenerating}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-ink hover:bg-paper-dim disabled:opacity-50"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 text-ink-soft ${regenerating ? "animate-spin" : ""}`} />
+                      Regenerate
+                    </button>
+                  )}
+                  <button
+                    role="menuitem"
+                    onClick={() => handleExport("latex")}
+                    disabled={exporting}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-ink hover:bg-paper-dim disabled:opacity-50"
+                  >
+                    <GraduationCap className="h-3.5 w-3.5 text-ink-soft" />
+                    Academic PDF
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {exportError && (
           <div className="mt-1.5 text-[11px] text-danger">{exportError}</div>

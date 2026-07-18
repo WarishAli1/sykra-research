@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronsLeft, ChevronsRight, FlaskConical, Library, Network } from "lucide-react";
+import { useCallback, useRef, useState } from "react";
+import { ChevronsLeft, ChevronsRight, FlaskConical, Library, Network, ArrowLeft } from "lucide-react";
 import { RightRail } from "./RightRail";
 import { ChatPanel } from "./ChatPanel";
-import { api } from "@/lib/api";
+import { GraphView } from "./GraphView";
+import { api, ApiError } from "@/lib/api";
 import type { ChatTurn, Paper } from "@/lib/types";
 
 function mergePapers(existing: Paper[], incoming: Paper[]): Paper[] {
@@ -13,9 +14,7 @@ function mergePapers(existing: Paper[], incoming: Paper[]): Paper[] {
   return Array.from(byTitle.values());
 }
 
-const RAIL_MIN = 280;
-const RAIL_MAX = 560;
-const RAIL_DEFAULT = 340;
+const RAIL_WIDTH = 340;
 const STRIP_WIDTH = 44;
 
 export function AppShell() {
@@ -24,9 +23,8 @@ export function AppShell() {
   const [uploadedFilename, setUploadedFilename] = useState<string | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [railOpen, setRailOpen] = useState(true);
-  const [railWidth, setRailWidth] = useState(RAIL_DEFAULT);
   const [tab, setTab] = useState<"library" | "explore">("library");
-  const draggingRef = useRef(false);
+  const [showGraphView, setShowGraphView] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const handleNewPapers = useCallback((incoming: Paper[]) => {
@@ -35,8 +33,13 @@ export function AppShell() {
   }, []);
 
   const handleOpenGraph = () => {
+    setShowGraphView(true);
     setRailOpen(true);
     setTab("explore");
+  };
+
+  const handleBackToChat = () => {
+    setShowGraphView(false);
   };
 
   const handleNewChat = () => {
@@ -44,7 +47,42 @@ export function AppShell() {
     setPapers([]);
     setUploadedFilename(null);
     setSessionId(crypto.randomUUID());
+    setShowGraphView(false);
   };
+
+  const handleDownloadConversationPdf = useCallback(async () => {
+    const assistantTurns = turns.filter((t) => t.role === "assistant");
+    if (!assistantTurns.length) return;
+
+    const combinedAnswer = assistantTurns
+      .map((t, i) => `## Turn ${i + 1}\n\n${t.text}`)
+      .join("\n\n---\n\n");
+    const combinedReferences = Array.from(
+      new Map(
+        assistantTurns.flatMap((t) => t.references ?? []).map((r) => [r.id, r])
+      ).values()
+    );
+
+    try {
+      const blob = await api.exportPdf({
+        session_id: sessionId,
+        format: "standard",
+        answer: combinedAnswer,
+        references: combinedReferences,
+        title: "Research Assistant \u2014 Conversation",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "conversation.pdf";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error(e instanceof ApiError ? e.message : "Could not generate conversation PDF.");
+    }
+  }, [turns, sessionId]);
 
   async function handleUpload(file: File) {
     const res = await api.uploadPdf(file, sessionId);
@@ -65,33 +103,6 @@ export function AppShell() {
     ]);
   }
 
-  useEffect(() => {
-    function onMove(e: MouseEvent) {
-      if (!draggingRef.current || !containerRef.current) return;
-      const rect = containerRef.current.getBoundingClientRect();
-      const next = rect.right - e.clientX;
-      setRailWidth(Math.min(RAIL_MAX, Math.max(RAIL_MIN, next)));
-    }
-    function onUp() {
-      draggingRef.current = false;
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, []);
-
-  function startDrag(e: React.MouseEvent) {
-    e.preventDefault();
-    draggingRef.current = true;
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-  }
-
   return (
     <div className="flex h-screen flex-col bg-paper">
       <header className="flex items-center gap-2 border-b border-line px-4 py-2.5 shrink-0">
@@ -109,30 +120,38 @@ export function AppShell() {
 
       <div ref={containerRef} className="flex flex-1 min-h-0">
         <main className="flex-1 min-w-0">
-          <ChatPanel
-            uploadedFilename={uploadedFilename}
-            onUpload={handleUpload}
-            onNewPapers={handleNewPapers}
-            turns={turns}
-            setTurns={setTurns}
-            sessionId={sessionId}
-            onOpenGraph={handleOpenGraph}
-          />
+          {showGraphView ? (
+            <div className="h-full flex flex-col">
+              <div className="flex items-center justify-between border-b border-line px-4 py-3">
+                <button
+                  onClick={handleBackToChat}
+                  className="flex items-center gap-2 text-[13px] text-ink-soft hover:text-indigo"
+                >
+                  <ArrowLeft className="h-4 w-4" /> Back to Chat
+                </button>
+                <span className="font-serif text-[15px] font-semibold text-ink">Knowledge Graph</span>
+              </div>
+              <div className="flex-1 min-h-0">
+                <GraphView sessionId={sessionId} />
+              </div>
+            </div>
+          ) : (
+            <ChatPanel
+              uploadedFilename={uploadedFilename}
+              onUpload={handleUpload}
+              onNewPapers={handleNewPapers}
+              turns={turns}
+              setTurns={setTurns}
+              sessionId={sessionId}
+              onOpenGraph={handleOpenGraph}
+            />
+          )}
         </main>
 
         <div
           className="relative shrink-0 h-full border-l border-line"
-          style={{ width: railOpen ? railWidth : STRIP_WIDTH }}
+          style={{ width: railOpen ? RAIL_WIDTH : STRIP_WIDTH }}
         >
-          {railOpen && (
-            <div
-              onMouseDown={startDrag}
-              className="absolute left-0 top-0 z-10 h-full w-1.5 -translate-x-1/2 cursor-col-resize group"
-            >
-              <div className="mx-auto h-full w-px bg-line group-hover:bg-indigo/40 group-hover:w-0.5 transition-colors" />
-            </div>
-          )}
-
           {railOpen ? (
             <div className="h-full flex flex-col">
               <div className="flex items-center justify-end px-2 py-1.5 border-b border-line">

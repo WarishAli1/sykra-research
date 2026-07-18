@@ -8,9 +8,9 @@ import type {
   FollowupResponse,
   FullGraphData,
   PdfExportRequest,
-  ResearchRequest,
-  ResearchResponse,
+  RegenerateRequest,
   SessionPapersResponse,
+  StreamEvent,
   UploadResponse,
 } from "./types";
 
@@ -26,10 +26,25 @@ export class ApiError extends Error {
 
 const API_BASE_URL = (process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000/api").replace(/\/$/, "");
 
+export class ApiAbortError extends Error {
+  constructor() {
+    super("Request was cancelled.");
+    this.name = "ApiAbortError";
+  }
+}
+
 async function request<T>(path: string, init: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+    });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new ApiAbortError();
+    }
+    throw e;
+  }
 
   if (!response.ok) {
     let message = `Request failed with status ${response.status}`;
@@ -61,7 +76,6 @@ async function requestBlob(path: string, init: RequestInit): Promise<Blob> {
       const data = (await response.json()) as { detail?: string };
       if (typeof data.detail === "string") message = data.detail;
     } catch {
-      // response wasn't JSON (likely a real PDF error page) — keep default message
     }
     throw new ApiError(message, response.status);
   }
@@ -80,20 +94,125 @@ function queryString(params: Record<string, string | undefined>): string {
   return query ? `?${query}` : "";
 }
 
+async function streamRequest(
+  path: string,
+  init: RequestInit,
+  onEvent: (event: StreamEvent) => void
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, { ...init });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new ApiAbortError();
+    }
+    throw e;
+  }
+
+  if (!response.ok || !response.body) {
+    let message = `Request failed with status ${response.status}`;
+    try {
+      const data = (await response.json()) as { detail?: string };
+      if (typeof data.detail === "string") message = data.detail;
+    } catch {
+    }
+    throw new ApiError(message, response.status);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      let boundary: number;
+      while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+
+        const line = frame.split("\n").find((l) => l.startsWith("data:"));
+        if (!line) continue;
+
+        const jsonStr = line.slice(5).trim();
+        if (!jsonStr) continue;
+
+        try {
+          const parsed = JSON.parse(jsonStr) as StreamEvent;
+          onEvent(parsed);
+        } catch {
+        }
+      }
+    }
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new ApiAbortError();
+    }
+    throw e;
+  }
+}
+
 export const api = {
-  chat(payload: ChatRequest): Promise<ChatResponse> {
+  chat(payload: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
     return request<ChatResponse>("/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal,
     });
   },
 
-  followup(payload: FollowupRequest): Promise<FollowupResponse> {
+  chatStream(payload: ChatRequest, onEvent: (event: StreamEvent) => void, signal?: AbortSignal): Promise<void> {
+    return streamRequest(
+      "/chat/stream",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal,
+      },
+      onEvent
+    );
+  },
+
+  followup(payload: FollowupRequest, signal?: AbortSignal): Promise<FollowupResponse> {
     return request<FollowupResponse>("/followup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal,
+    });
+  },
+
+  followupStream(payload: FollowupRequest, onEvent: (event: StreamEvent) => void, signal?: AbortSignal): Promise<void> {
+    return streamRequest(
+      "/followup/stream",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal,
+      },
+      onEvent
+    );
+  },
+
+  cancelStream(requestId: string): Promise<{ cancelled: boolean }> {
+    return request<{ cancelled: boolean }>(`/chat/cancel/${encodeURIComponent(requestId)}`, {
+      method: "POST",
+    });
+  },
+
+  chatRegenerate(payload: RegenerateRequest, signal?: AbortSignal): Promise<ChatResponse> {
+    return request<ChatResponse>("/chat/regenerate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal,
     });
   },
 
@@ -104,14 +223,6 @@ export const api = {
     return request<UploadResponse>(`/upload${queryString({ session_id: sessionId })}`, {
       method: "POST",
       body: formData,
-    });
-  },
-
-  research(payload: ResearchRequest): Promise<ResearchResponse> {
-    return request<ResearchResponse>("/research", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
     });
   },
 

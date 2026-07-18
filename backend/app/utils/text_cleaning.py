@@ -1,6 +1,14 @@
 import re
 import unicodedata
 
+_DASH_CHARS = re.compile(
+    "[\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u00AD\u207B\u208B]"
+)
+
+
+def normalize_dashes(text: str) -> str:
+    return _DASH_CHARS.sub("-", text)
+
 
 def sanitize_abstract(text: str, max_chars: int = 300) -> str:
     if not text:

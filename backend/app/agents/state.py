@@ -5,7 +5,7 @@ class AgentState(TypedDict):
     session_id: str
     include_uploaded: bool
     upload_mode: Literal["none", "blend", "grounded_only"]
-    response_mode: Literal["normal", "researched"]
+    response_mode: Literal["normal", "researched", "graph_research"]
     refined_query: Optional[str]
     search_terms: list[str]
     search_queries: list[str] # NEW: Flattened list of all generated queries
@@ -36,3 +36,4 @@ class AgentState(TypedDict):
     validation_results: list[str]
     graph_contradictions: list[dict]
     graph_entities: list[dict]
+    conversation_history: list[dict]

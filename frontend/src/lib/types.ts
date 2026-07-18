@@ -34,6 +34,12 @@ export type ChatTurn = {
   kind?: "chat" | "followup";
   references?: ReferenceEntry[];
   responseMode?: ResponseMode;
+  streaming?: boolean;
+  stopped?: boolean;
+  statusLabel?: string;
+  requestId?: string;
+  sourceQuery?: string;
+  sourceUploadMode?: "none" | "blend" | "grounded_only";
 };
 
 export type ChatRequest = {
@@ -42,6 +48,8 @@ export type ChatRequest = {
   upload_mode?: "none" | "blend" | "grounded_only";
   include_uploaded?: boolean;
   response_mode: ResponseMode;
+  request_id?: string;
+  conversation_history?: { role: string; content: string }[];
 };
 
 export type ChatResponse = {
@@ -69,6 +77,23 @@ export type FollowupResponse = {
   sources: string[];
   references: ReferenceEntry[];
 };
+
+export type RegenerateRequest = {
+  query: string;
+  session_id?: string;
+  upload_mode?: "none" | "blend" | "grounded_only";
+  include_uploaded?: boolean;
+  response_mode: ResponseMode;
+  request_id?: string;
+  is_followup?: boolean;
+};
+
+export type StreamEvent =
+  | { type: "progress"; label: string }
+  | { type: "token"; text: string }
+  | { type: "result"; payload: ChatResponse }
+  | { type: "cancelled" }
+  | { type: "error"; message: string };
 
 export type UploadResponse = {
   filename: string;

@@ -1,3 +1,4 @@
+import json
 from langchain_core.messages import SystemMessage, HumanMessage
 from app.agents.state import AgentState
 from app.agents.schemas import QueryUnderstanding, QueryPlan
@@ -5,8 +6,32 @@ from app.services.llm_client import get_llm
 
 def plan_query_node(state: AgentState) -> AgentState:
     query = state["query"]
+    history = state.get("conversation_history", [])
     mode = state.get("response_mode", "normal")
     llm = get_llm(temperature=0)
+
+    # Step 0: Rewrite query if it's a follow-up to ensure the search engine gets full context
+    if history:
+        rewrite_prompt = f"""You are an expert search strategist. The user is asking a follow-up question in an ongoing research conversation.
+Conversation History:
+{json.dumps(history[-4:])}
+
+Current Follow-up Question: {query}
+
+Rewrite the follow-up question into a standalone, comprehensive search query that captures the full context. 
+If the follow-up is clearly about a specific paper or topic from the history, include the paper title or topic name.
+If the follow-up is a general conversational query (e.g. "summarize that", "what did you say?"), extract the core research topic from the history.
+Return ONLY the rewritten search query, nothing else."""
+        try:
+            rewritten = llm.invoke([
+                SystemMessage(content="You rewrite follow-up questions into standalone search queries."), 
+                HumanMessage(content=rewrite_prompt)
+            ], config={"timeout": 10}).content.strip()
+            if rewritten and len(rewritten) < 200:
+                query = rewritten
+                print(f"[plan_query] Rewritten follow-up query: {query}")
+        except Exception as e:
+            print(f"[plan_query] Query rewrite failed: {e}")
 
     # Step 1: Query Understanding
     under_sys = "You are an expert academic research assistant. Extract the core components of the user's research query to understand the intent."

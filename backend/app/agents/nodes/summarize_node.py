@@ -15,14 +15,13 @@ def _invoke_structured_with_repair(llm, messages, schema, max_retries=2):
     """Invokes the LLM with structured output, retrying with error feedback if validation fails."""
     for attempt in range(max_retries + 1):
         try:
-            result = llm.with_structured_output(schema).invoke(messages, config={"timeout": 45})
-            # Fallback manual validation if the provider returns a dict instead of a Pydantic model
+            result = llm.with_structured_output(schema).invoke(messages, config={"timeout": 90})
             if isinstance(result, dict):
                 result = schema.model_validate(result)
             return result
         except Exception as e:
             if attempt == max_retries:
-                print(f"[summarize] Structured output failed after {max_retries} retries: {e}")
+                print(f"[summarize] Structured output failed after {max_retries} retries: {type(e).__name__}: {e}")
                 return None
 
             error_str = str(e)
@@ -32,8 +31,9 @@ def _invoke_structured_with_repair(llm, messages, schema, max_retries=2):
             repair_msg = (
                 f"Your previous output failed schema validation.\n"
                 f"Errors:\n{error_str}\n\n"
-                f"Please correct your output to exactly match the required schema. "
-                f"Do not omit any required fields, and ensure all fields are of the correct type."
+                f"CRITICAL: You MUST correct your output to exactly match the required schema. "
+                f"Do not omit any required fields, and ensure all fields are of the correct type. "
+                f"Return ONLY a valid function call with no additional text."
             )
             messages = messages + [HumanMessage(content=repair_msg)]
             print(f"[summarize] Schema validation failed, retrying ({attempt + 1}/{max_retries})...")
@@ -46,30 +46,26 @@ def _classify_evidence_type(paper: dict, query: str, summaries: dict) -> str:
     contribution = summary.get("key_contribution", "").lower()
     title = paper.get("title", "").lower()
 
-    # Direct evidence: explicitly studies the requested topic
     direct_indicators = ["directly addresses", "explicitly studies", "proposes", "introduces", "framework for"]
     if any(ind in relevance for ind in direct_indicators):
         return "direct"
 
-    # Check if paper's main contribution matches query intent
     query_words = set(query.lower().split())
     title_words = set(title.split())
     if len(query_words & title_words) >= 3:
         return "direct"
 
-    # Supporting evidence: related method/dataset/domain
     supporting_indicators = ["related to", "similar approach", "applies to", "uses", "dataset for"]
     if any(ind in relevance for ind in supporting_indicators):
         return "supporting"
 
-    # Background: general concepts only
     return "background"
 
 def _build_paper_block_with_classification(papers: list[dict], summaries: dict) -> str:
     """Build paper block with evidence type classification."""
     paper_parts = []
     for i, p in enumerate(papers):
-        p["_idx"] = str(i)  # Track index for classification
+        p["_idx"] = str(i) 
         abstract = p.get("text", sanitize_abstract(p.get("summary", " ")))
         if len(abstract) < 20 or "\x02" in abstract or "\x01" in abstract:
             abstract = f"[Abstract stripped. Paper: {p['title']}]"
@@ -97,9 +93,6 @@ def _summarize_papers(llm, papers: list[dict], query: str) -> dict:
         )
         summaries = {s.paper_id: s.model_dump() for s in result.summaries}
 
-        # Trust the LLM's evidence classification — it's more accurate than
-        # keyword-based re-classification which over-counts "direct" due to
-        # common academic language like "proposes" and "introduces".
         for i, p in enumerate(papers):
             p["_idx"] = str(i)
 
@@ -141,11 +134,9 @@ def _select_top_references(papers: list[dict], summaries: dict, mode: str, max_r
             supporting_ids.append(sid)
 
     if mode == "normal":
-        # Normal mode: 1-3 most relevant
         selected = direct_ids[:2] + supporting_ids[:1]
         return selected[:3]
     else:
-        # Research mode: up to 8, prioritize direct
         selected = direct_ids + supporting_ids
         return selected[:max_refs]
 
@@ -155,7 +146,6 @@ def _run_normal_mode(llm, state: AgentState, papers: list[dict], summaries: dict
     n_direct = evidence_counts["direct"]
     n_supporting = evidence_counts["supporting"]
 
-    # Determine evidence strength and FORCE confidence rules (Consistent with Researched mode)
     if n_direct >= 2:
         evidence_strength = "High"
         strength_reason = "Multiple directly relevant studies found with consistent evidence."
@@ -220,7 +210,6 @@ Generate a NormalAnswer JSON object matching the schema exactly."""
         if answer is None:
             raise ValueError("Failed to generate valid NormalAnswer after retries")
 
-        # Override LLM confidence with actual evidence-based confidence to ensure consistency
         answer.confidence = evidence_strength
         answer.confidence_explanation = strength_reason
         return answer
@@ -248,7 +237,6 @@ def _run_researched_mode(llm, state: AgentState, papers: list[dict], summaries: 
         for i, p in enumerate(papers)
     ])
 
-    # Determine which sections to include
     include_comparative = n_direct >= 2
 
     prompt = f"""You are a domain researcher writing a detailed literature review.
@@ -299,7 +287,6 @@ Generate a ResearchAnswer JSON object matching the schema exactly."""
         if answer is None:
             raise ValueError("Failed to generate valid ResearchAnswer after retries")
 
-        # Handle adaptive sections
         if not include_comparative:
             answer.comparative_analysis = None
         return answer
@@ -380,27 +367,22 @@ def summarize_node(state: AgentState) -> AgentState:
     mode = state.get("response_mode", "normal")
 
     if not papers:
-        attempts = state.get("search_attempts", 0)
-        terms_tried = state.get("search_terms") or [state.get("query", "")]
-        terms_str = ", ".join(f'"{t}"' for t in terms_tried)
-        message = (
-            f"I searched arXiv and OpenAlex ({attempts} attempt(s), terms: {terms_str}) but couldn't find "
-            f"papers that scored above a usable relevance threshold for this query. This usually means the "
-            f"topic is very narrow, very new, or phrased differently in the literature.\n\n"
-            f"Try: broadening the query, using more standard field terminology, or rephrasing around a related "
-            f"technique or application area."
-        )
+        if mode == "researched":
+            final = _run_researched_mode(llm, state, [], {})
+            answer_text = _stitch_research_answer(final)
+        else:
+            final = _run_normal_mode(llm, state, [], {})
+            answer_text = _stitch_normal_answer(final)
+
         return {
             **state,
-            "final_answer": message,
+            "final_answer": answer_text,
             "coverage_gaps": state.get("search_terms", []),
             "references": [],
         }
 
-    # Summarize papers with evidence classification
     summaries = _summarize_papers(llm, papers, state["query"])
 
-    # Generate answer based on mode
     if mode == "researched":
         final = _run_researched_mode(llm, state, papers, summaries)
         answer_text = _stitch_research_answer(final)
@@ -410,19 +392,17 @@ def summarize_node(state: AgentState) -> AgentState:
         answer_text = _stitch_normal_answer(final)
         ref_ids = final.references if final.references else _select_top_references(papers, summaries, mode, max_refs=3)
 
-    # Build references and rewrite citations (NO markdown block appended)
     references = build_references(papers)
     id_map = paper_id_to_ref_id_map(papers, references)
     answer_text = rewrite_inline_citations(answer_text, id_map)
 
-    # Filter to only selected references (3-5 for normal, up to 8 for researched)
     selected_refs = [r for i, r in enumerate(references) if str(i) in ref_ids] if references else []
 
-    # For researched mode, show ALL references in the frontend UI.
-    # For normal mode, only show the 3-5 selected references.
     frontend_references = references if mode == "researched" else selected_refs
 
-    # Handle confidence and caveats
+    if mode == "researched" and frontend_references:
+        answer_text = answer_text + "\n\n---\n\n**References**\n\n" + format_reference_block(frontend_references)
+
     domain_caveat = state.get("domain_caveat")
     if state.get("low_confidence_results"):
         low_conf_note = (

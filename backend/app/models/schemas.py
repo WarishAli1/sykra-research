@@ -7,7 +7,9 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     upload_mode: Literal["none", "blend", "grounded_only"] = "none"
     include_uploaded: bool = False
-    response_mode: Literal["normal", "researched"] = "normal"
+    response_mode: Literal["normal", "researched", "graph_research"] = "normal"
+    request_id: Optional[str] = None
+    conversation_history: list[dict] = []
 
 
 class PaperResult(BaseModel):
@@ -32,7 +34,7 @@ class ChatResponse(BaseModel):
     papers_below_threshold: int = 0
     graph_contradictions: list[dict] = []
     graph_entities: list[dict] = []
-    response_mode: Literal["normal", "researched"] = "normal"
+    response_mode: Literal["normal", "researched", "graph_research"] = "normal"
     references: list["ReferenceEntry"] = []
 
 
@@ -48,13 +50,24 @@ class ReferenceEntry(BaseModel):
 class FollowupRequest(BaseModel):
     session_id: str
     question: str = Field(..., min_length=3)
-    response_mode: Literal["normal", "researched"] = "normal"
+    response_mode: Literal["normal", "researched", "graph_research"] = "normal"
+    request_id: Optional[str] = None
 
 
 class FollowupResponse(BaseModel):
     answer: str
     sources: list[str]
     references: list[ReferenceEntry] = []
+
+
+class RegenerateRequest(BaseModel):
+    session_id: str
+    turn_id: Optional[str] = None
+    query: str = Field(..., min_length=3)
+    response_mode: Literal["normal", "researched", "graph_research"] = "normal"
+    is_followup: bool = False
+    upload_mode: Literal["none", "blend", "grounded_only"] = "none"
+    include_uploaded: bool = False
 
 
 class UploadResponse(BaseModel):
