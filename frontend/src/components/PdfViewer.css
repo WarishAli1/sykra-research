@@ -1,0 +1,189 @@
+.pdf-header {
+    height: 58px;
+    background: #1F3A5F;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 18px;
+    flex-shrink: 0;
+}
+
+.toolbar-btn {
+    width: 38px;
+    height: 38px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all .2s ease;
+}
+
+.toolbar-btn:hover {
+    background: rgba(255,255,255,.12);
+}
+
+.toolbar-btn:active {
+    transform: scale(.95);
+}
+
+.page-count {
+    min-width: 95px;
+    height: 38px;
+    padding: 0 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 10px;
+    background: rgba(255,255,255,.12);
+    border: 1px solid rgba(255,255,255,.18);
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 600;
+    backdrop-filter: blur(8px);
+}
+
+.sidebar {
+    width: 150px;
+    background: #F5F8F9;
+    border-right: 1px solid #D9E2E8;
+    overflow-y: auto;
+    overflow-x: hidden;
+    flex-shrink: 0;
+}
+
+.thumbnail-page {
+    padding: 12px;
+    cursor: pointer;
+    border-bottom: 1px solid #E8EDF1;
+    transition: all .2s ease;
+}
+
+.thumbnail-page:hover {
+    background: rgba(122,158,142,.12);
+}
+
+.thumbnail-active {
+    background: rgba(31,58,95,.08);
+    border-left: 4px solid #1F3A5F;
+}
+
+.thumbnail-active p {
+    color: #1F3A5F;
+    font-weight: 600;
+}
+
+.pdf-viewer {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: auto;
+    background: #E8EEF3;
+    padding: 36px;
+}
+
+.react-pdf__Document {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.react-pdf__Page {
+    margin-bottom: 28px;
+    background: #ffffff;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow:
+        0 8px 18px rgba(31,58,95,.08),
+        0 20px 40px rgba(31,58,95,.10);
+}
+
+.react-pdf__Page canvas {
+    display: block;
+    max-width: 100%;
+    height: auto !important;
+}
+
+.react-pdf__Page__textContent {
+    user-select: text;
+}
+
+.react-pdf__Page__annotations {
+    pointer-events: auto;
+}
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: #EDF2F5;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #B8C5CF;
+    border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #7A9E8E;
+}
+
+button {
+    outline: none;
+}
+
+button:focus-visible {
+    outline: 2px solid #7A9E8E;
+    outline-offset: 2px;
+}
+
+button:disabled {
+    opacity: .45;
+    cursor: not-allowed;
+}
+
+.react-pdf__Page canvas {
+    border-radius: 8px;
+}
+
+.react-pdf__Page__textContent {
+    opacity: .2;
+}
+
+.react-pdf__Page__annotations {
+    pointer-events: auto;
+}
+
+.pdf-page-wrapper {
+    background: #fff;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid #E5E7EB;
+    box-shadow: 0 10px 30px rgba(31,58,95,.12);
+}
+@media (max-width: 768px) {
+
+    .pdf-header {
+        padding: 0 12px;
+    }
+
+    .sidebar {
+        width: 110px;
+    }
+
+    .page-count {
+        display: none;
+    }
+
+    .pdf-viewer {
+        padding: 16px;
+    }
+
+
+
+}

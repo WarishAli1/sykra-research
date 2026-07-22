@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import { Loader2 } from "lucide-react";
+import { Loader2, MessageSquare, Network } from "lucide-react";
 import dynamic from "next/dynamic";
 import { api } from "@/lib/api";
-import type { FullGraphData } from "@/lib/types";
+import type { FullGraphData, GraphScope } from "@/lib/types";
 
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -14,20 +14,57 @@ const NODE_COLORS: Record<string, string> = {
   method: "#f59e0b",
 };
 
-export function GraphView({ sessionId }: { sessionId: string }) {
+export function GraphView({
+  sessionId,
+  activeTurnId,
+}: {
+  sessionId: string;
+  activeTurnId?: string | null;
+}) {
+  const [scope, setScope] = useState<GraphScope>(activeTurnId ? "message" : "conversation");
   const [graphData, setGraphData] = useState<FullGraphData | null>(null);
   const [loading, setLoading] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
   const [dims, setDims] = useState({ width: 800, height: 600 });
 
   useEffect(() => {
+    if (!activeTurnId && scope === "message") {
+      setScope("conversation");
+    }
+  }, [activeTurnId, scope]);
+
+  useEffect(() => {
+    let cancelled = false;
     setLoading(true);
-    api
-      .getFullGraph(sessionId)
-      .then(setGraphData)
+
+    const fetchGraph =
+      scope === "message" && activeTurnId
+        ? api.getTurnGraph(sessionId, activeTurnId)
+        : api.getFullGraph(sessionId);
+
+    fetchGraph
+      .then((data) => {
+        if (!cancelled) setGraphData(data);
+      })
       .catch(console.error)
-      .finally(() => setLoading(false));
-  }, [sessionId]);
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, scope, activeTurnId]);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => setDims({ width: el.clientWidth, height: el.clientHeight });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [graphData]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -109,25 +146,63 @@ export function GraphView({ sessionId }: { sessionId: string }) {
     ctx.fillText(label, midX, midY);
   }, []);
 
+  const LEGEND_HEIGHT = 33;
+  const TOGGLE_HEIGHT = 40;
+
+  const ScopeToggle = (
+    <div className="flex items-center gap-1 border-b border-line px-3 py-1.5 shrink-0">
+      <button
+        onClick={() => activeTurnId && setScope("message")}
+        disabled={!activeTurnId}
+        title={activeTurnId ? "This message only" : "No active message to scope to"}
+        className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
+          scope === "message"
+            ? "bg-indigo text-white"
+            : "text-ink-soft hover:bg-paper-dim disabled:opacity-40 disabled:hover:bg-transparent"
+        }`}
+      >
+        <MessageSquare className="h-3 w-3" />
+        This Message
+      </button>
+      <button
+        onClick={() => setScope("conversation")}
+        className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
+          scope === "conversation" ? "bg-indigo text-white" : "text-ink-soft hover:bg-paper-dim"
+        }`}
+      >
+        <Network className="h-3 w-3" />
+        Whole Conversation
+      </button>
+    </div>
+  );
+
   if (loading)
     return (
-      <div className="flex items-center gap-2 p-6 text-[12px] text-ink-soft animate-fade-up">
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        Loading visual graph...
+      <div className="w-full h-full flex flex-col">
+        {ScopeToggle}
+        <div className="flex items-center gap-2 p-6 text-[12px] text-ink-soft animate-fade-up">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Loading {scope === "message" ? "message" : "conversation"} graph...
+        </div>
       </div>
     );
 
   if (!graphData || graphData.nodes.length === 0)
     return (
-      <div className="p-6 text-center text-[12.5px] text-ink-soft">
-        No graph data yet. Ask a research question to populate the graph.
+      <div className="w-full h-full flex flex-col">
+        {ScopeToggle}
+        <div className="p-6 text-center text-[12.5px] text-ink-soft">
+          {scope === "message"
+            ? "No graph data for this message yet. Ask a research question to populate it."
+            : "No graph data yet. Ask a research question to populate the graph."}
+        </div>
       </div>
     );
 
-  const LEGEND_HEIGHT = 33;
 
   return (
     <div className="w-full h-full min-h-[400px] bg-paper-dim/30 flex flex-col">
+      {ScopeToggle}
       <div ref={containerRef} className="flex-1 min-h-0">
         <ForceGraph2D
           graphData={graphData}
@@ -140,7 +215,7 @@ export function GraphView({ sessionId }: { sessionId: string }) {
           linkDirectionalArrowRelPos={0.9}
           linkColor={(link: any) => (link.type === "cites" ? "#6366f1" : "#94a3b8")}
           width={dims.width}
-          height={Math.max(dims.height - LEGEND_HEIGHT, 200)}
+          height={Math.max(dims.height - LEGEND_HEIGHT - TOGGLE_HEIGHT, 200)}
         />
       </div>
       <div className="flex items-center gap-4 px-3 py-2 text-[10.5px] text-ink-soft border-t border-line shrink-0">

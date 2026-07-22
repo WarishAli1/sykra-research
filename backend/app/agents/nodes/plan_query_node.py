@@ -10,7 +10,6 @@ def plan_query_node(state: AgentState) -> AgentState:
     mode = state.get("response_mode", "normal")
     llm = get_llm(temperature=0)
 
-    # Step 0: Rewrite query if it's a follow-up to ensure the search engine gets full context
     if history:
         rewrite_prompt = f"""You are an expert search strategist. The user is asking a follow-up question in an ongoing research conversation.
 Conversation History:
@@ -33,7 +32,6 @@ Return ONLY the rewritten search query, nothing else."""
         except Exception as e:
             print(f"[plan_query] Query rewrite failed: {e}")
 
-    # Step 1: Query Understanding
     under_sys = "You are an expert academic research assistant. Extract the core components of the user's research query to understand the intent."
     under_human = f"User Query: {query}\n\nExtract the understanding."
 
@@ -48,7 +46,6 @@ Return ONLY the rewritten search query, nothing else."""
             application_domain="", acronyms={}, entities=[], academic_terminology=[]
         )
 
-    # Step 2: Query Plan (Rewriting & Expansion)
     target_count = 6 if mode == "normal" else 12
     plan_sys = "You are an expert academic search strategist. Generate a diverse set of search queries to maximize recall and precision for academic literature."
     plan_human = f"""
@@ -76,8 +73,7 @@ Return ONLY the rewritten search query, nothing else."""
             domain_queries=[], fallback_queries=[]
         )
 
-    # Flatten and deduplicate queries
-    all_queries = [query] # Always include original
+    all_queries = [query]
     all_queries.extend(plan.rewritten_queries)
     all_queries.extend(plan.expanded_queries)
     all_queries.extend(plan.method_queries)
@@ -90,5 +86,5 @@ Return ONLY the rewritten search query, nothing else."""
         "query_understanding": understanding.model_dump(),
         "query_plan": plan.model_dump(),
         "search_queries": unique_queries,
-        "search_terms": unique_queries, # Keep for backward compatibility
+        "search_terms": unique_queries, 
     }

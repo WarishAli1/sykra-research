@@ -3,10 +3,11 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.api.routes import chat, upload, followup, research, export
+from app.api.routes import chat, upload, followup, research, export, filename as filename_route
 from app.services.graph_store import graph_store
 
 Path("uploads").mkdir(exist_ok=True)
+Path("exports").mkdir(exist_ok=True)
 
 
 @asynccontextmanager
@@ -33,9 +34,11 @@ app.include_router(chat.router, prefix="/api")
 app.include_router(upload.router, prefix="/api")
 app.include_router(followup.router, prefix="/api")
 app.include_router(research.router, prefix="/api")
+app.include_router(filename_route.router, prefix="/api")
 app.include_router(export.router, prefix="/api")
 
 app.mount("/api/uploads", StaticFiles(directory="uploads"), name="uploads")
+app.mount("/exports", StaticFiles(directory="exports"), name="exports")
 
 @app.get("/")
 def root():

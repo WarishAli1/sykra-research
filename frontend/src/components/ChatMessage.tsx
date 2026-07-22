@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 import {
   AlertTriangle,
   BookMarked,
@@ -19,7 +22,7 @@ import {
   OctagonX,
 } from "lucide-react";
 import type { ChatTurn } from "@/lib/types";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, resolveAssetUrl } from "@/lib/api";
 
 function stripReferencesBlock(text: string): string {
   const marker = "\n\n---\n\n**References**";
@@ -29,10 +32,13 @@ function stripReferencesBlock(text: string): string {
 
 function stripMarkdown(text: string): string {
   let s = text;
+  s = s.replace(/\$\$(.+?)\$\$/gs, "$1");
+  s = s.replace(/\$(.+?)\$/g, "$1");
   s = s.replace(/\*\*(.+?)\*\*/g, "$1");
   s = s.replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, "$1");
   s = s.replace(/`([^`]+?)`/g, "$1");
   s = s.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+  s = s.replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1");
   s = s.replace(/^#{1,6}\s+/gm, "");
   s = s.replace(/^\s*[-*+]\s+/gm, "");
   s = s.replace(/^\s*\d+[.)]\s+/gm, "");
@@ -63,6 +69,84 @@ function downloadTextFile(filename: string, content: string, mime: string) {
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+const markdownComponents = {
+  ul({ children, ...props }: any) {
+    return (
+      <ul {...props} className="my-2 space-y-1 pl-1">
+        {children}
+      </ul>
+    );
+  },
+  ol({ children, ...props }: any) {
+    return (
+      <ol {...props} className="my-2 space-y-1 pl-1 list-decimal list-inside marker:text-ink-soft">
+        {children}
+      </ol>
+    );
+  },
+  li({ children, ordered, ...props }: any) {
+    if (ordered) {
+      return (
+        <li {...props} className="pl-1 text-[13.5px] leading-relaxed">
+          {children}
+        </li>
+      );
+    }
+    return (
+      <li {...props} className="flex gap-2 text-[13.5px] leading-relaxed">
+        <span aria-hidden="true" className="shrink-0 text-ink-soft select-none">
+          •
+        </span>
+        <span className="flex-1">{children}</span>
+      </li>
+    );
+  },
+  table({ children, ...props }: any) {
+    return (
+      <div className="my-3 overflow-x-auto rounded-md border border-line">
+        <table {...props} className="w-full border-collapse text-[12.5px]">
+          {children}
+        </table>
+      </div>
+    );
+  },
+  thead({ children, ...props }: any) {
+    return (
+      <thead {...props} className="bg-paper-dim text-ink">
+        {children}
+      </thead>
+    );
+  },
+  th({ children, ...props }: any) {
+    return (
+      <th {...props} className="border-b border-line px-3 py-1.5 text-left font-semibold">
+        {children}
+      </th>
+    );
+  },
+  td({ children, ...props }: any) {
+    return (
+      <td {...props} className="border-b border-line/60 px-3 py-1.5 align-top">
+        {children}
+      </td>
+    );
+  },
+  img({ src, alt, ...props }: any) {
+    const resolved = resolveAssetUrl(src);
+    return (
+      <span className="my-3 block">
+        <img
+          {...props}
+          src={resolved ?? src}
+          alt={alt ?? "Generated chart"}
+          className="max-w-full max-h-[360px] w-auto h-auto rounded-md border border-line shadow-sm shadow-black/5 object-contain"
+        />
+        {alt && <span className="mt-1 block text-center text-[11px] text-ink-soft">{alt}</span>}
+      </span>
+    );
+  },
+};
 
 export function ChatMessage({
   turn,
@@ -114,15 +198,17 @@ export function ChatMessage({
     try {
       const blob = await api.exportPdf({
         session_id: sessionId,
+        turn_id: turn.turnId,
         format,
         answer: turn.text,
         references: turn.references ?? [],
         title: "Research Assistant Answer",
+        chart_path: turn.chartUrl ?? undefined,
       });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `answer-${format}.pdf`;
+      a.download = `${turn.filename ?? "research-answer"}.pdf`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -144,7 +230,7 @@ export function ChatMessage({
         content += "\n" + formatRefMarkdown(r);
       }
     }
-    downloadTextFile("answer.md", content, "text/markdown");
+    downloadTextFile(`${turn.filename ?? "research-answer"}.md`,content,"text/markdown");
     setMenuOpen(false);
   }
 
@@ -158,7 +244,7 @@ export function ChatMessage({
         content += "\n" + formatRefPlain(r);
       }
     }
-    downloadTextFile("answer.txt", content, "text/plain");
+    downloadTextFile(`${turn.filename ?? "research-answer"}.txt`, content, "text/plain");
     setMenuOpen(false);
   }
 
@@ -206,7 +292,13 @@ export function ChatMessage({
 
         {hasText && (
           <div className="prose-chat text-[13.5px] leading-relaxed text-ink">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.text}</ReactMarkdown>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm, remarkMath]}
+              rehypePlugins={[rehypeKatex]}
+              components={markdownComponents}
+            >
+              {stripReferencesBlock(turn.text)}
+            </ReactMarkdown>
             {isStreaming && (
               <span
                 aria-hidden="true"

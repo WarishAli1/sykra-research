@@ -1,16 +1,14 @@
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
-
 class ChatRequest(BaseModel):
     query: str = Field(..., min_length=3)
     session_id: Optional[str] = None
-    upload_mode: Literal["none", "blend", "grounded_only"] = "none"
-    include_uploaded: bool = False
+    turn_id: Optional[str] = None
+    evidence_mode: Literal["literature", "uploaded", "blended"] = "literature"
     response_mode: Literal["normal", "researched", "graph_research"] = "normal"
     request_id: Optional[str] = None
     conversation_history: list[dict] = []
-
 
 class PaperResult(BaseModel):
     title: str
@@ -23,10 +21,10 @@ class PaperResult(BaseModel):
     is_uploaded: bool = False
     file_url: Optional[str] = None
 
-
 class ChatResponse(BaseModel):
     answer: str
     session_id: str
+    turn_id: str
     papers: list[PaperResult]
     citations: list[str]
     coverage_gaps: list[str] = []
@@ -36,7 +34,8 @@ class ChatResponse(BaseModel):
     graph_entities: list[dict] = []
     response_mode: Literal["normal", "researched", "graph_research"] = "normal"
     references: list["ReferenceEntry"] = []
-
+    chart_url: Optional[str] = None
+    filename: Optional[str] = None
 
 class ReferenceEntry(BaseModel):
     id: int
@@ -46,19 +45,26 @@ class ReferenceEntry(BaseModel):
     published: Optional[str] = None
     source: str = "unknown"
 
-
 class FollowupRequest(BaseModel):
     session_id: str
+    turn_id: Optional[str] = None
     question: str = Field(..., min_length=3)
     response_mode: Literal["normal", "researched", "graph_research"] = "normal"
     request_id: Optional[str] = None
-
 
 class FollowupResponse(BaseModel):
     answer: str
     sources: list[str]
     references: list[ReferenceEntry] = []
+    chart_url: Optional[str] = None
 
+class RegenerateRequest(BaseModel):
+    session_id: str
+    turn_id: Optional[str] = None
+    query: str = Field(..., min_length=3)
+    response_mode: Literal["normal", "researched", "graph_research"] = "normal"
+    is_followup: bool = False
+    evidence_mode: Literal["literature", "uploaded", "blended"] = "literature"
 
 class RegenerateRequest(BaseModel):
     session_id: str
@@ -77,7 +83,6 @@ class UploadResponse(BaseModel):
     file_url: str
     link: str
 
-
 class PdfExportRequest(BaseModel):
     session_id: str
     format: Literal["latex", "standard"] = "standard"
@@ -85,6 +90,10 @@ class PdfExportRequest(BaseModel):
     title: Optional[str] = None
     answer: str
     references: list[ReferenceEntry] = []
+    chart_path: Optional[str] = None
 
+class FilenameResponse(BaseModel):
+    turn_id: str
+    filename: Optional[str] = None
 
 ChatResponse.model_rebuild()

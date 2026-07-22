@@ -12,11 +12,15 @@ export function RightRail({
   sessionId,
   tab,
   setTab,
+  onOpenPdf,
+  onDeletePaper,
 }: {
   papers: Paper[];
   sessionId: string;
   tab: Tab;
   setTab: (t: Tab) => void;
+  onOpenPdf: (url: string) => void;
+  onDeletePaper: (paper: Paper) => void | Promise<void>;
 }) {
   return (
     <div className="flex h-full flex-col">
@@ -37,7 +41,7 @@ export function RightRail({
       </div>
 
       <div className="flex-1 min-h-0">
-        {tab === "library" && <LibraryPanel papers={papers} />}
+        {tab === "library" && <LibraryPanel papers={papers} onOpenPdf={onOpenPdf} onDeletePaper={onDeletePaper} />}
         {tab === "explore" && <ExplorePanel key={sessionId} projectId={sessionId} />}
       </div>
     </div>

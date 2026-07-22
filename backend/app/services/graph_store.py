@@ -38,20 +38,32 @@ class GraphStore:
         except (ServiceUnavailable, SessionExpired) as exc:
             print(f"[graph_store] skipped constraints: {type(exc).__name__}: {exc}")
 
-    def upsert_paper(self, paper: dict, session_id: str) -> None:
+    def upsert_paper(self, paper: dict, session_id: str, turn_id: str | None = None) -> None:
+        """turn_id is optional so existing callers (e.g. upload.py, which has
+        no notion of a chat turn) keep working unchanged. When provided, it's
+        recorded as one of possibly many turns that referenced this paper —
+        stored as a list so a paper surfaced across several turns in the same
+        session still shows up correctly scoped to each turn it appeared in."""
         self._safe_run(
             """
             MERGE (p:Paper {link: $link})
             ON CREATE SET p.title = $title, p.published = $published,
                           p.source = $source, p.text_excerpt = $text_excerpt,
-                          p.session = $session_id
+                          p.session = $session_id,
+                          p.turn_ids = CASE WHEN $turn_id IS NULL THEN [] ELSE [$turn_id] END
             ON MATCH SET p.text_excerpt = coalesce(p.text_excerpt, $text_excerpt),
-                         p.session = coalesce(p.session, $session_id)
+                         p.session = coalesce(p.session, $session_id),
+                         p.turn_ids = CASE
+                             WHEN $turn_id IS NULL THEN coalesce(p.turn_ids, [])
+                             WHEN $turn_id IN coalesce(p.turn_ids, []) THEN p.turn_ids
+                             ELSE coalesce(p.turn_ids, []) + $turn_id
+                         END
             """,
             link=paper["link"], title=paper["title"],
             published=str(paper.get("published", "")), source=paper.get("source", "unknown"),
             text_excerpt=(paper.get("text") or paper.get("summary", ""))[:2000],
             session_id=session_id,
+            turn_id=turn_id,
         )
 
     def upsert_author(self, name: str, paper_link: str) -> None:
@@ -202,7 +214,19 @@ class GraphStore:
     def clear_session(self, session_id: str):
         self._safe_run("MATCH (n {session: $session_id}) DETACH DELETE n", session_id=session_id)
 
+
+    def delete_paper(self, link: str):
+        self._safe_run(
+            """
+            MATCH (p:Paper {link:$link})
+            DETACH DELETE p
+            """,
+            link=link,
+        )
+
     def get_full_graph(self, session_id: str) -> dict:
+        """Whole-conversation graph — everything discussed across every turn
+        in this session."""
         try:
             with self.driver.session() as session:
                 nodes = []
@@ -238,6 +262,96 @@ class GraphStore:
                 return {"nodes": nodes, "links": edges}
         except Exception as e:
             print(f"[graph_store] get_full_graph failed: {e}")
+            return {"nodes": [], "links": []}
+
+    def get_turn_graph(self, session_id: str, turn_id: str) -> dict:
+        """Message-scoped graph — only papers/concepts/methods that were
+        actually surfaced during this specific chat turn, filtered via the
+        p.turn_ids list stamped by upsert_paper(..., turn_id=...). Falls back
+        to an empty graph (not an error) if this turn never wrote anything,
+        e.g. a turn with no ranked_papers."""
+        try:
+            with self.driver.session() as session:
+                nodes = []
+                edges = []
+
+                res_papers = session.run(
+                    """
+                    MATCH (p:Paper {session: $sid})
+                    WHERE $turn_id IN coalesce(p.turn_ids, [])
+                    RETURN p
+                    """,
+                    sid=session_id, turn_id=turn_id,
+                )
+                paper_links = set()
+                for r in res_papers:
+                    p = dict(r["p"])
+                    paper_links.add(p["link"])
+                    nodes.append({"id": p["link"], "name": p.get("title", "Paper"), "type": "paper", "val": 10})
+
+                if not paper_links:
+                    return {"nodes": [], "links": []}
+
+                res_concepts = session.run(
+                    """
+                    MATCH (c:Concept)<-[:DISCUSSES]-(p:Paper)
+                    WHERE p.link IN $links
+                    RETURN DISTINCT c
+                    """,
+                    links=list(paper_links),
+                )
+                for r in res_concepts:
+                    c = dict(r["c"])
+                    nodes.append({"id": f"concept_{c['name']}", "name": c["name"], "type": "concept", "val": 5})
+
+                res_methods = session.run(
+                    """
+                    MATCH (m:Method)<-[:USES_METHOD]-(p:Paper)
+                    WHERE p.link IN $links
+                    RETURN DISTINCT m
+                    """,
+                    links=list(paper_links),
+                )
+                for r in res_methods:
+                    m = dict(r["m"])
+                    nodes.append({"id": f"method_{m['name']}", "name": m["name"], "type": "method", "val": 5})
+
+                res_cites = session.run(
+                    """
+                    MATCH (a:Paper)-[:CITES]->(b:Paper)
+                    WHERE a.link IN $links AND b.link IN $links
+                    RETURN a.link, b.link
+                    """,
+                    links=list(paper_links),
+                )
+                for r in res_cites:
+                    edges.append({"source": r["a.link"], "target": r["b.link"], "type": "cites"})
+
+                res_disc = session.run(
+                    """
+                    MATCH (p:Paper)-[:DISCUSSES]->(c:Concept)
+                    WHERE p.link IN $links
+                    RETURN p.link, c.name
+                    """,
+                    links=list(paper_links),
+                )
+                for r in res_disc:
+                    edges.append({"source": r["p.link"], "target": f"concept_{r['c.name']}", "type": "discusses"})
+
+                res_meth = session.run(
+                    """
+                    MATCH (p:Paper)-[:USES_METHOD]->(m:Method)
+                    WHERE p.link IN $links
+                    RETURN p.link, m.name
+                    """,
+                    links=list(paper_links),
+                )
+                for r in res_meth:
+                    edges.append({"source": r["p.link"], "target": f"method_{r['m.name']}", "type": "uses"})
+
+                return {"nodes": nodes, "links": edges}
+        except Exception as e:
+            print(f"[graph_store] get_turn_graph failed: {e}")
             return {"nodes": [], "links": []}
 
 

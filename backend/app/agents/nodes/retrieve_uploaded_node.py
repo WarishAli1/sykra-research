@@ -4,7 +4,7 @@ from app.services.vector_store import vector_store
 
 
 def retrieve_uploaded_node(state: AgentState) -> AgentState:
-    if not state.get("include_uploaded") or state.get("upload_mode") == "none":
+    if state.get("evidence_mode") == "literature":
         return {**state, "uploaded_context": []}
 
     results = vector_store.query_session(
