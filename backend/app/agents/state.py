@@ -3,14 +3,14 @@ from typing import Literal, Optional, TypedDict
 class AgentState(TypedDict):
     query: str
     session_id: str
-    include_uploaded: bool
-    upload_mode: Literal["none", "blend", "grounded_only"]
+    turn_id: str 
+    evidence_mode: Literal["literature", "uploaded", "blended"]
     response_mode: Literal["normal", "researched", "graph_research"]
     refined_query: Optional[str]
     search_terms: list[str]
-    search_queries: list[str] # NEW: Flattened list of all generated queries
-    query_understanding: Optional[dict] # NEW
-    query_plan: Optional[dict] # NEW
+    search_queries: list[str]
+    query_understanding: Optional[dict]
+    query_plan: Optional[dict]
     is_definitional: bool
     likely_cs_relevant: bool
     domain_full: Optional[str]
@@ -37,3 +37,7 @@ class AgentState(TypedDict):
     graph_contradictions: list[dict]
     graph_entities: list[dict]
     conversation_history: list[dict]
+    chart_spec_raw: Optional[str]
+    chart_url: Optional[str]      
+    comparison_table_markdown: Optional[str] 
+    comparison_table_caption: Optional[str]  

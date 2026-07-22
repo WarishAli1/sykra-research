@@ -89,6 +89,16 @@ class VectorStore:
                 matched.append(best)
         return matched
 
+    def delete_paper(self, link: str, session_id: str):
+        self.collection.delete(
+            where={
+                "$and": [
+                    {"session_id": session_id},
+                    {"link": link},
+                ]
+            }
+        )
+
     def get_full_text_for_paper(self, link: str, session_id: str) -> str:
         results = self.collection.get(where={"$and": [{"session_id": session_id}, {"link": link}]})
         chunks_with_idx = sorted(

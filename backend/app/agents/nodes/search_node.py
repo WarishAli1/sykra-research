@@ -7,7 +7,7 @@ from app.services.embeddings import embed_texts, similarity
 
 _query_cache: dict[str, tuple[float, list[dict]]] = {}
 CACHE_TTL_SECONDS = 3600
-MAX_PER_TERM = 30 # Reduced per term since we have more terms
+MAX_PER_TERM = 30
 MAX_TOTAL_CANDIDATES = 150
 
 def _get_cached(query: str) -> list[dict] | None:
@@ -21,7 +21,9 @@ def _set_cached(query: str, results: list[dict]):
     _query_cache[key] = (time.time(), results)
 
 def search_node(state: AgentState) -> AgentState:
-    # Use the expanded search queries from the planning node
+    if state.get("evidence_mode") == "uploaded":
+        return {**state, "raw_search_results": [], "needs_retry": False}
+
     terms = state.get("search_queries") or state.get("search_terms") or [state["query"]]
     terms = list(dict.fromkeys(terms))
 
@@ -53,7 +55,6 @@ def search_node(state: AgentState) -> AgentState:
             per_term_results[term] = results
             _set_cached(term, results)
 
-    # Merge and Deduplicate using IDs and Title
     seen_ids = set()
     seen_titles = set()
     all_results = {}
@@ -61,22 +62,19 @@ def search_node(state: AgentState) -> AgentState:
     for term, results in per_term_results.items():
         if not results: continue
 
-        # Light semantic filter per term to avoid garbage
         term_vec = embed_texts([term])[0]
         abstracts = [p.get("summary", "")[:300] or p["title"] for p in results]
         abstract_vecs = embed_texts(abstracts)
 
         for p, vec in zip(results, abstract_vecs):
             sim = similarity(term_vec, vec)
-            if sim < 0.35: continue # Slightly relaxed threshold since we have more queries
-
+            if sim < 0.35: continue
             arxiv_id = p.get("arxiv_id")
             openalex_id = p.get("openalex_id")
             norm_title = p.get("title", "").strip().lower()
 
             if not norm_title: continue
 
-            # Deduplication logic
             if arxiv_id and arxiv_id in seen_ids: continue
             if openalex_id and openalex_id in seen_ids: continue
             if norm_title in seen_titles: continue
@@ -91,7 +89,6 @@ def search_node(state: AgentState) -> AgentState:
 
     combined = list(all_results.values())[:MAX_TOTAL_CANDIDATES]
 
-    # Domain keyword filtering (kept from original)
     mandatory_kws = state.get("mandatory_domain_keywords")
     domain_full = state.get("domain_full", "")
     if mandatory_kws:

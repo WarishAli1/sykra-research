@@ -1,11 +1,6 @@
 import re
 
-
 def build_references(papers: list[dict]) -> list[dict]:
-    """papers: list of paper dicts as stored in ranked_papers / uploaded metadata.
-    Returns a list of {id, title, authors, link, published, source} with 1-based ids
-    in the same order as `papers` (dedup by link, stable order of first appearance).
-    """
     seen: dict[str, dict] = {}
     order: list[str] = []
     for p in papers:
@@ -14,7 +9,7 @@ def build_references(papers: list[dict]) -> list[dict]:
             continue
         seen[link] = p
         order.append(link)
-
+    
     refs = []
     for i, link in enumerate(order, start=1):
         p = seen[link]
@@ -28,10 +23,17 @@ def build_references(papers: list[dict]) -> list[dict]:
         })
     return refs
 
+def filter_cited_references(references: list[dict], cited_links: list[str]) -> list[dict]:
+    """Scope references to only those actually cited/used in the current turn."""
+    if not cited_links:
+        return references
+    cited_set = set(cited_links)
+    filtered = [r for r in references if r["link"] in cited_set]
+    for i, r in enumerate(filtered, start=1):
+        r["id"] = i
+    return filtered
 
 def paper_id_to_ref_id_map(papers: list[dict], references: list[dict]) -> dict[str, int]:
-    """Maps the internal 0-based `paper_id=N` index (position in `papers`) to the
-    1-based reference id used in the final answer text, via link matching."""
     link_to_ref_id = {r["link"]: r["id"] for r in references}
     mapping = {}
     for i, p in enumerate(papers):
@@ -40,25 +42,16 @@ def paper_id_to_ref_id_map(papers: list[dict], references: list[dict]) -> dict[s
             mapping[str(i)] = link_to_ref_id[link]
     return mapping
 
-
 _PAPER_ID_MARKER = re.compile(r"\[paper_id=(\d+)\]")
 
-
 def rewrite_inline_citations(text: str, id_map: dict[str, int]) -> str:
-    """Rewrites any leftover [paper_id=N] markers into user-facing [n] markers.
-    Safe no-op if the text has none (current prompts already strip them, but this
-    guards against a model regression re-introducing them, and is what researched
-    mode relies on since it explicitly asks for inline citations)."""
     def _sub(m):
         pid = m.group(1)
         ref_id = id_map.get(pid)
         return f"[{ref_id}]" if ref_id is not None else ""
     return _PAPER_ID_MARKER.sub(_sub, text)
 
-
 def format_reference_block(references: list[dict]) -> str:
-    """Human-readable numbered reference list, e.g. for appending to researched-mode
-    answers and for the PDF export."""
     lines = []
     for r in references:
         authors = ", ".join(r["authors"][:3])

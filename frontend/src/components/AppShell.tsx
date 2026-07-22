@@ -7,7 +7,13 @@ import { ChatPanel } from "./ChatPanel";
 import { GraphView } from "./GraphView";
 import { api, ApiError } from "@/lib/api";
 import type { ChatTurn, Paper } from "@/lib/types";
-
+import dynamic from "next/dynamic";
+const PdfViewer = dynamic(
+  () => import("./PdfViewer").then((m) => m.PdfViewer),
+  {
+    ssr: false,
+  }
+);
 function mergePapers(existing: Paper[], incoming: Paper[]): Paper[] {
   const byTitle = new Map(existing.map((p) => [p.title, p]));
   for (const p of incoming) byTitle.set(p.title, p);
@@ -26,6 +32,9 @@ export function AppShell() {
   const [tab, setTab] = useState<"library" | "explore">("library");
   const [showGraphView, setShowGraphView] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [pdfViewerUrl, setPdfViewerUrl] = useState<string | null>(null);
+
+  const lastAssistantTurnId = [...turns].reverse().find((t) => t.role === "assistant" && t.turnId)?.turnId ?? null;
 
   const handleNewPapers = useCallback((incoming: Paper[]) => {
     if (!incoming.length) return;
@@ -41,13 +50,22 @@ export function AppShell() {
   const handleBackToChat = () => {
     setShowGraphView(false);
   };
-
+  const handleOpenPdf = (url: string) => setPdfViewerUrl(url);
+  const handleClosePdf = () => setPdfViewerUrl(null);
   const handleNewChat = () => {
     setTurns([]);
     setPapers([]);
     setUploadedFilename(null);
     setSessionId(crypto.randomUUID());
     setShowGraphView(false);
+  };
+
+  const handleDeletePaper = async (paper: Paper) => {
+    await api.deleteUploadedPdf(sessionId, paper.link);
+
+    setPapers(prev =>
+        prev.filter(p => p.link !== paper.link)
+    );
   };
 
   const handleDownloadConversationPdf = useCallback(async () => {
@@ -84,21 +102,24 @@ export function AppShell() {
     }
   }, [turns, sessionId]);
 
-  async function handleUpload(file: File) {
-    const res = await api.uploadPdf(file, sessionId);
-    setUploadedFilename(res.filename);
+  function handleUploadComplete(data: {
+    filename: string;
+    fileUrl: string;
+    link: string;
+  }) {
+    setUploadedFilename(data.filename);
 
     handleNewPapers([
       {
-        title: res.filename,
+        title: data.filename,
         authors: [],
         summary: "",
-        link: res.link,
+        link: data.link,
         published: null,
         relevance_score: null,
         source: "user_upload",
         is_uploaded: true,
-        file_url: res.file_url,
+        file_url: data.fileUrl,
       },
     ]);
   }
@@ -132,14 +153,15 @@ export function AppShell() {
                 <span className="font-serif text-[15px] font-semibold text-ink">Knowledge Graph</span>
               </div>
               <div className="flex-1 min-h-0">
-                <GraphView sessionId={sessionId} />
+                <GraphView sessionId={sessionId} activeTurnId={lastAssistantTurnId} />
               </div>
             </div>
           ) : (
             <ChatPanel
               uploadedFilename={uploadedFilename}
-              onUpload={handleUpload}
+              onUploadComplete={handleUploadComplete}
               onNewPapers={handleNewPapers}
+              onOpenPdf={handleOpenPdf}
               turns={turns}
               setTurns={setTurns}
               sessionId={sessionId}
@@ -169,6 +191,8 @@ export function AppShell() {
                   sessionId={sessionId}
                   tab={tab}
                   setTab={setTab}
+                  onOpenPdf={handleOpenPdf}
+                  onDeletePaper={handleDeletePaper}
                 />
               </div>
             </div>
@@ -208,6 +232,7 @@ export function AppShell() {
           )}
         </div>
       </div>
+       {pdfViewerUrl && <PdfViewer url={pdfViewerUrl} onClose={handleClosePdf} />}
     </div>
   );
 }

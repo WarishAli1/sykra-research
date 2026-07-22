@@ -1,4 +1,5 @@
 export type ResponseMode = "normal" | "researched";
+export type EvidenceMode = "literature" | "uploaded" | "blended";
 
 export interface ReferenceEntry {
   id: number;
@@ -24,6 +25,7 @@ export type Paper = {
 export type ChatTurn = {
   role: "user" | "assistant";
   id: string;
+  turnId?: string; // backend turn_id, used to scope message-level KG queries
   text: string;
   papers?: Paper[];
   sources?: string[];
@@ -38,15 +40,17 @@ export type ChatTurn = {
   stopped?: boolean;
   statusLabel?: string;
   requestId?: string;
+  filename?: string;
   sourceQuery?: string;
-  sourceUploadMode?: "none" | "blend" | "grounded_only";
+  sourceEvidenceMode?: EvidenceMode;
+  chartUrl?: string | null; // seaborn chart image path, if one was generated
 };
 
 export type ChatRequest = {
   query: string;
   session_id?: string;
-  upload_mode?: "none" | "blend" | "grounded_only";
-  include_uploaded?: boolean;
+  turn_id?: string;
+  evidence_mode?: EvidenceMode;
   response_mode: ResponseMode;
   request_id?: string;
   conversation_history?: { role: string; content: string }[];
@@ -55,6 +59,7 @@ export type ChatRequest = {
 export type ChatResponse = {
   answer: string;
   session_id: string;
+  turn_id: string;
   papers: Paper[];
   citations: string[];
   coverage_gaps: string[];
@@ -64,10 +69,13 @@ export type ChatResponse = {
   graph_entities?: Array<Record<string, unknown>>;
   response_mode: ResponseMode;
   references: ReferenceEntry[];
+  chart_url?: string | null;
+  filename?: string | null;
 };
 
 export type FollowupRequest = {
   session_id: string;
+  turn_id?: string;
   question: string;
   response_mode: ResponseMode;
 };
@@ -76,13 +84,14 @@ export type FollowupResponse = {
   answer: string;
   sources: string[];
   references: ReferenceEntry[];
+  chart_url?: string | null;
 };
 
 export type RegenerateRequest = {
   query: string;
   session_id?: string;
-  upload_mode?: "none" | "blend" | "grounded_only";
-  include_uploaded?: boolean;
+  turn_id?: string;
+  evidence_mode?: EvidenceMode;
   response_mode: ResponseMode;
   request_id?: string;
   is_followup?: boolean;
@@ -94,6 +103,21 @@ export type StreamEvent =
   | { type: "result"; payload: ChatResponse }
   | { type: "cancelled" }
   | { type: "error"; message: string };
+
+export type UploadStreamEvent =
+  | {
+      type: "progress";
+      label: string;
+      stage?: string;
+    }
+  | {
+      type: "result";
+      payload: UploadResponse;
+    }
+  | {
+      type: "error";
+      message: string;
+    };
 
 export type UploadResponse = {
   filename: string;
@@ -159,6 +183,8 @@ export type GraphNode = { id: string; name: string; type: string; val: number };
 export type GraphLink = { source: string; target: string; type: string };
 export type FullGraphData = { nodes: GraphNode[]; links: GraphLink[] };
 
+export type GraphScope = "message" | "conversation";
+
 export interface PdfExportRequest {
   session_id: string;
   format: "standard" | "latex";
@@ -166,4 +192,5 @@ export interface PdfExportRequest {
   references: ReferenceEntry[];
   title?: string;
   turn_id?: string;
+  chart_path?: string;
 }

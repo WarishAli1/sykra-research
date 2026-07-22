@@ -1,8 +1,18 @@
 import time
+import json
+import re
+from langchain_core.messages import HumanMessage
+from pydantic import ValidationError
 from langchain_groq import ChatGroq
 from langchain_cerebras import ChatCerebras
 from app.config import settings
 
+
+def _extract_json(text: str) -> str:
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE)
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    return match.group(0) if match else text
 
 def _is_rate_limit_error(e: Exception) -> bool:
     msg = str(e).lower()
@@ -49,20 +59,36 @@ class _StructuredFailoverRunner:
         last_exc = None
         providers = _build_providers(self.temperature, self.preferred_order)
         for attempt, (name, build) in enumerate(providers):
+            model = build()
             try:
-                result = build().with_structured_output(self.schema).invoke(prompt, **kwargs)
+                result = model.with_structured_output(self.schema).invoke(prompt, **kwargs)
                 _call_counts[name] += 1
                 return result
             except Exception as e:
-                print(f"[llm_client] {name} failed: {type(e).__name__}: {e}")
+                print(f"[llm_client] {name} structured failed: {type(e).__name__}: {e}")
                 last_exc = e
-                if _is_rate_limit_error(e):
-                    wait = min(2 ** (attempt + 1), 10)
-                    print(f"[llm_client] Rate limited on {name}, waiting {wait}s...")
-                    time.sleep(wait)
-                else:
-                    time.sleep(0.5)
-                continue
+
+            try:
+                schema_json = self.schema.model_json_schema()
+                json_prompt = list(prompt) + [HumanMessage(content=(
+                    f"Respond with ONLY a JSON object matching this schema, "
+                    f"no markdown fences, no preamble:\n{json.dumps(schema_json)}"
+                ))]
+                raw = model.invoke(json_prompt, **kwargs)
+                parsed = json.loads(_extract_json(raw.content))
+                result = self.schema.model_validate(parsed)
+                _call_counts[name] += 1
+                return result
+            except Exception as e2:
+                print(f"[llm_client] {name} JSON fallback failed: {type(e2).__name__}: {e2}")
+                last_exc = e2
+
+            if _is_rate_limit_error(last_exc):
+                wait = min(2 ** (attempt + 1), 10)
+                print(f"[llm_client] Rate limited on {name}, waiting {wait}s...")
+                time.sleep(wait)
+            else:
+                time.sleep(0.5)
         raise last_exc or RuntimeError("All LLM providers exhausted")
 
 

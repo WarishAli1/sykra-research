@@ -10,6 +10,52 @@ from app.services.reference_builder import (
 )
 from app.utils.text_cleaning import sanitize_abstract
 
+LATEX_INSTRUCTION = """
+MATH FORMATTING (use whenever a formula, equation, or mathematical
+expression is part of the answer):
+- Always express formulas using real LaTeX delimiters, never plain text or
+  ASCII approximations.
+- Inline math: wrap in single dollar signs, e.g. $d_k$ or $Q, K, V$.
+- Display/standalone equations: wrap in double dollar signs on their own line, e.g.
+  $$\\text{Attention}(Q,K,V) = \\text{softmax}\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V$$
+- Do NOT use \\( \\) or \\[ \\] delimiters, and do NOT emit raw HTML/XML tags
+  (e.g. <font>, <para>) around equations — dollar-sign delimiters only.
+- Every symbol used in a formula (e.g. Q, K, V, d_k) must be briefly defined
+  in prose immediately after the equation.
+"""
+
+
+def _evidence_mode_instruction(mode: str) -> str:
+    """Step 6: single prompt-level switch instead of forked answer schemas.
+    Confidence semantics also shift per mode (Step 8) — this text makes that
+    explicit to the LLM rather than relying on a separate confidence field."""
+    if mode == "uploaded":
+        return """
+EVIDENCE MODE: UPLOADED DOCUMENT ONLY
+- Answer ONLY using the uploaded document provided in the papers below.
+- Never invent information not present in the document.
+- If the document lacks evidence for part of the question, say so explicitly.
+- Do NOT cite or reference any outside/external papers.
+- CONFIDENCE here means: "How well does the uploaded document answer the
+  question?" — NOT how strong external scientific evidence is. High = the
+  document directly and thoroughly answers it. Low = the document barely
+  touches on it or doesn't address it.
+"""
+    if mode == "blended":
+        return """
+EVIDENCE MODE: BLENDED (uploaded document + literature)
+- Treat the uploaded document as the PRIMARY source.
+- Use retrieved literature only for validation, comparison, or background —
+  clearly separate literature-derived claims from document-derived claims.
+- CONFIDENCE here means how strong the combined available evidence is
+  (document + literature), same as standard literature-mode confidence.
+"""
+    return """
+EVIDENCE MODE: LITERATURE
+- Use retrieved literature only.
+- CONFIDENCE here means how strong the available research evidence is.
+"""
+
 
 def _invoke_structured_with_repair(llm, messages, schema, max_retries=2):
     """Invokes the LLM with structured output, retrying with error feedback if validation fails."""
@@ -83,7 +129,35 @@ def _summarize_papers(llm, papers: list[dict], query: str) -> dict:
     paper_block = _build_paper_block_with_classification(papers, {})
 
     batch_messages = [
-        SystemMessage(content="Summarize each paper using BatchPaperSummaries. Classify evidence type as 'direct', 'supporting', or 'background' based on how directly it addresses the query."),
+        SystemMessage(
+            content=(
+                "You MUST return a JSON object with this EXACT structure:\n"
+                '{\n'
+                '  "summaries": [\n'
+                '    {\n'
+                '      "paper_id": "0",\n'
+                '      "key_contribution": "what the paper proposed",\n'
+                '      "methodology": "methods, datasets, evaluation",\n'
+                '      "findings": "main results and findings",\n'
+                '      "relevance_to_query": "how directly it addresses the query",\n'
+                '      "evidence_type": "direct" | "supporting" | "background",\n'
+                '      "key_metrics": ["exact numeric figures stated in the text, e.g. '
+                '\'top-1 accuracy +2-4% over CNN\', \'published 2023\', \'O(N^2) attention cost\'"]\n'
+                '    },\n'
+                '    { "paper_id": "1", ... }\n'
+                '  ]\n'
+                '}\n\n'
+                "CRITICAL: You MUST wrap the array in a 'summaries' key. "
+                "Do NOT return just the array. "
+                "All field names must be exactly as shown (lowercase, case-sensitive). "
+                "paper_id MUST be a string, not a number.\n\n"
+                "KEY_METRICS RULES:\n"
+                "- Copy numbers/figures VERBATIM from the abstract/text — never estimate or infer.\n"
+                "- Include comparative figures (e.g. accuracy deltas, FLOPs, latency, dataset sizes, "
+                "parameter counts) if explicitly stated, even approximate ranges like '2-4%'.\n"
+                "- If the paper states no such figures, return an empty list — do not fabricate."
+            )
+        ),
         HumanMessage(content=f"Query: {query}\n\n{paper_block}"),
     ]
 
@@ -105,7 +179,8 @@ def _summarize_papers(llm, papers: list[dict], query: str) -> dict:
                 "methodology": "",
                 "findings": "",
                 "relevance_to_query": "",
-                "evidence_type": "supporting"
+                "evidence_type": "supporting",
+                "key_metrics": []
             }
             for i, p in enumerate(papers)
         }
@@ -169,21 +244,18 @@ Supporting evidence: {n_supporting} paper(s)
 PAPERS:
 {paper_block}
 
-INSTRUCTIONS & STRUCTURE:
-1. DIRECT ANSWER: Provide 2-4 sentences directly answering the query.
-2. BRIEF CONTEXT: Explain essential concepts in EXACTLY ONE sentence. ONLY include if strictly necessary.
-3. EVIDENCE: This is the most important section. Do NOT just write a single paragraph. Summarize 2-4 key studies (or explain the single direct study in depth if only one exists). For each study, explicitly cover:
-   - What the study proposed
-   - How it was evaluated
-   - Datasets used
-   - Main findings
-   - Why it matters
-   Use bolding for study names or key terms to make it readable.
-4. LIMITATIONS: Provide an expanded list of limitations (at least 3-5 points). You MUST include specific methodological gaps such as: lack of replication, absence of user studies, limited benchmarks, no comparison with other techniques, or uncertain generalizability.
-5. CONCLUSION: Instead of a single sentence, briefly answer these three questions:
-   - What is supported by the evidence?
-   - What remains uncertain?
-   - What should future work investigate?
+You MUST return a JSON object with EXACTLY these field names (case-sensitive):
+- "direct_answer": string (2-4 sentences directly answering the query)
+- "brief_context": string or null (EXACTLY ONE sentence if strictly necessary, otherwise null)
+- "evidence": string (detailed summary with markdown formatting)
+- "limitations": array of strings (3-5 distinct methodological gaps)
+- "conclusion": string (asks: what is supported, what remains uncertain, what future work)
+- "confidence": "High" | "Medium" | "Low"
+- "confidence_explanation": string
+- "references": array of paper_id strings
+
+DO NOT use field names like "answer", "context", "CONFIDENCE", "Limitations", or any variations.
+USE EXACTLY the lowercase field names listed above.
 
 CONFIDENCE RULES (CRITICAL - MUST BE CONSISTENT):
 - If direct evidence >= 2: Confidence is "High".
@@ -194,8 +266,8 @@ CRITICAL RULES:
 - Do NOT claim a paper solves the problem unless it explicitly does.
 - Do NOT combine unrelated papers into a fictional framework.
 - If evidence is weak, explicitly state that in the Conclusion.
-
-Generate a NormalAnswer JSON object matching the schema exactly."""
+{_evidence_mode_instruction(state.get("evidence_mode", "literature"))}
+{LATEX_INSTRUCTION}"""
 
     try:
         answer = _invoke_structured_with_repair(
@@ -239,6 +311,25 @@ def _run_researched_mode(llm, state: AgentState, papers: list[dict], summaries: 
 
     include_comparative = n_direct >= 2
 
+    user_query_lower = state['query'].lower()
+    explicitly_wants_table = any(w in user_query_lower for w in ("table", "tabular", "tabulate"))
+
+    table_instruction = ""
+    if explicitly_wants_table:
+        table_instruction = (
+            "\n\nTABLE REQUIREMENT (MANDATORY — the user explicitly asked for a table):\n"
+            "You MUST include a markdown table in the COMPARATIVE ANALYSIS field. "
+            "The table must compare what the user actually asked to compare "
+            f"(re-read the query: \"{state['query']}\") — if the user asked to "
+            "compare architectures/methods/models (e.g. 'compare CNNs and ViTs'), "
+            "the table rows must be comparison DIMENSIONS (e.g. accuracy, compute "
+            "cost, data efficiency, interpretability) with one column per "
+            "architecture/method being compared, populated with real findings "
+            "cited via [paper_id=N] — NOT a list of the source papers themselves. "
+            "Only build a table of the papers themselves if the user explicitly "
+            "asked to compare the papers/studies/literature directly."
+        )
+
     prompt = f"""You are a domain researcher writing a detailed literature review.
 QUERY: {state['query']}
 EVIDENCE AVAILABLE:
@@ -248,7 +339,24 @@ Supporting evidence: {evidence_counts['supporting']} paper(s)
 PAPERS:
 {paper_block}
 
-INSTRUCTIONS & STRUCTURE:
+You MUST return a JSON object with EXACTLY these field names (case-sensitive):
+- "executive_summary": string
+- "background_concepts": string
+- "related_research": string
+- "literature_review": string
+- "comparative_analysis": string or null
+- "evidence_assessment": string
+- "research_gaps": string
+- "practical_implications": string
+- "final_answer": string
+- "confidence": "High" | "Medium" | "Low"
+- "confidence_explanation": string
+- "references": array of paper_id strings
+
+DO NOT use field names like "ExecutiveSummary", "BACKGROUND", or any other casing variations.
+USE EXACTLY the lowercase field names listed above.
+
+Content per field:
 1. EXECUTIVE SUMMARY: High-level summary of what literature supports, what is uncertain, and the final answer.
 2. BACKGROUND CONCEPTS: Explain concepts from general → specific. Teach before evaluating. Only include what's relevant.
 3. RELATED RESEARCH: Briefly cover adjacent areas and explain their relevance to the question.
@@ -264,6 +372,11 @@ FORMATTING REQUIREMENTS:
 - Use ## for section headers.
 - Use bullet points (- item) for lists.
 - Each paragraph should be separated by a blank line.
+- Do NOT write a "References", "Bibliography", or "Works Cited" section
+  anywhere in any field. The application appends a single formatted
+  references list automatically after your answer — writing your own
+  creates a duplicate, messy list. Only use inline [paper_id=N] citations.
+{table_instruction}
 
 CRITICAL RULES:
 - Synthesize literature instead of listing papers.
@@ -271,7 +384,8 @@ CRITICAL RULES:
 - Clearly distinguish established evidence from speculation.
 - Do NOT combine unrelated studies into fictional frameworks.
 - If no direct evidence exists, state "No direct evidence was found" and explain the closest research.
-
+{_evidence_mode_instruction(state.get("evidence_mode", "literature"))}
+{LATEX_INSTRUCTION}
 Generate a ResearchAnswer JSON object matching the schema exactly."""
 
     try:
@@ -307,6 +421,60 @@ Generate a ResearchAnswer JSON object matching the schema exactly."""
             references=[]
         )
 
+_PAPER_AS_SUBJECT_PATTERNS = (
+    "compare the papers", "compare these papers", "compare papers",
+    "compare the studies", "compare these studies", "compare studies",
+    "table of papers", "table of the papers", "table of studies",
+    "compare the retrieved papers", "compare retrieved papers",
+    "papers comparison", "studies comparison",
+    "list the papers", "summarize the papers in a table",
+    "table comparing the papers", "table comparing papers",
+    "table comparing the studies", "table comparing studies",
+)
+
+
+def _wants_paper_comparison_table(query: str) -> bool:
+    """True only when the user explicitly asks to compare the RETRIEVED
+    PAPERS/STUDIES THEMSELVES as the subject of the table (title/year/
+    contribution/methodology per paper) — e.g. 'compare these papers in a
+    table'. This is intentionally narrow: a query like 'compare CNNs and
+    ViTs... from the retrieved papers' is asking to compare CNNs vs ViTs
+    (a table of comparison DIMENSIONS with citations), not a table listing
+    the papers — incidental words like 'paper'/'research' anywhere in the
+    query must NOT trigger this path, or the wrong table gets substituted
+    in for whatever the LLM's comparative_analysis field produced."""
+    q = query.lower()
+    return any(pattern in q for pattern in _PAPER_AS_SUBJECT_PATTERNS)
+
+
+def _generate_fallback_table(papers: list[dict], summaries: dict, query: str) -> str | None:
+    """Generate a basic comparison table from papers, used ONLY as a last
+    resort when the query explicitly asked to compare the papers themselves
+    (see _wants_paper_comparison_table) and the LLM produced no table at all."""
+    if len(papers) < 2:
+        return None
+
+    lines = ["| # | Paper | Year | Key Contribution | Methodology |", "|---|-------|------|------------------|-------------|"]
+    for i, p in enumerate(papers[:6]):
+        sid = str(i)
+        summary = summaries.get(sid, {})
+        year = p.get('published', '')
+        if year and len(year) > 4:
+            year = year[:4]
+
+        title = p.get('title', '')
+        contribution = summary.get('key_contribution', '')[:90]
+        methodology = summary.get('methodology', '')[:90]
+
+        lines.append(
+            f"| {i+1} | {title[:50]}{'...' if len(title)>50 else ''} "
+            f"| {year or 'N/A'} | {contribution}{'...' if len(summary.get('key_contribution',''))>90 else ''} "
+            f"| {methodology}{'...' if len(summary.get('methodology',''))>90 else ''} |"
+        )
+
+    return "\n".join(lines)
+
+
 def _stitch_normal_answer(answer: NormalAnswer) -> str:
     """Format normal mode answer."""
     parts = []
@@ -331,30 +499,44 @@ def _stitch_normal_answer(answer: NormalAnswer) -> str:
     return "\n".join(parts)
 
 
+def _strip_headers(text: str) -> str:
+    """Strip leading markdown headers from LLM-generated field content."""
+    if not text:
+        return text
+    lines = text.split('\n')
+    cleaned = []
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r'^#{1,4}\s+\S', stripped) and len(stripped) < 60:
+            continue
+        cleaned.append(line)
+    return '\n'.join(cleaned)
+
+
 def _stitch_research_answer(answer: ResearchAnswer) -> str:
     """Format research mode answer with proper markdown."""
     parts = []
 
-    if answer.executive_summary:
-        parts.append(f"## Executive Summary\n\n{answer.executive_summary.replace(chr(92)+'n', chr(10))}\n")
-    if answer.background_concepts:
-        parts.append(f"## Background Concepts\n\n{answer.background_concepts.replace(chr(92)+'n', chr(10))}\n")
-    if answer.related_research:
-        parts.append(f"## Related Research\n\n{answer.related_research.replace(chr(92)+'n', chr(10))}\n")
-    if answer.literature_review:
-        parts.append(f"## Literature Review\n\n{answer.literature_review.replace(chr(92)+'n', chr(10))}\n")
-    if answer.comparative_analysis:
-        parts.append(f"## Comparative Analysis\n\n{answer.comparative_analysis.replace(chr(92)+'n', chr(10))}\n")
-    if answer.evidence_assessment:
-        parts.append(f"## Evidence Assessment\n\n{answer.evidence_assessment.replace(chr(92)+'n', chr(10))}\n")
-    if answer.research_gaps:
-        gaps = answer.research_gaps.replace(chr(92)+'n', chr(10))
-        gaps = re.sub(r'\d+\)\s*', '- ', gaps)
-        parts.append(f"## Research Gaps\n\n{gaps}\n")
-    if answer.practical_implications:
-        parts.append(f"## Practical Implications\n\n{answer.practical_implications.replace(chr(92)+'n', chr(10))}\n")
-    if answer.final_answer:
-        parts.append(f"## Final Answer\n\n{answer.final_answer.replace(chr(92)+'n', chr(10))}\n")
+    fields = [
+        ("Executive Summary", answer.executive_summary),
+        ("Background Concepts", answer.background_concepts),
+        ("Related Research", answer.related_research),
+        ("Literature Review", answer.literature_review),
+        ("Comparative Analysis", answer.comparative_analysis),
+        ("Evidence Assessment", answer.evidence_assessment),
+        ("Research Gaps", answer.research_gaps),
+        ("Practical Implications", answer.practical_implications),
+        ("Final Answer", answer.final_answer),
+    ]
+
+    for section_name, field_value in fields:
+        if not field_value:
+            continue
+        content = field_value.replace(chr(92)+'n', chr(10))
+        content = _strip_headers(content)
+        if section_name == "Research Gaps":
+            content = re.sub(r'\d+\)\s*', '- ', content)
+        parts.append(f"## {section_name}\n\n{content}\n")
 
     ce = answer.confidence_explanation.replace(chr(92)+'n', chr(10))
     parts.append(f"## Confidence: {answer.confidence}\n\n{ce}\n")
@@ -387,12 +569,23 @@ def summarize_node(state: AgentState) -> AgentState:
         final = _run_researched_mode(llm, state, papers, summaries)
         answer_text = _stitch_research_answer(final)
         ref_ids = final.references if final.references else _select_top_references(papers, summaries, mode, max_refs=8)
+
+        user_wants_table = _wants_paper_comparison_table(state['query'])
+        if user_wants_table and not final.comparative_analysis:
+            fallback = _generate_fallback_table(papers, summaries, state['query'])
+            if fallback:
+                answer_text += f"\n\n## Comparative Analysis\n\n{fallback}\n"
     else:
         final = _run_normal_mode(llm, state, papers, summaries)
         answer_text = _stitch_normal_answer(final)
         ref_ids = final.references if final.references else _select_top_references(papers, summaries, mode, max_refs=3)
 
+    evidence_mode = state.get("evidence_mode", "literature")
     references = build_references(papers)
+
+    if evidence_mode == "uploaded":
+        references = [r for r in references if r.get("source") == "user_upload"]
+
     id_map = paper_id_to_ref_id_map(papers, references)
     answer_text = rewrite_inline_citations(answer_text, id_map)
 
@@ -401,6 +594,12 @@ def summarize_node(state: AgentState) -> AgentState:
     frontend_references = references if mode == "researched" else selected_refs
 
     if mode == "researched" and frontend_references:
+        answer_text = re.sub(
+            r'\n\n(?:---\n\n)?#{0,4}\s*\*{0,2}(?:References|Bibliography|Works Cited)\*{0,2}\s*\n.*',
+            '',
+            answer_text,
+            flags=re.DOTALL | re.IGNORECASE
+        ).strip()
         answer_text = answer_text + "\n\n---\n\n**References**\n\n" + format_reference_block(frontend_references)
 
     domain_caveat = state.get("domain_caveat")

@@ -9,8 +9,12 @@ type SortMode = "relevance" | "newest" | "oldest" | "title";
 
 export function LibraryPanel({
   papers,
+  onOpenPdf,
+  onDeletePaper,
 }: {
   papers: Paper[];
+  onOpenPdf: (url: string) => void;
+  onDeletePaper: (paper: Paper) => void | Promise<void>;
 }) {
   const [query, setQuery] = useState("");
   const [minRelevance, setMinRelevance] = useState(0);
@@ -173,7 +177,7 @@ export function LibraryPanel({
         )}
 
         {filtered.map((p, i) => (
-          <PaperCard key={`${p.link}-${i}`} paper={p} />
+          <PaperCard key={`${p.link}-${i}`} paper={p} onOpenPdf={onOpenPdf} onDeletePaper={onDeletePaper} />
         ))}
       </div>
     </div>

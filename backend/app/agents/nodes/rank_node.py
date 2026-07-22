@@ -40,7 +40,6 @@ def _weighted_score(paper: dict, orig_vec: list[float], other_vecs: list[list[fl
     vec = paper.get("abstract_vec")
     if vec is None: return 0.0
 
-    # Original query gets higher weight to prevent topic drift
     relevance_orig = similarity(orig_vec, vec)
     relevance_others = max((similarity(v, vec) for v in other_vecs), default=0.0)
 
@@ -91,13 +90,20 @@ def _deduplicate_papers(papers: list[dict]) -> list[dict]:
 
 def rank_node(state: AgentState) -> AgentState:
     papers = state["raw_search_results"]
+    is_uploaded_only = state.get("evidence_mode") == "uploaded"
+
     if not papers:
-        return {**state, "ranked_papers": [], "needs_retry": True, "papers_below_threshold": 0, "low_confidence_results": False}
+        return {
+            **state,
+            "ranked_papers": [],
+            "needs_retry": False if is_uploaded_only else True,
+            "papers_below_threshold": 0,
+            "low_confidence_results": False,
+        }
 
     original_query = state["query"]
     search_queries = state.get("search_queries", [original_query])
 
-    # Embed queries
     orig_vec = embed_texts([original_query])[0]
     other_queries = [q for q in search_queries if q != original_query]
     other_vecs = embed_texts(other_queries) if other_queries else []
@@ -137,26 +143,34 @@ def rank_node(state: AgentState) -> AgentState:
 
     low_confidence_results = tier_used is not None and tier_used < 1.0
 
-    # Fallback: Citation Graph Expansion
-    if len(prefiltered) < settings.TOP_K_PAPERS_MIN:
+    if len(prefiltered) < settings.TOP_K_PAPERS_MIN and not is_uploaded_only:
         top_ids = [p.get("openalex_id") for p in deduped[:3] if p.get("openalex_id")]
         if top_ids:
             print(f"[rank] Few papers found ({len(prefiltered)}). Expanding via OpenAlex citation graph for IDs: {top_ids}")
             extra_papers = fetch_openalex_citation_graph(top_ids, limit_per_paper=3)
 
-            # Score and add extra papers
             if extra_papers:
-                extra_abstracts = [p["summary"][:500] for p in extra_papers if _has_valid_abstract(p)]
-                extra_vecs = embed_texts(extra_abstracts) if extra_abstracts else []
+                extra_valid = [p for p in extra_papers if _has_valid_abstract(p)]
+                extra_invalid = [p for p in extra_papers if not _has_valid_abstract(p)]
 
-                for p, vec in zip(extra_papers, extra_vecs):
-                    p["abstract_vec"] = vec
+                if extra_valid:
+                    extra_abstracts = [p["summary"][:500] for p in extra_valid]
+                    extra_vecs = embed_texts(extra_abstracts)
+                    for p, vec in zip(extra_valid, extra_vecs):
+                        p["abstract_vec"] = vec
+
+                for p in extra_invalid:
+                    p["abstract_vec"] = None
+                    p["_no_abstract"] = True
+
+                for p in extra_valid + extra_invalid:
                     p["final_score"] = round(_weighted_score(p, orig_vec, other_vecs), 3)
+                    if p.get("_no_abstract"):
+                        p["final_score"] = min(p["final_score"], 0.2)
                     p["paper_type"] = _infer_paper_type(p["title"], p.get("citation_count", 0), p.get("published", ""))
                     p["_from_citation_graph"] = True
 
-                # Merge, re-dedup, and re-filter
-                all_papers.extend(extra_papers)
+                all_papers.extend(extra_valid + extra_invalid)
                 deduped = _deduplicate_papers(all_papers)
                 prefiltered = [p for p in deduped if p["final_score"] >= max(settings.MIN_FINAL_SCORE * 0.45, _ABSOLUTE_FLOOR)]
 
@@ -165,7 +179,8 @@ def rank_node(state: AgentState) -> AgentState:
     top_k = _mmr_select(prefiltered, vecs_by_title, target_k) if prefiltered else []
 
     needs_retry = (
-        len(top_k) < settings.TOP_K_PAPERS_MIN
+        not is_uploaded_only
+        and len(top_k) < settings.TOP_K_PAPERS_MIN
         and state.get("search_attempts", 0) < state.get("max_search_attempts", 2)
     )
 

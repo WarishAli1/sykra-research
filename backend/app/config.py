@@ -1,9 +1,7 @@
 from pathlib import Path
-
 from pydantic_settings import BaseSettings
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
-
 
 class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
@@ -20,9 +18,9 @@ class Settings(BaseSettings):
     NEO4J_URI: str = ""
     NEO4J_USER: str = "neo4j"
     NEO4J_PASSWORD: str = ""
+    BACKEND_PUBLIC_URL: str = "http://localhost:8000"
 
     class Config:
         env_file = str(_BACKEND_DIR / ".env")
-
 
 settings = Settings()

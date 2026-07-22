@@ -12,6 +12,7 @@ import type {
   SessionPapersResponse,
   StreamEvent,
   UploadResponse,
+  UploadStreamEvent,
 } from "./types";
 
 export class ApiError extends Error {
@@ -25,6 +26,25 @@ export class ApiError extends Error {
 }
 
 const API_BASE_URL = (process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000/api").replace(/\/$/, "");
+// Backend origin without the /api suffix, used to resolve relative asset
+// paths like chart_url ("/exports/chart-xxx.png") returned by the backend.
+const BACKEND_ORIGIN = API_BASE_URL.replace(/\/api$/, "");
+
+export class ApiAbortError extends Error {
+  constructor() {
+    super("Request was cancelled.");
+    this.name = "ApiAbortError";
+  }
+}
+
+// Resolves a chart_url ("/exports/chart-xxx.png") returned by the backend
+// into a fully-qualified URL the <img> tag can load. Absolute URLs (http/https)
+// pass through unchanged.
+export function resolveAssetUrl(path: string | null | undefined): string | null {
+  if (!path) return null;
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${BACKEND_ORIGIN}${path.startsWith("/") ? "" : "/"}${path}`;
+}
 
 export class ApiAbortError extends Error {
   constructor() {
@@ -94,10 +114,10 @@ function queryString(params: Record<string, string | undefined>): string {
   return query ? `?${query}` : "";
 }
 
-async function streamRequest(
+async function streamRequest<T>(
   path: string,
   init: RequestInit,
-  onEvent: (event: StreamEvent) => void
+  onEvent: (event: T) => void
 ): Promise<void> {
   let response: Response;
   try {
@@ -142,7 +162,7 @@ async function streamRequest(
         if (!jsonStr) continue;
 
         try {
-          const parsed = JSON.parse(jsonStr) as StreamEvent;
+          const parsed = JSON.parse(jsonStr) as T;
           onEvent(parsed);
         } catch {
         }
@@ -252,10 +272,19 @@ export const api = {
     });
   },
 
+  // Conversation-level knowledge graph: everything discussed in the session.
   getFullGraph(sessionId: string): Promise<FullGraphData> {
     return request<FullGraphData>(`/graph/${encodeURIComponent(sessionId)}/full`, {
       method: "GET",
     });
+  },
+
+  // NEW — Message-level knowledge graph: only what a specific turn discussed.
+  getTurnGraph(sessionId: string, turnId: string): Promise<FullGraphData> {
+    return request<FullGraphData>(
+      `/graph/${encodeURIComponent(sessionId)}/turn/${encodeURIComponent(turnId)}/full`,
+      { method: "GET" }
+    );
   },
 
   exportPdf(payload: PdfExportRequest): Promise<Blob> {
@@ -265,4 +294,29 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
+
+  uploadPdfStream(file: File, sessionId: string, onEvent: (event: UploadStreamEvent) => void, signal?: AbortSignal): Promise<void> {
+    const formData = new FormData();
+    formData.append("file", file);
+    return streamRequest(
+      `/upload/stream${queryString({ session_id: sessionId })}`,
+      { method: "POST", body: formData, signal },
+      onEvent
+    );
+  },
+
+  getFilename(turnId: string): Promise<{ turn_id: string; filename: string | null }> {
+    return request(`/filename/${encodeURIComponent(turnId)}`, { method: "GET" });
+  },
+
+  deleteUploadedPdf(sessionId: string, link: string) {
+    return request<{ success: boolean }>(
+      `/uploads/${sessionId}?link=${encodeURIComponent(link)}`,
+      {
+        method: "DELETE",
+      }
+    );
+  },
+
 };
+

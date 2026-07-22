@@ -7,8 +7,10 @@ from app.agents.nodes.search_node import search_node
 from app.agents.nodes.retrieve_uploaded_node import retrieve_uploaded_node
 from app.agents.nodes.validate_node import validate_node
 from app.agents.nodes.rank_node import rank_node
+from app.agents.nodes.compare_node import compare_node
 from app.agents.nodes.summarize_node import summarize_node
 from app.agents.nodes.citation_node import citation_node
+from app.agents.nodes.chart_node import chart_node
 from app.agents.nodes.graph_write_node import graph_write_node
 
 def timed(name):
@@ -32,17 +34,21 @@ def build_graph():
     graph.add_node("retrieve_uploaded", timed("retrieve_uploaded")(retrieve_uploaded_node))
     graph.add_node("validate", timed("validate")(validate_node))
     graph.add_node("rank", timed("rank")(rank_node))
+    graph.add_node("compare", timed("compare")(compare_node))
     graph.add_node("summarize", timed("summarize")(summarize_node))
     graph.add_node("cite", timed("cite")(citation_node))
+    graph.add_node("chart", timed("chart")(chart_node))
     graph.add_node("graph_write", timed("graph_write")(graph_write_node))
 
     graph.add_edge("plan_query", "search")
     graph.add_edge("search", "retrieve_uploaded")
     graph.add_edge("retrieve_uploaded", "validate")
     graph.add_edge("validate", "rank")
-    graph.add_edge("rank", "summarize")
+    graph.add_edge("rank", "compare")
+    graph.add_edge("compare", "summarize")
     graph.add_edge("summarize", "cite")
-    graph.add_edge("cite", "graph_write")
+    graph.add_edge("cite", "chart")
+    graph.add_edge("chart", "graph_write")
     graph.add_edge("graph_write", END)
 
     return graph.compile()
