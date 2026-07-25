@@ -1,7 +1,7 @@
 import json
 import re
-from difflib import SequenceMatcher
 from langchain_core.messages import SystemMessage, HumanMessage
+from difflib import SequenceMatcher
 from app.agents.state import AgentState
 from app.agents.schemas import BatchPaperSummaries, NormalAnswer, ResearchAnswer, PaperSummaryItem
 from app.services.llm_client import get_llm
@@ -215,8 +215,8 @@ def _select_top_references(papers: list[dict], summaries: dict, mode: str, max_r
         selected = direct_ids + supporting_ids
         return selected[:max_refs]
 
-def _run_normal_mode(llm, state: AgentState, papers: list[dict], summaries: dict) -> NormalAnswer:
-    """Generate concise but detailed normal mode answer."""
+def _run_normal_mode_json(llm, state: AgentState, papers: list[dict], summaries: dict) -> NormalAnswer:
+    """Normal mode via JSON mode – no function calling, no retries."""
     evidence_counts = _count_evidence_types(summaries)
     n_direct = evidence_counts["direct"]
     n_supporting = evidence_counts["supporting"]
@@ -232,7 +232,8 @@ def _run_normal_mode(llm, state: AgentState, papers: list[dict], summaries: dict
         strength_reason = "No direct studies found; relying on indirect or theoretical support."
 
     paper_block = "\n\n".join([
-        f"[{i}] [{summaries.get(str(i), {}).get('evidence_type', 'supporting').upper()}] {p['title']}: {summaries.get(str(i), {}).get('key_contribution', '')}"
+        f"[{i}] [{summaries.get(str(i), {}).get('evidence_type', 'supporting').upper()}] "
+        f"{p['title']}: {summaries.get(str(i), {}).get('key_contribution', '')}"
         for i, p in enumerate(papers)
     ])
 
@@ -244,49 +245,39 @@ Supporting evidence: {n_supporting} paper(s)
 PAPERS:
 {paper_block}
 
-You MUST return a JSON object with EXACTLY these field names (case-sensitive):
+You MUST return a JSON object with EXACTLY these field names:
 - "direct_answer": string (2-4 sentences directly answering the query)
 - "brief_context": string or null (EXACTLY ONE sentence if strictly necessary, otherwise null)
 - "evidence": string (detailed summary with markdown formatting)
 - "limitations": array of strings (3-5 distinct methodological gaps)
-- "conclusion": string (asks: what is supported, what remains uncertain, what future work)
+- "conclusion": string (what is supported, what remains uncertain, what future work)
 - "confidence": "High" | "Medium" | "Low"
 - "confidence_explanation": string
 - "references": array of paper_id strings
 
-DO NOT use field names like "answer", "context", "CONFIDENCE", "Limitations", or any variations.
-USE EXACTLY the lowercase field names listed above.
-
-CONFIDENCE RULES (CRITICAL - MUST BE CONSISTENT):
-- If direct evidence >= 2: Confidence is "High".
-- If direct evidence == 1: Confidence is "Medium". (Do NOT use High for a single study).
-- If direct evidence == 0: Confidence is "Low".
+CONFIDENCE RULES:
+- If direct evidence >= 2: "High"
+- If direct evidence == 1: "Medium"
+- If direct evidence == 0: "Low"
 
 CRITICAL RULES:
 - Do NOT claim a paper solves the problem unless it explicitly does.
 - Do NOT combine unrelated papers into a fictional framework.
-- If evidence is weak, explicitly state that in the Conclusion.
 {_evidence_mode_instruction(state.get("evidence_mode", "literature"))}
 {LATEX_INSTRUCTION}"""
 
-    try:
-        answer = _invoke_structured_with_repair(
-            llm,
-            [
-                SystemMessage(content="Respond with ONLY a function call to NormalAnswer. No text before or after."),
-                HumanMessage(content=prompt)
-            ],
-            NormalAnswer,
-            max_retries=2
-        )
-        if answer is None:
-            raise ValueError("Failed to generate valid NormalAnswer after retries")
+    messages = [
+        SystemMessage(content="You are a research assistant. Respond with JSON only."),
+        HumanMessage(content=prompt)
+    ]
 
+    try:
+        answer = llm.invoke_json_mode(messages, schema=NormalAnswer)
         answer.confidence = evidence_strength
         answer.confidence_explanation = strength_reason
         return answer
     except Exception as e:
-        print(f"[summarize] Normal mode failed: {e}")
+        print(f"[summarize] Normal mode JSON failed: {e}")
         return NormalAnswer(
             direct_answer="I could not generate a structured answer due to a processing error.",
             brief_context=None,
@@ -298,14 +289,16 @@ CRITICAL RULES:
             references=[]
         )
 
-def _run_researched_mode(llm, state: AgentState, papers: list[dict], summaries: dict) -> ResearchAnswer:
-    """Generate detailed research mode answer."""
+
+def _run_researched_mode_json(llm, state: AgentState, papers: list[dict], summaries: dict) -> ResearchAnswer:
+    """Research mode via JSON mode – no function calling, no retries."""
     evidence_counts = _count_evidence_types(summaries)
     n_direct = evidence_counts["direct"]
     n_total = len(papers)
 
     paper_block = "\n\n".join([
-        f"[{i}] [{summaries.get(str(i), {}).get('evidence_type', 'supporting').upper()}] {p['title']}: {summaries.get(str(i), {}).get('key_contribution', '')}"
+        f"[{i}] [{summaries.get(str(i), {}).get('evidence_type', 'supporting').upper()}] "
+        f"{p['title']}: {summaries.get(str(i), {}).get('key_contribution', '')}"
         for i, p in enumerate(papers)
     ])
 
@@ -339,7 +332,7 @@ Supporting evidence: {evidence_counts['supporting']} paper(s)
 PAPERS:
 {paper_block}
 
-You MUST return a JSON object with EXACTLY these field names (case-sensitive):
+You MUST return a JSON object with EXACTLY these field names:
 - "executive_summary": string
 - "background_concepts": string
 - "related_research": string
@@ -352,9 +345,6 @@ You MUST return a JSON object with EXACTLY these field names (case-sensitive):
 - "confidence": "High" | "Medium" | "Low"
 - "confidence_explanation": string
 - "references": array of paper_id strings
-
-DO NOT use field names like "ExecutiveSummary", "BACKGROUND", or any other casing variations.
-USE EXACTLY the lowercase field names listed above.
 
 Content per field:
 1. EXECUTIVE SUMMARY: High-level summary of what literature supports, what is uncertain, and the final answer.
@@ -388,24 +378,18 @@ CRITICAL RULES:
 {LATEX_INSTRUCTION}
 Generate a ResearchAnswer JSON object matching the schema exactly."""
 
-    try:
-        answer = _invoke_structured_with_repair(
-            llm,
-            [
-                SystemMessage(content="Respond with ONLY a function call to ResearchAnswer. No text before or after."),
-                HumanMessage(content=prompt)
-            ],
-            ResearchAnswer,
-            max_retries=2
-        )
-        if answer is None:
-            raise ValueError("Failed to generate valid ResearchAnswer after retries")
+    messages = [
+        SystemMessage(content="You are a domain researcher. Respond with JSON only."),
+        HumanMessage(content=prompt)
+    ]
 
+    try:
+        answer = llm.invoke_json_mode(messages, schema=ResearchAnswer)
         if not include_comparative:
             answer.comparative_analysis = None
         return answer
     except Exception as e:
-        print(f"[summarize] Research mode failed: {e}")
+        print(f"[summarize] Research mode JSON failed: {e}")
         return ResearchAnswer(
             executive_summary="Processing error occurred.",
             background_concepts="",
@@ -420,17 +404,6 @@ Generate a ResearchAnswer JSON object matching the schema exactly."""
             confidence_explanation="Processing error.",
             references=[]
         )
-
-_PAPER_AS_SUBJECT_PATTERNS = (
-    "compare the papers", "compare these papers", "compare papers",
-    "compare the studies", "compare these studies", "compare studies",
-    "table of papers", "table of the papers", "table of studies",
-    "compare the retrieved papers", "compare retrieved papers",
-    "papers comparison", "studies comparison",
-    "list the papers", "summarize the papers in a table",
-    "table comparing the papers", "table comparing papers",
-    "table comparing the studies", "table comparing studies",
-)
 
 
 def _wants_paper_comparison_table(query: str) -> bool:
@@ -543,6 +516,63 @@ def _stitch_research_answer(answer: ResearchAnswer) -> str:
 
     return "\n".join(parts)
 
+def _build_paper_block(papers: list[dict]) -> str:
+    parts = []
+    for i, p in enumerate(papers):
+        abstract = p.get("summary", "")
+        if len(abstract) < 20:
+            abstract = f"[Abstract not available]"
+        parts.append(
+            f"[paper_id={i}] Title: {p['title']}\nAbstract: {abstract[:1500]}"
+        )
+    return "\n\n".join(parts)
+
+_PLAIN_LATEX = """
+MATH FORMATTING — if your answer contains formulas, equations, or mathematical
+expressions, use LaTeX delimiters:
+- Inline math: wrap in single dollar signs, e.g. $d_k$ or $Q, K, V$.
+- Display equations: wrap in double dollar signs on their own line, e.g.
+  $$\\text{Attention}(Q,K,V) = \\text{softmax}\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V$$
+- Define every symbol in prose immediately after the equation.
+"""
+
+
+def _run_plain_mode(llm, state: AgentState, papers: list[dict], summaries: dict, detailed: bool) -> str:
+    """Used when evidence_mode == 'uploaded' — skip the multi-section
+    literature-review schema entirely. detailed=True (researched) gets a
+    thorough answer; detailed=False (normal) gets a short direct one."""
+    paper_block = "\n\n".join([
+        f"[{i}] {p['title']}: {summaries.get(str(i), {}).get('key_contribution', '')} "
+        f"{summaries.get(str(i), {}).get('findings', '')}"
+        for i, p in enumerate(papers)
+    ])
+    length_instr = (
+        "Answer thoroughly and in detail, covering every part of the question, "
+        "using clear structure (headers/bullets) only where it aids clarity."
+        if detailed else
+        "Answer directly and concisely — a few sentences to a short paragraph. "
+        "No section headers, no literature-review scaffolding."
+    )
+    prompt = f"""Answer the user's question using ONLY the uploaded document below.
+QUERY: {state['query']}
+DOCUMENT CONTENT:
+{paper_block}
+
+{length_instr}
+Never invent information not present in the document. If the document doesn't
+address part of the question, say so plainly.
+{_PLAIN_LATEX}"""
+    try:
+        response = llm.invoke([
+            SystemMessage(content="Answer in plain prose based only on the provided document."),
+            HumanMessage(content=prompt)
+        ], config={"timeout": 60})
+        return response.content.strip()
+    except Exception as e:
+        print(f"[summarize] Plain mode failed: {e}")
+        return "I could not generate an answer due to a processing error."
+
+
 def summarize_node(state: AgentState) -> AgentState:
     llm = get_llm(temperature=0)
     papers = state["ranked_papers"]
@@ -550,12 +580,11 @@ def summarize_node(state: AgentState) -> AgentState:
 
     if not papers:
         if mode == "researched":
-            final = _run_researched_mode(llm, state, [], {})
+            final = _run_researched_mode_json(llm, state, [], {})
             answer_text = _stitch_research_answer(final)
         else:
-            final = _run_normal_mode(llm, state, [], {})
+            final = _run_normal_mode_json(llm, state, [], {})
             answer_text = _stitch_normal_answer(final)
-
         return {
             **state,
             "final_answer": answer_text,
@@ -563,45 +592,81 @@ def summarize_node(state: AgentState) -> AgentState:
             "references": [],
         }
 
-    summaries = _summarize_papers(llm, papers, state["query"])
+    paper_block = _build_paper_block(papers)
+    summary_schema_desc = """{
+        "summaries": [
+            {
+            "paper_id": "0",
+            "key_contribution": "what the paper proposed",
+            "methodology": "methods, datasets, evaluation",
+            "findings": "main results and findings",
+            "relevance_to_query": "how directly it addresses the query",
+            "evidence_type": "direct" | "supporting" | "background",
+            "key_metrics": ["exact numeric figures stated in the text, e.g. 'top-1 accuracy +2-4% over CNN', 'published 2023', 'O(N^2) attention cost'"]
+            },
+            { "paper_id": "1", ... }
+        ]
+        }
+        CRITICAL: paper_id MUST be a string, not a number. key_metrics must be an array of strings.
+        If no metrics are stated, return an empty list.
+        """
 
-    if mode == "researched":
-        final = _run_researched_mode(llm, state, papers, summaries)
-        answer_text = _stitch_research_answer(final)
-        ref_ids = final.references if final.references else _select_top_references(papers, summaries, mode, max_refs=8)
+    summary_messages = [
+        SystemMessage(content="You are an expert paper summarizer. Respond with JSON only."),
+        HumanMessage(content=f"Query: {state['query']}\n\nPapers:\n{paper_block}\n\nReturn a JSON object matching this schema exactly:\n{summary_schema_desc}")
+    ]
+    
+    try:
+        summaries_raw = llm.invoke_json_mode(summary_messages, schema=None)  # raw dict
+        summaries = {s["paper_id"]: s for s in summaries_raw["summaries"]}
+    except Exception as e:
+        print(f"[summarize] Paper summaries failed: {e}")
+        summaries = {
+            str(i): {
+                "paper_id": str(i),
+                "key_contribution": p["title"],
+                "methodology": "",
+                "findings": "",
+                "relevance_to_query": "",
+                "evidence_type": "background",
+                "key_metrics": []
+            } for i, p in enumerate(papers)
+        }
 
-        user_wants_table = _wants_paper_comparison_table(state['query'])
-        if user_wants_table and not final.comparative_analysis:
-            fallback = _generate_fallback_table(papers, summaries, state['query'])
-            if fallback:
-                answer_text += f"\n\n## Comparative Analysis\n\n{fallback}\n"
-    else:
-        final = _run_normal_mode(llm, state, papers, summaries)
-        answer_text = _stitch_normal_answer(final)
-        ref_ids = final.references if final.references else _select_top_references(papers, summaries, mode, max_refs=3)
-
-    evidence_mode = state.get("evidence_mode", "literature")
-    references = build_references(papers)
-
-    if evidence_mode == "uploaded":
+    if state.get("evidence_mode") == "uploaded":
+        answer_text = _run_plain_mode(llm, state, papers, summaries, detailed=(mode == "researched"))
+        ref_ids = [str(i) for i in range(len(papers))]
+        references = build_references(papers)
         references = [r for r in references if r.get("source") == "user_upload"]
+        id_map = paper_id_to_ref_id_map(papers, references)
+        answer_text = rewrite_inline_citations(answer_text, id_map)
+        frontend_references = []
+    else:
+        if mode == "researched":
+            final = _run_researched_mode_json(llm, state, papers, summaries)
+            answer_text = _stitch_research_answer(final)
+            ref_ids = final.references if hasattr(final, 'references') else _select_top_references(papers, summaries, mode, max_refs=8)
+        else:
+            final = _run_normal_mode_json(llm, state, papers, summaries)
+            answer_text = _stitch_normal_answer(final)
+            ref_ids = final.references if hasattr(final, 'references') else _select_top_references(papers, summaries, mode, max_refs=3)
 
-    id_map = paper_id_to_ref_id_map(papers, references)
-    answer_text = rewrite_inline_citations(answer_text, id_map)
-
-    selected_refs = [r for i, r in enumerate(references) if str(i) in ref_ids] if references else []
-
-    frontend_references = references if mode == "researched" else selected_refs
-
-    if mode == "researched" and frontend_references:
-        answer_text = re.sub(
-            r'\n\n(?:---\n\n)?#{0,4}\s*\*{0,2}(?:References|Bibliography|Works Cited)\*{0,2}\s*\n.*',
-            '',
-            answer_text,
-            flags=re.DOTALL | re.IGNORECASE
-        ).strip()
-        answer_text = answer_text + "\n\n---\n\n**References**\n\n" + format_reference_block(frontend_references)
-
+        evidence_mode = state.get("evidence_mode", "literature")
+        references = build_references(papers)
+        if evidence_mode == "uploaded":
+            references = [r for r in references if r.get("source") == "user_upload"]
+        id_map = paper_id_to_ref_id_map(papers, references)
+        answer_text = rewrite_inline_citations(answer_text, id_map)
+        selected_refs = [r for i, r in enumerate(references) if str(i) in ref_ids] if references else []
+        frontend_references = references if mode == "researched" else selected_refs
+        if mode == "researched" and frontend_references:
+            answer_text = re.sub(
+                r'\n\n(?:---\n\n)?#{0,4}\s*\*{0,2}(?:References|Bibliography|Works Cited)\*{0,2}\s*\n.*',
+                '',
+                answer_text,
+                flags=re.DOTALL | re.IGNORECASE
+            ).strip()
+            answer_text = answer_text + "\n\n---\n\n**References**\n\n" + format_reference_block(frontend_references)
     domain_caveat = state.get("domain_caveat")
     if state.get("low_confidence_results"):
         low_conf_note = (

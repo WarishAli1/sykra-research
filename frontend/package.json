@@ -31,5 +31,10 @@
     "eslint-config-next": "^16.2.11",
     "tailwindcss": "^4.3.3",
     "typescript": "^5"
+  },
+  "overrides": {
+    "next": {
+      "sharp": "^0.35.3"
+    }
   }
 }

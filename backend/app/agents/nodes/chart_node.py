@@ -108,15 +108,21 @@ If has_chartable_data=true, fill in:
 Return a ChartSpec JSON object matching the schema exactly."""
 
 
-def _generate_chart_spec(query: str, papers: list[dict], summaries: dict) -> ChartSpec | None:
+def _generate_chart_spec(query: str, papers: list[dict], summaries: dict, allow_fallback_metrics: bool = False) -> ChartSpec | None:
     """Small, dedicated LLM call to extract chart data — separate from the
     big researched-mode report call so a token-limit failure on the report
-    doesn't also prevent the chart from being generated."""
+    doesn't also prevent the chart from being generated.
+
+    allow_fallback_metrics: on retry, explicitly permits using publication
+    year and citation count (always present on every paper dict, unlike
+    key_metrics which depends on the abstract stating exact figures) as
+    legitimate chartable axes when no other numeric data was extracted."""
     if not papers:
         return None
 
     paper_block = "\n\n".join([
-        f"[{i}] {p.get('title', '')}: "
+        f"[{i}] {p.get('title', '')} (published: {p.get('published', 'unknown')}, "
+        f"citations: {p.get('citation_count', 0)}): "
         f"{summaries.get(str(i), {}).get('key_contribution', '')} "
         f"{summaries.get(str(i), {}).get('findings', '')}"
         + (
@@ -127,12 +133,24 @@ def _generate_chart_spec(query: str, papers: list[dict], summaries: dict) -> Cha
         for i, p in enumerate(papers)
     ])
 
+    prompt = _CHART_SPEC_PROMPT.format(query=query, paper_block=paper_block)
+    if allow_fallback_metrics:
+        prompt += (
+            "\n\nNo strong candidate numeric data was found on the first pass. "
+            "If no in-text metrics are usable, it is acceptable to chart "
+            "publication year or citation count per paper (both given above) "
+            "as a real, non-fabricated comparison — e.g. a bar chart of "
+            "citation counts across the retrieved papers. Only set "
+            "has_chartable_data=false if even this is not meaningful for the "
+            "question asked."
+        )
+
     llm = get_llm(temperature=0)
     try:
         spec = llm.with_structured_output(ChartSpec).invoke(
             [
                 SystemMessage(content="Respond with ONLY a function call to ChartSpec. No text before or after."),
-                HumanMessage(content=_CHART_SPEC_PROMPT.format(query=query, paper_block=paper_block)),
+                HumanMessage(content=prompt),
             ],
             config={"timeout": 30},
         )
@@ -163,7 +181,7 @@ def _render_chart(spec: ChartSpec) -> str | None:
                 sns.lineplot(x=xs, y=ys, marker="o", label=s.label or None, ax=ax)
             elif spec.chart_type == "scatter":
                 sns.scatterplot(x=xs, y=ys, label=s.label or None, ax=ax)
-            else:  # bar (default) — supports single series cleanly
+            else:
                 sns.barplot(x=xs, y=ys, ax=ax, label=s.label or None)
 
         ax.set_title(spec.title)
@@ -193,32 +211,35 @@ def chart_node(state: AgentState) -> AgentState:
 
     if response_mode not in ("researched", "graph_research"):
         print(f"[chart_node] skipping: wrong mode {response_mode}")
-        return {**state, "chart_spec_raw": None, "chart_url": None}
+        return {"chart_spec_raw": None, "chart_url": None}
 
     if not _has_visual_intent(query):
         print(f"[chart_node] skipping: no visual intent in query")
-        return {**state, "chart_spec_raw": None, "chart_url": None}
+        return {"chart_spec_raw": None, "chart_url": None}
 
     papers = state.get("ranked_papers", [])
     summaries = state.get("summaries", {})
 
     print(f"[chart_node] visual intent detected, generating chart_spec from {len(papers)} papers...")
     spec = _generate_chart_spec(query, papers, summaries)
+
+    if spec is None or _looks_like_placeholder(spec):
+        print("[chart_node] first attempt empty/placeholder-like, retrying with fallback-metric nudge")
+        spec = _generate_chart_spec(query, papers, summaries, allow_fallback_metrics=True) or spec
+
     if spec is None:
         print(f"[chart_node] chart_spec generation failed or returned nothing")
-        return {**state, "chart_spec_raw": None, "chart_url": None}
+        return {"chart_spec_raw": None, "chart_url": None}
 
     raw_spec = spec.model_dump_json()
-
     chart_path = _render_chart(spec)
     if not chart_path:
-        return {**state, "final_answer": answer, "chart_spec_raw": raw_spec, "chart_url": None}
+        return {"chart_spec_raw": raw_spec, "chart_url": None}
 
     chart_url = f"/{chart_path}"
     alt_text = spec.title or "Generated chart"
 
     cleaned_answer = answer
-    # Insert chart BEFORE the references block so PDF rendering gets it right
     ref_marker = "\n\n---\n\n**References**"
     if ref_marker in cleaned_answer:
         idx = cleaned_answer.index(ref_marker)
@@ -227,7 +248,6 @@ def chart_node(state: AgentState) -> AgentState:
         cleaned_answer += f"\n\n![{alt_text}]({chart_url})"
 
     return {
-        **state,
         "final_answer": cleaned_answer,
         "chart_spec_raw": raw_spec,
         "chart_url": chart_url,

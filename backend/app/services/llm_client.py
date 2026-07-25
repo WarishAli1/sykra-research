@@ -1,7 +1,7 @@
 import time
 import json
 import re
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import ValidationError
 from langchain_groq import ChatGroq
 from langchain_cerebras import ChatCerebras
@@ -22,31 +22,49 @@ def _is_rate_limit_error(e: Exception) -> bool:
 
 _call_counts = {"groq_key1": 0, "groq_key2": 0, "cerebras_key1": 0, "cerebras_key2": 0}
 
+_client_cache: dict[tuple[str, float], object] = {}
 
-def _build_providers(temperature: float, preferred_order: list[str] | None = None):
-    all_providers = {}
+_CLIENT_FACTORIES = {
+    "groq_key1": lambda temperature: ChatGroq(
+        api_key=settings.GROQ_API_KEY, model="openai/gpt-oss-120b",
+        temperature=temperature, request_timeout=30
+    ) if settings.GROQ_API_KEY else None,
+    "groq_key2": lambda temperature: ChatGroq(
+        api_key=settings.GROQ_API_KEY_2, model="openai/gpt-oss-120b",
+        temperature=temperature, request_timeout=30
+    ) if settings.GROQ_API_KEY_2 else None,
+    "cerebras_key1": lambda temperature: ChatCerebras(
+        api_key=settings.CEREBRAS_API_KEY, model="gpt-oss-120b", temperature=temperature
+    ) if settings.CEREBRAS_API_KEY else None,
+    "cerebras_key2": lambda temperature: ChatCerebras(
+        api_key=settings.CEREBRAS_API_KEY_2, model="gpt-oss-120b", temperature=temperature
+    ) if settings.CEREBRAS_API_KEY_2 else None,
+}
 
-    if settings.GROQ_API_KEY:
-        all_providers["groq_key1"] = lambda: ChatGroq(
-            api_key=settings.GROQ_API_KEY, model="openai/gpt-oss-120b",
-            temperature=temperature, request_timeout=30
-        )
-    if settings.GROQ_API_KEY_2:
-        all_providers["groq_key2"] = lambda: ChatGroq(
-            api_key=settings.GROQ_API_KEY_2, model="openai/gpt-oss-120b",
-            temperature=temperature, request_timeout=30
-        )
-    if settings.CEREBRAS_API_KEY:
-        all_providers["cerebras_key1"] = lambda: ChatCerebras(
-            api_key=settings.CEREBRAS_API_KEY, model="gpt-oss-120b", temperature=temperature
-        )
-    if settings.CEREBRAS_API_KEY_2:
-        all_providers["cerebras_key2"] = lambda: ChatCerebras(
-            api_key=settings.CEREBRAS_API_KEY_2, model="gpt-oss-120b", temperature=temperature
-        )
 
-    order = preferred_order or list(all_providers.keys())
-    return [(name, all_providers[name]) for name in order if name in all_providers]
+def _get_client(name: str, temperature: float):
+    key = (name, temperature)
+    client = _client_cache.get(key)
+    if client is not None:
+        return client
+    factory = _CLIENT_FACTORIES.get(name)
+    if factory is None:
+        return None
+    client = factory(temperature)
+    if client is not None:
+        _client_cache[key] = client
+    return client
+
+
+def _available_providers(preferred_order: list[str] | None) -> list[str]:
+    order = preferred_order or list(_CLIENT_FACTORIES.keys())
+    configured = {
+        "groq_key1": bool(settings.GROQ_API_KEY),
+        "groq_key2": bool(settings.GROQ_API_KEY_2),
+        "cerebras_key1": bool(settings.CEREBRAS_API_KEY),
+        "cerebras_key2": bool(settings.CEREBRAS_API_KEY_2),
+    }
+    return [name for name in order if configured.get(name)]
 
 
 class _StructuredFailoverRunner:
@@ -57,9 +75,12 @@ class _StructuredFailoverRunner:
 
     def invoke(self, prompt, **kwargs):
         last_exc = None
-        providers = _build_providers(self.temperature, self.preferred_order)
-        for attempt, (name, build) in enumerate(providers):
-            model = build()
+        providers = _available_providers(self.preferred_order)
+
+        for attempt, name in enumerate(providers):
+            model = _get_client(name, self.temperature)
+            if model is None:
+                continue
             try:
                 result = model.with_structured_output(self.schema).invoke(prompt, **kwargs)
                 _call_counts[name] += 1
@@ -67,7 +88,14 @@ class _StructuredFailoverRunner:
             except Exception as e:
                 print(f"[llm_client] {name} structured failed: {type(e).__name__}: {e}")
                 last_exc = e
+                if _is_rate_limit_error(e):
+                    wait = min(2 ** attempt, 4)
+                    time.sleep(wait)
 
+        for attempt, name in enumerate(providers):
+            model = _get_client(name, self.temperature)
+            if model is None:
+                continue
             try:
                 schema_json = self.schema.model_json_schema()
                 json_prompt = list(prompt) + [HumanMessage(content=(
@@ -82,13 +110,10 @@ class _StructuredFailoverRunner:
             except Exception as e2:
                 print(f"[llm_client] {name} JSON fallback failed: {type(e2).__name__}: {e2}")
                 last_exc = e2
+                if _is_rate_limit_error(e2):
+                    wait = min(2 ** attempt, 4)
+                    time.sleep(wait)
 
-            if _is_rate_limit_error(last_exc):
-                wait = min(2 ** (attempt + 1), 10)
-                print(f"[llm_client] Rate limited on {name}, waiting {wait}s...")
-                time.sleep(wait)
-            else:
-                time.sleep(0.5)
         raise last_exc or RuntimeError("All LLM providers exhausted")
 
 
@@ -100,23 +125,65 @@ class FailoverLLM:
     def with_structured_output(self, schema):
         return _StructuredFailoverRunner(self.temperature, schema, self.preferred_order)
 
+    def invoke_json_mode(self, messages, schema=None, **kwargs):
+        last_exc = None
+        providers = _available_providers(self.preferred_order)
+
+        # Ensure the prompt demands JSON output
+        json_instruction = "\n\nYou MUST respond with ONLY a valid JSON object. No markdown fences, no additional text."
+        if messages and hasattr(messages[0], 'content') and isinstance(messages[0], SystemMessage):
+            if "json" not in messages[0].content.lower():
+                messages[0].content += json_instruction
+        else:
+            # If no system message, prepend one
+            messages = [SystemMessage(content=f"Respond with JSON only.{json_instruction}")] + list(messages)
+
+        for attempt, name in enumerate(providers):
+            model = _get_client(name, self.temperature)
+            if model is None:
+                continue
+            try:
+                response = model.invoke(
+                    messages,
+                    response_format={"type": "json_object"},
+                    **kwargs
+                )
+                raw = _extract_json(response.content)
+                parsed = json.loads(raw)
+
+                if schema:
+                    result = schema.model_validate(parsed)
+                else:
+                    result = parsed
+
+                _call_counts[name] += 1
+                return result
+
+            except Exception as e:
+                print(f"[llm_client] {name} json_mode failed: {type(e).__name__}: {e}")
+                last_exc = e
+                if _is_rate_limit_error(e):
+                    time.sleep(min(2 ** attempt, 4))
+
+        raise last_exc or RuntimeError("All LLM providers exhausted for JSON mode")
+
     def invoke(self, prompt, **kwargs):
         last_exc = None
-        providers = _build_providers(self.temperature, self.preferred_order)
-        for attempt, (name, build) in enumerate(providers):
+        providers = _available_providers(self.preferred_order)
+        for attempt, name in enumerate(providers):
+            model = _get_client(name, self.temperature)
+            if model is None:
+                continue
             try:
-                result = build().invoke(prompt, **kwargs)
+                result = model.invoke(prompt, **kwargs)
                 _call_counts[name] += 1
                 return result
             except Exception as e:
                 print(f"[llm_client] {name} failed: {type(e).__name__}: {e}")
                 last_exc = e
                 if _is_rate_limit_error(e):
-                    wait = min(2 ** (attempt + 1), 10)
-                    print(f"[llm_client] Rate limited on {name}, waiting {wait}s...")
+                    wait = min(2 ** attempt, 4)
                     time.sleep(wait)
-                else:
-                    time.sleep(0.5)
                 continue
         raise last_exc or RuntimeError("All LLM providers exhausted")
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { Loader2, MessageSquare, Network } from "lucide-react";
 import dynamic from "next/dynamic";
 import { api } from "@/lib/api";
@@ -26,6 +26,11 @@ export function GraphView({
   const [loading, setLoading] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
   const [dims, setDims] = useState({ width: 800, height: 600 });
+  const [selectedNode, setSelectedNode] = useState<any | null>(null);
+
+  const handleNodeClick = useCallback((node: any) => {
+    setSelectedNode(node);
+  }, []);
 
   useEffect(() => {
     if (!activeTurnId && scope === "message") {
@@ -36,6 +41,7 @@ export function GraphView({
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setSelectedNode(null);
 
     const fetchGraph =
       scope === "message" && activeTurnId
@@ -55,16 +61,6 @@ export function GraphView({
       cancelled = true;
     };
   }, [sessionId, scope, activeTurnId]);
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const update = () => setDims({ width: el.clientWidth, height: el.clientHeight });
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [graphData]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -187,6 +183,15 @@ export function GraphView({
       </div>
     );
 
+  const safeGraphData = useMemo(() => {
+    if (!graphData) return null;
+    const ids = new Set(graphData.nodes.map((n: any) => n.id));
+    return {
+      nodes: graphData.nodes,
+      links: graphData.links.filter((l: any) => ids.has(l.source) && ids.has(l.target)),
+    };
+  }, [graphData]) as FullGraphData | null;
+
   if (!graphData || graphData.nodes.length === 0)
     return (
       <div className="w-full h-full flex flex-col">
@@ -203,9 +208,9 @@ export function GraphView({
   return (
     <div className="w-full h-full min-h-[400px] bg-paper-dim/30 flex flex-col">
       {ScopeToggle}
-      <div ref={containerRef} className="flex-1 min-h-0">
+      <div ref={containerRef} className="flex-1 min-h-0 relative">
         <ForceGraph2D
-          graphData={graphData}
+          graphData={safeGraphData!}
           nodeAutoColorBy="type"
           nodeCanvasObject={paintNode}
           nodePointerAreaPaint={paintNodePointerArea}
@@ -216,7 +221,29 @@ export function GraphView({
           linkColor={(link: any) => (link.type === "cites" ? "#6366f1" : "#94a3b8")}
           width={dims.width}
           height={Math.max(dims.height - LEGEND_HEIGHT - TOGGLE_HEIGHT, 200)}
+          onNodeClick={handleNodeClick}
+          onBackgroundClick={() => setSelectedNode(null)}
         />
+        {selectedNode && (
+          <div className="absolute bottom-16 left-1/2 -translate-x-1/2 w-[420px] max-w-[90%] rounded-xl border border-indigo/50 bg-[#1a1c20] p-5 shadow-xl shadow-black/30 z-10">
+            <span
+              className="inline-block rounded-full px-3 py-1 text-[12px] font-semibold text-white mb-3"
+              style={{ background: NODE_COLORS[selectedNode.type] ?? "#94a3b8" }}
+            >
+              {selectedNode.type[0].toUpperCase() + selectedNode.type.slice(1)}
+            </span>
+            <p className="text-[11px] font-semibold text-ink-soft uppercase tracking-wide mb-1">
+              {selectedNode.type === "paper" ? "title" : "name"}
+            </p>
+            <p className="text-[15px] text-white leading-snug">{selectedNode.name}</p>
+            <button
+              onClick={() => setSelectedNode(null)}
+              className="absolute top-3 right-3 text-ink-soft hover:text-white text-[13px]"
+            >
+              ✕
+            </button>
+          </div>
+        )}
       </div>
       <div className="flex items-center gap-4 px-3 py-2 text-[10.5px] text-ink-soft border-t border-line shrink-0">
         {Object.entries(NODE_COLORS).map(([type, color]) => (

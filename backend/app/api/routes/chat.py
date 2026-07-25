@@ -66,6 +66,9 @@ def _build_initial_state(req: ChatRequest, session_id: str, turn_id: str) -> dic
         "chart_url": None,
         "comparison_table_markdown": None,
         "comparison_table_caption": None,
+        "needs_revision": False,
+        "revision_count": 0,
+        "revision_instruction": None,
     }
 
 
@@ -228,7 +231,7 @@ def regenerate(req: RegenerateRequest):
         query=req.query,
         session_id=req.session_id,
         turn_id=turn_id,
-        evidence_mode=req.evidence_mode,
+        evidence_mode=getattr(req, "evidence_mode", "literature"),
         response_mode=req.response_mode,
     )
     return _run_research_graph(chat_req, req.session_id, turn_id)

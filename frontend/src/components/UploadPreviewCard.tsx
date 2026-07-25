@@ -1,4 +1,4 @@
-import { FileText, Loader2, X } from "lucide-react";
+import { FileText, Loader2, Square, X } from "lucide-react";
 
 export function UploadPreviewCard({ 
   filename, 
@@ -6,7 +6,8 @@ export function UploadPreviewCard({
   progress, 
   fileUrl, 
   onOpen, 
-  onClose 
+  onClose,
+  onCancel 
 }: { 
   filename: string; 
   status:
@@ -18,7 +19,8 @@ export function UploadPreviewCard({
   progress?: string; 
   fileUrl?: string; 
   onOpen: () => void; 
-  onClose: () => void; 
+  onClose: () => void;
+  onCancel?: () => void;
 }) {
   if (status === "done") {
     return (
@@ -40,16 +42,11 @@ export function UploadPreviewCard({
       </div>
     );
   }
-  const icon =
-  status === "uploading"
-    ? <Loader2 className="h-4 w-4 text-indigo animate-spin" />
-    : status === "processing"
-    ? <Loader2 className="h-4 w-4 text-indigo animate-spin" />
-    : <FileText className="h-4 w-4 text-indigo" />;
+  const isUploading = status === "uploading" || status === "processing";
   return (
     <div className="flex items-center gap-2 rounded-lg border border-line bg-paper-dim/50 px-3 py-2 mb-2">
       <div className="shrink-0">
-        {icon}
+        {isUploading ? <Loader2 className="h-4 w-4 text-indigo animate-spin" /> : <FileText className="h-4 w-4 text-indigo" />}
       </div>
 
       <div className="flex-1 min-w-0">
@@ -61,6 +58,26 @@ export function UploadPreviewCard({
           {progress}
         </p>
       </div>
+
+      {isUploading && (
+        <>
+          <button 
+            onClick={onCancel}
+            aria-label="Cancel upload"
+            title="Stop upload"
+            className="flex h-6 w-6 items-center justify-center rounded text-ink-soft hover:bg-paper-dim hover:text-danger"
+          >
+            <Square className="h-3 w-3 fill-current" />
+          </button>
+          <button 
+            onClick={onClose}
+            aria-label="Close"
+            className="text-ink-soft hover:text-danger"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </>
+      )}
     </div>
   );
 }

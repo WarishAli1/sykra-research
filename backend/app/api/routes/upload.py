@@ -8,6 +8,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from app.services.sse import sse_event
+from app.services import cancellation
 
 from app.models.schemas import UploadResponse
 from app.services.vector_store import vector_store
@@ -175,8 +176,31 @@ async def delete_uploaded_pdf(
     return {"status": "deleted"}
 
 
+_CANCEL_POLL_INTERVAL = 0.25
+_CANCELLED = object()
+
+
+async def _await_with_cancel_watch(task: "asyncio.Task", request_id: str, sentinel_ok: bool = False):
+    """Await `task` while polling the cancellation registry every
+    _CANCEL_POLL_INTERVAL seconds. If the request is cancelled before the
+    task finishes, this returns None (or _CANCELLED if sentinel_ok) and
+    leaves the underlying thread to finish on its own — Python threads can't
+    be killed, but the client stops waiting on it immediately, which is what
+    actually matters for the Stop button.
+    """
+    if not request_id:
+        return await task
+
+    while not task.done():
+        if cancellation.is_cancelled(request_id):
+            return _CANCELLED if sentinel_ok else None
+        await asyncio.sleep(_CANCEL_POLL_INTERVAL)
+
+    return task.result()
+
+
 @router.post("/upload/stream")
-async def upload_pdf_stream(file: UploadFile = File(...), session_id: str = "default"):
+async def upload_pdf_stream(file: UploadFile = File(...), session_id: str = "default", request_id: str = ""):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
@@ -185,90 +209,129 @@ async def upload_pdf_stream(file: UploadFile = File(...), session_id: str = "def
     content = await file.read()
 
     async def event_stream():
-        yield sse_event(
-            "progress",
-            stage="parsing",
-            label="Parsing PDF..."
-        )
-        await asyncio.sleep(0)
-        
-        yield sse_event("progress", stage="extracting", label="Extracting text...")
-        await asyncio.sleep(0)
-        result = await asyncio.to_thread(extract_text_from_pdf,content,)
-        text = result["text"]
+        if request_id:
+            cancellation.register(request_id)
+        try:
+            try:
+                yield sse_event(
+                    "progress",
+                    stage="parsing",
+                    label="Parsing PDF..."
+                )
+                await asyncio.sleep(0)
 
-        if result["ocr_used"]:
-            yield sse_event(
-                "progress",
-                stage="ocr",
-                label=f"Running OCR on {len(result['ocr_pages'])} pages..."
-            )
+                if request_id and cancellation.is_cancelled(request_id):
+                    yield sse_event("cancelled")
+                    return
 
-        if not text.strip():
-            yield sse_event("error", message="Could not extract text from PDF.")
-            return
-        await asyncio.sleep(0)
+                yield sse_event("progress", stage="extracting", label="Extracting text...")
+                await asyncio.sleep(0)
+                extract_task = asyncio.create_task(
+                    asyncio.to_thread(extract_text_from_pdf, content)
+                )
+                result = await _await_with_cancel_watch(extract_task, request_id)
+                if result is None:
+                    yield sse_event("cancelled")
+                    return
+                text = result["text"]
 
-        yield sse_event(
-            "progress",
-            stage="saving",
-            label="Saving PDF..."
-        )
-        await asyncio.sleep(0)
+                if request_id and cancellation.is_cancelled(request_id):
+                    yield sse_event("cancelled")
+                    return
 
-        session_dir = os.path.join(UPLOAD_DIR, session_id)
-        os.makedirs(session_dir, exist_ok=True)
+                if result["ocr_used"]:
+                    yield sse_event(
+                        "progress",
+                        stage="ocr",
+                        label=f"Running OCR on {len(result['ocr_pages'])} pages..."
+                    )
 
-        file_path = os.path.join(session_dir, safe_name)
-        with open(file_path, "wb") as f:
-            f.write(content)
+                if not text.strip():
+                    yield sse_event("error", message="Could not extract text from PDF.")
+                    return
 
-        file_url = f"{_BACKEND_PUBLIC_URL}/api/uploads/{session_id}/{safe_name}"
+                if request_id and cancellation.is_cancelled(request_id):
+                    yield sse_event("cancelled")
+                    return
 
-        paper = {
-            "title": safe_name,
-            "link": file_url,
-            "file_url": file_url,
-            "text": text,
-            "summary": text[:500],
-            "source": "user_upload",
-            "published": "",
-            "authors": [],
-            "paper_type": "user_upload",
-        }
+                yield sse_event(
+                    "progress",
+                    stage="saving",
+                    label="Saving PDF..."
+                )
+                await asyncio.sleep(0)
 
-        yield sse_event(
-            "progress",
-            stage="embedding",
-            label="Generating embeddings..."
-        )
-        await asyncio.sleep(0)
+                session_dir = os.path.join(UPLOAD_DIR, session_id)
+                os.makedirs(session_dir, exist_ok=True)
 
-        await asyncio.to_thread(
-            vector_store.upsert_paper,
-            paper,
-            session_id,
-        )
+                file_path = os.path.join(session_dir, safe_name)
+                with open(file_path, "wb") as f:
+                    f.write(content)
 
-        yield sse_event(
-            "progress",
-            stage="graph",
-            label="Building knowledge graph..."
-        )
-        await asyncio.sleep(0)
+                file_url = f"{_BACKEND_PUBLIC_URL}/api/uploads/{session_id}/{safe_name}"
 
-        await asyncio.to_thread(
-            graph_store.upsert_paper,
-            paper,
-            session_id,
-        )
+                paper = {
+                    "title": safe_name,
+                    "link": file_url,
+                    "file_url": file_url,
+                    "text": text,
+                    "summary": text[:500],
+                    "source": "user_upload",
+                    "published": "",
+                    "authors": [],
+                    "paper_type": "user_upload",
+                }
 
-        yield sse_event("result", payload={
-            "filename": safe_name,
-            "file_url": file_url,
-            "link": file_url,
-            "status": "indexed",
-        })
+                if request_id and cancellation.is_cancelled(request_id):
+                    yield sse_event("cancelled")
+                    return
+
+                yield sse_event(
+                    "progress",
+                    stage="embedding",
+                    label="Generating embeddings..."
+                )
+                await asyncio.sleep(0)
+
+                embed_task = asyncio.create_task(
+                    asyncio.to_thread(vector_store.upsert_paper, paper, session_id)
+                )
+                embed_result = await _await_with_cancel_watch(embed_task, request_id, sentinel_ok=True)
+                if embed_result is _CANCELLED:
+                    yield sse_event("cancelled")
+                    return
+
+                if request_id and cancellation.is_cancelled(request_id):
+                    yield sse_event("cancelled")
+                    return
+
+                yield sse_event(
+                    "progress",
+                    stage="graph",
+                    label="Building knowledge graph..."
+                )
+                await asyncio.sleep(0)
+
+                graph_task = asyncio.create_task(
+                    asyncio.to_thread(graph_store.upsert_paper, paper, session_id)
+                )
+                graph_result = await _await_with_cancel_watch(graph_task, request_id, sentinel_ok=True)
+                if graph_result is _CANCELLED:
+                    yield sse_event("cancelled")
+                    return
+
+                yield sse_event("result", payload={
+                    "filename": safe_name,
+                    "file_url": file_url,
+                    "link": file_url,
+                    "status": "indexed",
+                })
+            except Exception as exc:
+                print(f"[upload/stream] failed: {exc}")
+                yield sse_event("error", message=f"Upload failed: {exc}")
+        finally:
+            if request_id:
+                cancellation.cleanup(request_id)
 
     return StreamingResponse(
         event_stream(),
@@ -278,3 +341,11 @@ async def upload_pdf_stream(file: UploadFile = File(...), session_id: str = "def
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/upload/cancel/{request_id}")
+def upload_cancel(request_id: str):
+    found = cancellation.cancel(request_id)
+    if not found:
+        return {"cancelled": False}
+    return {"cancelled": True}

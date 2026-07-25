@@ -7,7 +7,8 @@ from app.config import settings
 
 
 from app.services.chunking import chunk_text
-
+ 
+_paper_embed_collection = None
 
 class VectorStore:
     def __init__(self):
@@ -106,6 +107,45 @@ class VectorStore:
             key=lambda x: x[0].get("chunk_index", 0)
         )
         return "\n".join(doc for _, doc in chunks_with_idx)
+
+def _get_paper_embed_collection():
+        global _paper_embed_collection
+        if _paper_embed_collection is None:
+            client = chromadb.PersistentClient(
+                path=settings.CHROMA_PERSIST_DIR,
+                settings=ChromaSettings(anonymized_telemetry=False)
+            )
+            _paper_embed_collection = client.get_or_create_collection(
+                name="paper_embeddings",
+                metadata={"hnsw:space": "cosine"}
+            )
+        return _paper_embed_collection
+
+
+def cache_paper_embedding(paper_fingerprint: str, embedding: list[float], metadata: dict | None = None):
+        col = _get_paper_embed_collection()
+        col.upsert(
+            ids=[paper_fingerprint],
+            embeddings=[embedding],
+            metadatas=[metadata or {}]
+        )
+
+def get_cached_paper_embedding(paper_fingerprint: str) -> list[float] | None:
+        col = _get_paper_embed_collection()
+        result = col.get(ids=[paper_fingerprint], include=["embeddings"])
+        if result and result["embeddings"] and result["embeddings"][0]:
+            return result["embeddings"][0]
+        return None
+
+def batch_get_paper_embeddings(fingerprints: list[str]) -> dict[str, list[float]]:
+        """Returns a dict mapping fingerprint -> embedding vector."""
+        col = _get_paper_embed_collection()
+        result = col.get(ids=fingerprints, include=["embeddings"])
+        out = {}
+        for fp, emb in zip(result["ids"], result["embeddings"]):
+            if emb is not None:
+                out[fp] = emb
+        return out
 
 
 vector_store = VectorStore()

@@ -32,7 +32,7 @@ Return ONLY the rewritten search query, nothing else."""
         except Exception as e:
             print(f"[plan_query] Query rewrite failed: {e}")
 
-    under_sys = "You are an expert academic research assistant. Extract the core components of the user's research query to understand the intent."
+    under_sys = "You are an expert academic research assistant. Extract the core components of the user's research query to understand the intent. Respond with ONLY a function call to QueryUnderstanding. No text before or after."
     under_human = f"User Query: {query}\n\nExtract the understanding."
 
     try:
@@ -47,7 +47,7 @@ Return ONLY the rewritten search query, nothing else."""
         )
 
     target_count = 6 if mode == "normal" else 12
-    plan_sys = "You are an expert academic search strategist. Generate a diverse set of search queries to maximize recall and precision for academic literature."
+    plan_sys = "You are an expert academic search strategist. Generate a diverse set of search queries to maximize recall and precision for academic literature. Respond with ONLY a function call to QueryPlan. No text before or after."
     plan_human = f"""
     Original Query: {query}
     Understanding: {understanding.model_dump_json()}
