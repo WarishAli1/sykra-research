@@ -40,4 +40,7 @@ class AgentState(TypedDict):
     chart_spec_raw: Optional[str]
     chart_url: Optional[str]      
     comparison_table_markdown: Optional[str] 
-    comparison_table_caption: Optional[str]  
+    comparison_table_caption: Optional[str]
+    needs_revision: bool
+    revision_count: int
+    revision_instruction: Optional[str]  

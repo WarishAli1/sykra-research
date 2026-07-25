@@ -7,11 +7,14 @@ from app.agents.nodes.search_node import search_node
 from app.agents.nodes.retrieve_uploaded_node import retrieve_uploaded_node
 from app.agents.nodes.validate_node import validate_node
 from app.agents.nodes.rank_node import rank_node
-from app.agents.nodes.compare_node import compare_node
 from app.agents.nodes.summarize_node import summarize_node
-from app.agents.nodes.citation_node import citation_node
+from app.agents.nodes.critique_node import critique_node
+from app.agents.nodes.revise_node import revise_node
+from app.agents.nodes.compare_node import compare_node
 from app.agents.nodes.chart_node import chart_node
 from app.agents.nodes.graph_write_node import graph_write_node
+from app.agents.nodes.citation_node import citation_node
+
 
 def timed(name):
     def decorator(fn):
@@ -24,6 +27,7 @@ def timed(name):
         return wrapper
     return decorator
 
+
 def build_graph():
     graph = StateGraph(AgentState)
 
@@ -34,23 +38,40 @@ def build_graph():
     graph.add_node("retrieve_uploaded", timed("retrieve_uploaded")(retrieve_uploaded_node))
     graph.add_node("validate", timed("validate")(validate_node))
     graph.add_node("rank", timed("rank")(rank_node))
-    graph.add_node("compare", timed("compare")(compare_node))
     graph.add_node("summarize", timed("summarize")(summarize_node))
-    graph.add_node("cite", timed("cite")(citation_node))
+    graph.add_node("critique", timed("critique")(critique_node))
+    graph.add_node("revise", timed("revise")(revise_node))
+    graph.add_node("after_critique", lambda s: {})
+    graph.add_node("compare", timed("compare")(compare_node))
     graph.add_node("chart", timed("chart")(chart_node))
     graph.add_node("graph_write", timed("graph_write")(graph_write_node))
+    graph.add_node("cite", timed("cite")(citation_node))
 
     graph.add_edge("plan_query", "search")
     graph.add_edge("search", "retrieve_uploaded")
     graph.add_edge("retrieve_uploaded", "validate")
     graph.add_edge("validate", "rank")
-    graph.add_edge("rank", "compare")
-    graph.add_edge("compare", "summarize")
-    graph.add_edge("summarize", "cite")
-    graph.add_edge("cite", "chart")
-    graph.add_edge("chart", "graph_write")
-    graph.add_edge("graph_write", END)
+    graph.add_edge("rank", "summarize")
+
+    graph.add_edge("summarize", "critique")
+
+    def route_after_critique(state):
+        return "revise" if state.get("needs_revision") else "after_critique"
+
+    graph.add_conditional_edges("critique", route_after_critique, {
+        "revise": "revise",
+        "after_critique": "after_critique",
+    })
+    graph.add_edge("revise", "after_critique")
+
+    graph.add_edge("after_critique", "compare")
+    graph.add_edge("after_critique", "chart")
+    graph.add_edge("after_critique", "graph_write")
+    graph.add_edge(["compare", "chart", "graph_write"], "cite")
+
+    graph.add_edge("cite", END)
 
     return graph.compile()
+
 
 research_graph = build_graph()

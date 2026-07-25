@@ -26,20 +26,8 @@ export class ApiError extends Error {
 }
 
 const API_BASE_URL = (process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000/api").replace(/\/$/, "");
-// Backend origin without the /api suffix, used to resolve relative asset
-// paths like chart_url ("/exports/chart-xxx.png") returned by the backend.
 const BACKEND_ORIGIN = API_BASE_URL.replace(/\/api$/, "");
 
-export class ApiAbortError extends Error {
-  constructor() {
-    super("Request was cancelled.");
-    this.name = "ApiAbortError";
-  }
-}
-
-// Resolves a chart_url ("/exports/chart-xxx.png") returned by the backend
-// into a fully-qualified URL the <img> tag can load. Absolute URLs (http/https)
-// pass through unchanged.
 export function resolveAssetUrl(path: string | null | undefined): string | null {
   if (!path) return null;
   if (/^https?:\/\//i.test(path)) return path;
@@ -227,6 +215,12 @@ export const api = {
     });
   },
 
+  cancelUploadStream(requestId: string): Promise<{ cancelled: boolean }> {
+    return request<{ cancelled: boolean }>(`/upload/cancel/${encodeURIComponent(requestId)}`, {
+      method: "POST",
+    });
+  },
+
   chatRegenerate(payload: RegenerateRequest, signal?: AbortSignal): Promise<ChatResponse> {
     return request<ChatResponse>("/chat/regenerate", {
       method: "POST",
@@ -295,11 +289,11 @@ export const api = {
     });
   },
 
-  uploadPdfStream(file: File, sessionId: string, onEvent: (event: UploadStreamEvent) => void, signal?: AbortSignal): Promise<void> {
+  uploadPdfStream(file: File, sessionId: string, onEvent: (event: UploadStreamEvent) => void, signal?: AbortSignal, requestId?: string): Promise<void> {
     const formData = new FormData();
     formData.append("file", file);
     return streamRequest(
-      `/upload/stream${queryString({ session_id: sessionId })}`,
+      `/upload/stream${queryString({ session_id: sessionId, request_id: requestId })}`,
       { method: "POST", body: formData, signal },
       onEvent
     );

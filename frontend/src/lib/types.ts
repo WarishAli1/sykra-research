@@ -117,6 +117,9 @@ export type UploadStreamEvent =
   | {
       type: "error";
       message: string;
+    }
+  | {
+      type: "cancelled";
     };
 
 export type UploadResponse = {

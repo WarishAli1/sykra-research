@@ -15,7 +15,14 @@ export function ChatPanel({
   sessionId, 
   onNewPapers, 
   onOpenGraph,
-  onOpenPdf 
+  onOpenPdf,
+  onDeletePaper,
+  uploadState,
+  setUploadState,
+  hasUpload,
+  setHasUpload,
+  evidenceMode,
+  setEvidenceMode,
 }: { 
   onUploadComplete: (data: {
     filename: string;
@@ -28,31 +35,37 @@ export function ChatPanel({
   onNewPapers: (papers: Paper[]) => void; 
   onOpenGraph: () => void;
   onOpenPdf: (url: string) => void;
+  onDeletePaper?: (link: string) => Promise<void>;
+  uploadState: {
+    status: "idle" | "uploading" | "processing" | "done" | "error";
+    filename: string;
+    progress: string;
+    stage: string;
+    fileUrl: string;
+  };
+  setUploadState: React.Dispatch<React.SetStateAction<{
+    status: "idle" | "uploading" | "processing" | "done" | "error";
+    filename: string;
+    progress: string;
+    stage: string;
+    fileUrl: string;
+  }>>;
+  hasUpload: boolean;
+  setHasUpload: React.Dispatch<React.SetStateAction<boolean>>;
+  evidenceMode: EvidenceMode;
+  setEvidenceMode: React.Dispatch<React.SetStateAction<EvidenceMode>>;
 }) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [hasUpload, setHasUpload] = useState(false);
-  const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>("literature");
   const [responseMode, setResponseMode] = useState<ResponseMode>("normal");
-  const [uploadState, setUploadState] = useState({
-      status: "idle" as
-          | "idle"
-          | "uploading"
-          | "processing"
-          | "done"
-          | "error",
-
-      filename: "",
-      progress: "",
-      stage: "",
-      fileUrl: "",
-  });
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const activeRequestIdRef = useRef<string | null>(null);
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  const uploadRequestIdRef = useRef<string | null>(null);
   const turnsRef = useRef<ChatTurn[]>(turns);
 
   useEffect(() => { turnsRef.current = turns; }, [turns]);
@@ -65,13 +78,6 @@ export function ChatPanel({
     el.style.height = "auto";
     el.style.height = `${el.scrollHeight}px`;
   }, [input]);
-  useEffect(() => {
-    function onClickOutside(e: MouseEvent) {
-      if (modeMenuRef.current && !modeMenuRef.current.contains(e.target as Node)) setModeMenuOpen(false);
-    }
-    document.addEventListener("mousedown", onClickOutside);
-    return () => document.removeEventListener("mousedown", onClickOutside);
-  }, []);
 
   const hasConversation = turns.length > 0;
 
@@ -189,6 +195,23 @@ export function ChatPanel({
     abortRef.current?.abort();
   }
 
+  function handlePauseUpload() {
+    // Cancelling an in-flight upload is destructive, not resumable — there's
+    // no clean way to pick a half-parsed PDF back up mid-stream. Fire the
+    // server-side cancel (so the backend stops wasted OCR/embedding/graph
+    // work), then abort the client fetch. Abort tears the connection down
+    // immediately, so a "cancelled" SSE event will never arrive to reset the
+    // UI — that reset has to happen here, right away, not in the event
+    // handler.
+    const requestId = uploadRequestIdRef.current;
+    if (requestId) api.cancelUploadStream(requestId).catch(() => {});
+    uploadAbortRef.current?.abort();
+
+    setUploadState({ status: "idle", filename: "", progress: "", stage: "", fileUrl: "" });
+    setHasUpload(false);
+    setEvidenceMode("literature");
+  }
+
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -200,8 +223,20 @@ export function ChatPanel({
       fileUrl: "",
   }); 
     setError(null);
+
+    const requestId = crypto.randomUUID();
+    uploadRequestIdRef.current = requestId;
+    const controller = new AbortController();
+    uploadAbortRef.current = controller;
+
     try {
       await api.uploadPdfStream(file, sessionId, (event) => {
+        if (event.type === "cancelled") {
+          setUploadState({ status: "idle", filename: "", progress: "", stage: "", fileUrl: "" });
+          setHasUpload(false);
+          setEvidenceMode("literature");
+          return;
+        }
         if (event.type === "progress") {
             setUploadState(prev => ({
                 ...prev,
@@ -234,14 +269,18 @@ export function ChatPanel({
             status: "error",
           }));
         }
-      });
+      }, controller.signal, requestId);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Upload failed.");
-      setUploadState(prev => ({
-          ...prev,
-          status: "error",
-      }));
+      if (!(err instanceof ApiAbortError)) {
+        setError(err instanceof ApiError ? err.message : "Upload failed.");
+        setUploadState(prev => ({
+            ...prev,
+            status: "error",
+        }));
+      }
     } finally {
+      uploadRequestIdRef.current = null;
+      uploadAbortRef.current = null;
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
@@ -334,15 +373,20 @@ export function ChatPanel({
                         onOpenPdf(uploadState.fileUrl);
                     }
                 }}
-                onClose={() =>
-                    setUploadState({
-                        status: "idle",
-                        filename: "",
-                        progress: "",
-                        stage: "",
-                        fileUrl: "",
-                    })
-                }
+                onCancel={() => handlePauseUpload()}
+                onClose={() => {
+                    if (uploadState.status === "done") {
+                        const link = uploadState.fileUrl;
+                        setUploadState({ status: "idle", filename: "", progress: "", stage: "", fileUrl: "" });
+                        setHasUpload(false);
+                        setEvidenceMode("literature");
+                        onDeletePaper?.(link);
+                    } else {
+                        // handlePauseUpload already resets uploadState/hasUpload/
+                        // evidenceMode — no need to duplicate it here.
+                        handlePauseUpload();
+                    }
+                }}
             />
         )}
         

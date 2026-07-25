@@ -131,7 +131,6 @@ def graph_write_node(state: AgentState) -> AgentState:
                 graph_store.link_citation(link_a, link_b)
 
     return {
-        **state,
         "graph_contradictions": contradictions,
         "graph_entities": entities,
     }

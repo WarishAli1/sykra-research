@@ -225,39 +225,49 @@ class GraphStore:
         )
 
     def get_full_graph(self, session_id: str) -> dict:
-        """Whole-conversation graph — everything discussed across every turn
-        in this session."""
         try:
             with self.driver.session() as session:
                 nodes = []
                 edges = []
+                known_ids = set()
 
                 res_papers = session.run("MATCH (p:Paper {session: $sid}) RETURN p", sid=session_id)
                 for r in res_papers:
                     p = dict(r["p"])
-                    nodes.append({"id": p["link"], "name": p.get("title", "Paper"), "type": "paper", "val": 10})
+                    nid = p["link"]
+                    nodes.append({"id": nid, "name": p.get("title", "Paper"), "type": "paper", "val": 10})
+                    known_ids.add(nid)
 
                 res_concepts = session.run("MATCH (c:Concept)<-[:DISCUSSES]-(p:Paper {session: $sid}) RETURN DISTINCT c", sid=session_id)
                 for r in res_concepts:
                     c = dict(r["c"])
-                    nodes.append({"id": f"concept_{c['name']}", "name": c["name"], "type": "concept", "val": 5})
+                    nid = f"concept_{c['name']}"
+                    nodes.append({"id": nid, "name": c["name"], "type": "concept", "val": 5})
+                    known_ids.add(nid)
 
                 res_methods = session.run("MATCH (m:Method)<-[:USES_METHOD]-(p:Paper {session: $sid}) RETURN DISTINCT m", sid=session_id)
                 for r in res_methods:
                     m = dict(r["m"])
-                    nodes.append({"id": f"method_{m['name']}", "name": m["name"], "type": "method", "val": 5})
+                    nid = f"method_{m['name']}"
+                    nodes.append({"id": nid, "name": m["name"], "type": "method", "val": 5})
+                    known_ids.add(nid)
 
                 res_cites = session.run("MATCH (a:Paper {session: $sid})-[:CITES]->(b:Paper) RETURN a.link, b.link", sid=session_id)
                 for r in res_cites:
-                    edges.append({"source": r["a.link"], "target": r["b.link"], "type": "cites"})
+                    if r["a.link"] in known_ids and r["b.link"] in known_ids:
+                        edges.append({"source": r["a.link"], "target": r["b.link"], "type": "cites"})
 
                 res_disc = session.run("MATCH (p:Paper {session: $sid})-[:DISCUSSES]->(c:Concept) RETURN p.link, c.name", sid=session_id)
                 for r in res_disc:
-                    edges.append({"source": r["p.link"], "target": f"concept_{r['c.name']}", "type": "discusses"})
+                    src, tgt = r["p.link"], f"concept_{r['c.name']}"
+                    if src in known_ids and tgt in known_ids:
+                        edges.append({"source": src, "target": tgt, "type": "discusses"})
 
                 res_meth = session.run("MATCH (p:Paper {session: $sid})-[:USES_METHOD]->(m:Method) RETURN p.link, m.name", sid=session_id)
                 for r in res_meth:
-                    edges.append({"source": r["p.link"], "target": f"method_{r['m.name']}", "type": "uses"})
+                    src, tgt = r["p.link"], f"method_{r['m.name']}"
+                    if src in known_ids and tgt in known_ids:
+                        edges.append({"source": src, "target": tgt, "type": "uses"})
 
                 return {"nodes": nodes, "links": edges}
         except Exception as e:
@@ -274,6 +284,7 @@ class GraphStore:
             with self.driver.session() as session:
                 nodes = []
                 edges = []
+                known_ids = set()
 
                 res_papers = session.run(
                     """
@@ -288,6 +299,7 @@ class GraphStore:
                     p = dict(r["p"])
                     paper_links.add(p["link"])
                     nodes.append({"id": p["link"], "name": p.get("title", "Paper"), "type": "paper", "val": 10})
+                    known_ids.add(p["link"])
 
                 if not paper_links:
                     return {"nodes": [], "links": []}
@@ -302,7 +314,9 @@ class GraphStore:
                 )
                 for r in res_concepts:
                     c = dict(r["c"])
-                    nodes.append({"id": f"concept_{c['name']}", "name": c["name"], "type": "concept", "val": 5})
+                    nid = f"concept_{c['name']}"
+                    nodes.append({"id": nid, "name": c["name"], "type": "concept", "val": 5})
+                    known_ids.add(nid)
 
                 res_methods = session.run(
                     """
@@ -314,7 +328,9 @@ class GraphStore:
                 )
                 for r in res_methods:
                     m = dict(r["m"])
-                    nodes.append({"id": f"method_{m['name']}", "name": m["name"], "type": "method", "val": 5})
+                    nid = f"method_{m['name']}"
+                    nodes.append({"id": nid, "name": m["name"], "type": "method", "val": 5})
+                    known_ids.add(nid)
 
                 res_cites = session.run(
                     """
@@ -325,7 +341,8 @@ class GraphStore:
                     links=list(paper_links),
                 )
                 for r in res_cites:
-                    edges.append({"source": r["a.link"], "target": r["b.link"], "type": "cites"})
+                    if r["a.link"] in known_ids and r["b.link"] in known_ids:
+                        edges.append({"source": r["a.link"], "target": r["b.link"], "type": "cites"})
 
                 res_disc = session.run(
                     """
@@ -336,7 +353,9 @@ class GraphStore:
                     links=list(paper_links),
                 )
                 for r in res_disc:
-                    edges.append({"source": r["p.link"], "target": f"concept_{r['c.name']}", "type": "discusses"})
+                    src, tgt = r["p.link"], f"concept_{r['c.name']}"
+                    if src in known_ids and tgt in known_ids:
+                        edges.append({"source": src, "target": tgt, "type": "discusses"})
 
                 res_meth = session.run(
                     """
@@ -347,7 +366,9 @@ class GraphStore:
                     links=list(paper_links),
                 )
                 for r in res_meth:
-                    edges.append({"source": r["p.link"], "target": f"method_{r['m.name']}", "type": "uses"})
+                    src, tgt = r["p.link"], f"method_{r['m.name']}"
+                    if src in known_ids and tgt in known_ids:
+                        edges.append({"source": src, "target": tgt, "type": "uses"})
 
                 return {"nodes": nodes, "links": edges}
         except Exception as e:

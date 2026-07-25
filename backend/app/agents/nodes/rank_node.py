@@ -104,7 +104,9 @@ def rank_node(state: AgentState) -> AgentState:
     original_query = state["query"]
     search_queries = state.get("search_queries", [original_query])
 
-    orig_vec = embed_texts([original_query])[0]
+    orig_vec = state.get("query_embedding")
+    if orig_vec is None:
+        orig_vec = embed_texts([original_query])[0]
     other_queries = [q for q in search_queries if q != original_query]
     other_vecs = embed_texts(other_queries) if other_queries else []
 

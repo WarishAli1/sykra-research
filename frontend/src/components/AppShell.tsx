@@ -6,7 +6,7 @@ import { RightRail } from "./RightRail";
 import { ChatPanel } from "./ChatPanel";
 import { GraphView } from "./GraphView";
 import { api, ApiError } from "@/lib/api";
-import type { ChatTurn, Paper } from "@/lib/types";
+import type { ChatTurn, Paper, EvidenceMode } from "@/lib/types";
 import dynamic from "next/dynamic";
 const PdfViewer = dynamic(
   () => import("./PdfViewer").then((m) => m.PdfViewer),
@@ -33,6 +33,15 @@ export function AppShell() {
   const [showGraphView, setShowGraphView] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const [pdfViewerUrl, setPdfViewerUrl] = useState<string | null>(null);
+  const [uploadState, setUploadState] = useState({
+    status: "idle" as "idle" | "uploading" | "processing" | "done" | "error",
+    filename: "",
+    progress: "",
+    stage: "",
+    fileUrl: "",
+  });
+  const [hasUpload, setHasUpload] = useState(false);
+  const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>("literature");
 
   const lastAssistantTurnId = [...turns].reverse().find((t) => t.role === "assistant" && t.turnId)?.turnId ?? null;
 
@@ -56,16 +65,47 @@ export function AppShell() {
     setTurns([]);
     setPapers([]);
     setUploadedFilename(null);
+    setUploadState({ status: "idle", filename: "", progress: "", stage: "", fileUrl: "" });
+    setHasUpload(false);
+    setEvidenceMode("literature");
     setSessionId(crypto.randomUUID());
     setShowGraphView(false);
   };
 
   const handleDeletePaper = async (paper: Paper) => {
-    await api.deleteUploadedPdf(sessionId, paper.link);
+    // Optimistic update first — mirrors ChatPanel's own upload-card close
+    // handler, so both delete entry points (Library X, chat-field X) behave
+    // identically regardless of network latency. Roll back only if the
+    // server call actually fails, instead of leaving the UI stuck if the
+    // await above ever throws.
+    setPapers(prev => prev.filter(p => p.link !== paper.link));
 
-    setPapers(prev =>
-        prev.filter(p => p.link !== paper.link)
-    );
+    const wasActiveUpload = paper.link === uploadState.fileUrl || (uploadState.filename && paper.title === uploadState.filename);
+    if (wasActiveUpload) {
+      setUploadState({ status: "idle", filename: "", progress: "", stage: "", fileUrl: "" });
+      setHasUpload(false);
+      setEvidenceMode("literature");
+      setUploadedFilename(null);
+    }
+
+    try {
+      await api.deleteUploadedPdf(sessionId, paper.link);
+    } catch (e) {
+      console.error("Failed to delete paper:", e);
+      setPapers(prev => (prev.some(p => p.link === paper.link) ? prev : [...prev, paper]));
+      if (wasActiveUpload) {
+        setUploadedFilename(paper.title);
+        setHasUpload(true);
+        setEvidenceMode("uploaded");
+        setUploadState({
+          status: "done",
+          filename: paper.title,
+          progress: "Ready",
+          stage: "",
+          fileUrl: paper.link,
+        });
+      }
+    }
   };
 
   const handleDownloadConversationPdf = useCallback(async () => {
@@ -166,6 +206,23 @@ export function AppShell() {
               setTurns={setTurns}
               sessionId={sessionId}
               onOpenGraph={handleOpenGraph}
+              onDeletePaper={async (link) => {
+                const paper = papers.find((p) => p.link === link)
+                  ?? papers.find((p) => uploadState.filename && p.title === uploadState.filename)
+                  ?? {
+                    title: uploadState.filename,
+                    authors: [],
+                    summary: "",
+                    link,
+                  };
+                await handleDeletePaper(paper as Paper);
+              }}
+              uploadState={uploadState}
+              setUploadState={setUploadState}
+              hasUpload={hasUpload}
+              setHasUpload={setHasUpload}
+              evidenceMode={evidenceMode}
+              setEvidenceMode={setEvidenceMode}
             />
           )}
         </main>

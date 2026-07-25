@@ -1,5 +1,6 @@
+import uuid
 from fastapi import APIRouter
-
+from pydantic import BaseModel
 from app.services.graph_store import graph_store
 
 router = APIRouter()
@@ -63,6 +64,9 @@ def research(req: ResearchRequest):
         "chart_url": None,
         "comparison_table_markdown": None,
         "comparison_table_caption": None,
+        "needs_revision": False,
+        "revision_count": 0,
+        "revision_instruction": None,
     }
     final_state = research_graph.invoke(initial_state)
 

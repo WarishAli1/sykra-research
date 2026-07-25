@@ -34,13 +34,13 @@ def _should_attempt_comparison(state: AgentState) -> bool:
     if len(candidates) >= 2:
         return True
 
+    q = state.get("query", "").lower()
+    if any(w in q for w in ("compare", "versus", " vs ", "vs.", "difference between", "trade-off", "tradeoff", "comparison table")):
+        return True
 
     understanding = state.get("query_understanding") or {}
     subtopics = understanding.get("subtopics") or []
-    return len(subtopics) >= 2 and any(
-        w in state.get("query", "").lower()
-        for w in ("compare", "versus", " vs ", "vs.", "difference between", "trade-off", "tradeoff")
-    )
+    return len(subtopics) >= 2
 
 
 _COMPARISON_TABLE_PROMPT = """You are building ONE comparison table to help answer a research question.
@@ -115,12 +115,47 @@ def _table_to_markdown(table: ComparisonTable) -> str:
     return "\n".join(lines)
 
 
+def _generate_basic_fallback_table(candidates: list[str], papers: list[dict], summaries: dict) -> str | None:
+    """Last-resort table when the dedicated LLM call fails or returns
+    applicable=false, used ONLY when the user's query had explicit
+    comparison intent. Built from whatever candidates/papers we have —
+    no LLM call, so it's instant and always succeeds if we have >=2
+    candidates or >=2 papers to compare."""
+    columns = candidates[:5] if len(candidates) >= 2 else [
+        p.get("title", f"Item {i+1}")[:40] for i, p in enumerate(papers[:4])
+    ]
+    if len(columns) < 2:
+        return None
+
+    rows = [
+        ("Key contribution", [
+            (summaries.get(str(i), {}).get("key_contribution", "") or "See references")[:80]
+            for i in range(len(columns))
+        ]),
+        ("Relevance to query", [
+            (summaries.get(str(i), {}).get("relevance_to_query", "") or "General background")[:80]
+            for i in range(len(columns))
+        ]),
+    ]
+
+    header = "| Dimension | " + " | ".join(columns) + " |"
+    sep = "|---|" + "---|" * len(columns)
+    lines = [header, sep]
+    for dim, values in rows:
+        values = (values + [""] * len(columns))[:len(columns)]
+        lines.append("| " + dim + " | " + " | ".join(v.replace("|", "/") for v in values) + " |")
+    return "\n".join(lines)
+
+
 def compare_node(state: AgentState) -> AgentState:
     query = state.get("query", "")
 
     if not _should_attempt_comparison(state):
         print("[compare_node] skipping: no comparative structure detected")
-        return {**state, "comparison_table_markdown": None, "comparison_table_caption": None}
+        return {
+            "comparison_table_markdown": None,
+            "comparison_table_caption": None,
+        }
 
     candidates = _gather_comparison_candidates(state)
     papers = state.get("ranked_papers", [])
@@ -130,12 +165,20 @@ def compare_node(state: AgentState) -> AgentState:
     table = _generate_comparison_table(query, candidates, papers, summaries)
 
     if table is None or not table.applicable or not table.columns or not table.rows:
-        print("[compare_node] no table produced (not applicable or generation failed)")
-        return {**state, "comparison_table_markdown": None, "comparison_table_caption": None}
+        print("[compare_node] LLM table generation failed/inapplicable — trying no-LLM fallback")
+        fallback = _generate_basic_fallback_table(candidates, papers, summaries)
+        if fallback:
+            return {
+                "comparison_table_markdown": fallback,
+                "comparison_table_caption": "Comparison",
+            }
+        return {
+            "comparison_table_markdown": None,
+            "comparison_table_caption": None,
+        }
 
     markdown = _table_to_markdown(table)
     return {
-        **state,
         "comparison_table_markdown": markdown,
         "comparison_table_caption": table.caption,
     }
