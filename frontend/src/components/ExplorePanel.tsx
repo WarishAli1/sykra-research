@@ -30,7 +30,6 @@ export function ExplorePanel({ projectId }: { projectId: string }) {
   } = useResearchGraph(projectId);
   const [openCluster, setOpenCluster] = useState<string | null>(null);
 
-  // ---- Focus mode (single paper + direct citation network) ----
   if (focusLink) {
     return (
       <div className="flex h-full flex-col">
@@ -133,7 +132,6 @@ export function ExplorePanel({ projectId }: { projectId: string }) {
     );
   }
 
-  // ---- Macro view (clusters + known contradictions) ----
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 border-b border-line px-4 py-3">

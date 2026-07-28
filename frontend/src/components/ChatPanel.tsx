@@ -1,11 +1,44 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, Paperclip, Loader2, Sparkles, ChevronDown, Square, Network } from "lucide-react";
+import { ArrowUp, Paperclip, Loader2, Square } from "lucide-react";
+import Image from "next/image";
 import { api, ApiError, ApiAbortError } from "@/lib/api";
 import type { ChatTurn, Paper, ResponseMode, EvidenceMode, StreamEvent, UploadStreamEvent } from "@/lib/types";
 import { ChatMessage } from "./ChatMessage";
 import { UploadPreviewCard } from "./UploadPreviewCard";
 import { Dropdown } from "@/components/Dropdown";
+
+function getGreeting(): { title: string; subtitle: string } {
+  const h = new Date().getHours();
+  if (h >= 0 && h < 5) {
+    return {
+      title: "Late-night research",
+      subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it.",
+    };
+  }
+  if (h < 12) {
+    return {
+      title: "Good morning",
+      subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it.",
+    };
+  }
+  if (h < 18) {
+    return {
+      title: "Good afternoon",
+      subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it.",
+    };
+  }
+  if (h < 23) {
+    return {
+      title: "Good evening",
+      subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it.",
+    };
+  }
+  return {
+    title: "Still thinking?",
+    subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it.",
+  };
+}
 
 export function ChatPanel({ 
   onUploadComplete, 
@@ -91,7 +124,15 @@ export function ChatPanel({
 
   function applyStreamEvent(turnId: string, event: StreamEvent, opts: { isChat: boolean }) {
     switch (event.type) {
-      case "progress": updateTurn(turnId, { statusLabel: event.label }); break;
+      case "progress":
+        updateTurn(turnId, (prev) => ({
+          statusLabel: event.label,
+          statusSteps: [
+            ...(prev.statusSteps ?? []),
+            { stage: event.stage ?? "default", label: event.label, detail: event.detail, items: event.items },
+          ],
+        }));
+        break;
       case "token": updateTurn(turnId, (prev) => ({ text: prev.text + event.text, statusLabel: undefined })); break;
       case "result": {
         if (opts.isChat) {
@@ -196,13 +237,6 @@ export function ChatPanel({
   }
 
   function handlePauseUpload() {
-    // Cancelling an in-flight upload is destructive, not resumable — there's
-    // no clean way to pick a half-parsed PDF back up mid-stream. Fire the
-    // server-side cancel (so the backend stops wasted OCR/embedding/graph
-    // work), then abort the client fetch. Abort tears the connection down
-    // immediately, so a "cancelled" SSE event will never arrive to reset the
-    // UI — that reset has to happen here, right away, not in the event
-    // handler.
     const requestId = uploadRequestIdRef.current;
     if (requestId) api.cancelUploadStream(requestId).catch(() => {});
     uploadAbortRef.current?.abort();
@@ -285,31 +319,178 @@ export function ChatPanel({
     }
   }
 
-  return (
-    <div className="flex h-full flex-col">
-      <div className="flex items-center justify-between border-b border-line bg-paper/70 px-4 py-3 backdrop-blur-sm">
-        <div className="flex items-center gap-2">
-          <Sparkles className="h-4 w-4 text-indigo" />
-          <span className="font-serif text-[15px] font-semibold text-ink">AI Chat</span>
-        </div>
+  const composer = (
+    <div className="w-full">
+      {uploadState.status !== "idle" && (
+          <UploadPreviewCard
+              filename={uploadState.filename}
+              status={uploadState.status}
+              progress={uploadState.progress}
+              fileUrl={uploadState.fileUrl}
+              onOpen={() => {
+                  if (uploadState.fileUrl) {
+                      onOpenPdf(uploadState.fileUrl);
+                  }
+              }}
+              onCancel={() => handlePauseUpload()}
+              onClose={() => {
+                  if (uploadState.status === "done") {
+                      const link = uploadState.fileUrl;
+                      setUploadState({ status: "idle", filename: "", progress: "", stage: "", fileUrl: "" });
+                      setHasUpload(false);
+                      setEvidenceMode("literature");
+                      onDeletePaper?.(link);
+                  } else {
+                      handlePauseUpload();
+                  }
+              }}
+          />
+      )}
+
+      <div className="flex items-center gap-2 rounded-2xl border border-line bg-paper-dim/70 px-3 py-2.5 min-h-[44px] shadow-sm shadow-black/5 focus-within:border-indigo/50 transition-colors">
         <button 
-          onClick={onOpenGraph} 
-          className="flex items-center gap-1.5 rounded-full bg-paper-dim px-3 py-1 text-[11px] font-medium text-ink-soft transition-colors hover:bg-paper hover:text-indigo"
+          onClick={() => fileInputRef.current?.click()} 
+          disabled={
+              uploadState.status === "uploading" ||
+              uploadState.status === "processing"
+          }
+          aria-label="Attach PDF" 
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-ink-soft hover:bg-paper hover:text-ink disabled:opacity-50"
         >
-          <Network className="h-3 w-3" /> Graph
+          {uploadState.status === "uploading" || uploadState.status === "processing" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
         </button>
+        <input 
+          ref={fileInputRef} 
+          type="file" 
+          accept="application/pdf" 
+          className="hidden" 
+          onChange={handleFileChange} 
+        />
+        <textarea 
+          ref={textareaRef} 
+          value={input} 
+          onChange={(e) => setInput(e.target.value)} 
+          onKeyDown={(e) => { 
+            if (e.key === "Enter" && !e.shiftKey) { 
+              e.preventDefault(); 
+              handleSend(); 
+            } 
+          }} 
+          rows={1} 
+          placeholder="Ask about papers, or upload a PDF" 
+          className="max-h-40 min-h-[22px] flex-1 resize-none overflow-y-auto bg-transparent text-[13.5px] leading-relaxed text-ink placeholder:text-ink-soft/60 focus:outline-none py-1" 
+        />
+
+        {hasUpload && (
+          <Dropdown
+            value={evidenceMode}
+            onChange={setEvidenceMode}
+            items={[
+              {
+                value: "uploaded",
+                label: "Uploaded document",
+                hint: "Answer using only the uploaded document.",
+              },
+              {
+                value: "blended",
+                label: "Blend",
+                hint: "Combine the uploaded document with external literature.",
+              },
+            ]}
+          />
+        )}
+        
+        <Dropdown
+          value={responseMode}
+          onChange={setResponseMode}
+          items={[
+            {
+              value: "normal",
+              label: "Normal",
+              hint: "Quick, concise answers.",
+            },
+            {
+              value: "researched",
+              label: "Researched",
+              hint: "Full structured report with inline citations and references.",
+            },
+          ]}
+        />
+        
+        {loading ? (
+          <button 
+            onClick={handlePause} 
+            aria-label="Pause generation" 
+            title="Stop generating this response" 
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-danger text-white transition-opacity hover:bg-danger/90"
+          >
+            <Square className="h-3 w-3 fill-current" />
+          </button>
+        ) : (
+          <button 
+            onClick={handleSend} 
+            disabled={!input.trim()} 
+            aria-label="Send message" 
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo text-white transition-opacity hover:bg-indigo-dark disabled:opacity-30"
+          >
+            <ArrowUp className="h-4 w-4" />
+          </button>
+        )}
       </div>
-      
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
-        {!hasConversation && (
-          <div className="flex h-full flex-col items-center justify-center text-center px-6">
-            <Sparkles className="h-6 w-6 text-indigo/40 mb-3" />
-            <p className="font-serif text-[15px] text-ink mb-1">Ask about the research</p>
-            <p className="text-[12.5px] text-ink-soft max-w-[220px]">
-              Search papers, ask follow-ups, or upload a PDF to ground answers in it. You can ask about new or old topics anytime.
+    </div>
+  );
+
+  if (!hasConversation) {
+    const greeting = getGreeting();
+    return (
+      <div className="relative flex h-full flex-col overflow-hidden">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 flex items-center justify-center"
+        >
+          <svg width="640" height="640" viewBox="0 0 640 640" className="opacity-[0.07]">
+            <circle cx="320" cy="320" r="90" fill="none" stroke="#17181c" strokeWidth="1" />
+            <circle cx="320" cy="320" r="170" fill="none" stroke="#17181c" strokeWidth="1" />
+            <circle cx="320" cy="320" r="250" fill="none" stroke="#17181c" strokeWidth="1" />
+          </svg>
+        </div>
+
+        <div className="relative flex-1 flex flex-col items-center justify-center px-6">
+          <div className="w-full max-w-[600px] flex flex-col items-center">
+            <Image
+              src="/sykra-logo.svg"
+              alt="Sykra"
+              width={64}
+              height={64}
+              className="mb-3 object-contain"
+            />
+            <h1 className="font-serif text-[28px] font-semibold text-ink mb-2 text-center">
+              {greeting.title}
+            </h1>
+            <p className="text-[13px] text-ink-soft mb-2 text-center max-w-[420px] leading-relaxed">
+              Search the literature, follow citation trails through a knowledge graph, or upload
+              a PDF and ask questions grounded in it.
             </p>
+            <p className="text-[12px] text-ink-soft/70 mb-8 text-center max-w-[420px]">
+              Every answer keeps its references, exportable as PDF, Markdown, or plain text.
+            </p>
+            {composer}
+          </div>
+        </div>
+        {error && (
+          <div className="relative px-6 pb-4">
+            <div className="mx-auto max-w-[560px] rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-[12px] text-danger">
+              {error}
+            </div>
           </div>
         )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
         {turns.map((t) => (
           <ChatMessage 
             key={t.id} 
@@ -362,124 +543,7 @@ export function ChatPanel({
       </div>
       
       <div className="border-t border-line p-3">
-        {uploadState.status !== "idle" && (
-            <UploadPreviewCard
-                filename={uploadState.filename}
-                status={uploadState.status}
-                progress={uploadState.progress}
-                fileUrl={uploadState.fileUrl}
-                onOpen={() => {
-                    if (uploadState.fileUrl) {
-                        onOpenPdf(uploadState.fileUrl);
-                    }
-                }}
-                onCancel={() => handlePauseUpload()}
-                onClose={() => {
-                    if (uploadState.status === "done") {
-                        const link = uploadState.fileUrl;
-                        setUploadState({ status: "idle", filename: "", progress: "", stage: "", fileUrl: "" });
-                        setHasUpload(false);
-                        setEvidenceMode("literature");
-                        onDeletePaper?.(link);
-                    } else {
-                        // handlePauseUpload already resets uploadState/hasUpload/
-                        // evidenceMode — no need to duplicate it here.
-                        handlePauseUpload();
-                    }
-                }}
-            />
-        )}
-        
-        <div className="flex items-end gap-2 rounded-xl border border-line bg-paper-dim/70 px-2.5 py-2 shadow-inner shadow-black/5 focus-within:border-indigo/50">
-          <button 
-            onClick={() => fileInputRef.current?.click()} 
-            disabled={
-                uploadState.status === "uploading" ||
-                uploadState.status === "processing"
-            }
-            aria-label="Attach PDF" 
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-ink-soft hover:bg-paper hover:text-indigo disabled:opacity-50"
-          >
-            {uploadState.status === "uploading" || uploadState.status === "processing" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
-          </button>
-          <input 
-            ref={fileInputRef} 
-            type="file" 
-            accept="application/pdf" 
-            className="hidden" 
-            onChange={handleFileChange} 
-          />
-          <textarea 
-            ref={textareaRef} 
-            value={input} 
-            onChange={(e) => setInput(e.target.value)} 
-            onKeyDown={(e) => { 
-              if (e.key === "Enter" && !e.shiftKey) { 
-                e.preventDefault(); 
-                handleSend(); 
-              } 
-            }} 
-            rows={1} 
-            placeholder="Ask AI about papers, or upload a PDF" 
-            className="max-h-40 min-h-[22px] flex-1 resize-none overflow-y-auto bg-transparent text-[13px] leading-relaxed text-ink placeholder:text-ink-soft/60 focus:outline-none py-1" 
-          />
-
-          {hasUpload && (
-            <Dropdown
-              value={evidenceMode}
-              onChange={setEvidenceMode}
-              items={[
-                {
-                  value: "uploaded",
-                  label: "Uploaded document",
-                  hint: "Answer using only the uploaded document.",
-                },
-                {
-                  value: "blended",
-                  label: "Blend",
-                  hint: "Combine the uploaded document with external literature.",
-                },
-              ]}
-            />
-          )}
-          
-          <Dropdown
-            value={responseMode}
-            onChange={setResponseMode}
-            items={[
-              {
-                value: "normal",
-                label: "Normal",
-                hint: "Quick, concise answers.",
-              },
-              {
-                value: "researched",
-                label: "Researched",
-                hint: "Full structured report with inline citations and references.",
-              },
-            ]}
-          />
-          
-          {loading ? (
-            <button 
-              onClick={handlePause} 
-              aria-label="Pause generation" 
-              title="Stop generating this response" 
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-danger text-white transition-opacity hover:bg-danger/90"
-            >
-              <Square className="h-3 w-3 fill-current" />
-            </button>
-          ) : (
-            <button 
-              onClick={handleSend} 
-              disabled={!input.trim()} 
-              aria-label="Send message" 
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gold text-white transition-opacity hover:bg-gold/90 disabled:opacity-30"
-            >
-              <ArrowUp className="h-4 w-4" />
-            </button>
-          )}
-        </div>
+        {composer}
       </div>
     </div>
   );

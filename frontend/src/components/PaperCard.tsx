@@ -14,10 +14,10 @@ export function PaperCard({
   onDeletePaper: (paper: Paper) => void | Promise<void>;
 }) {
   return (
-    <div className={`group relative rounded-lg border bg-paper/80 p-3.5 shadow-sm transition-colors hover:border-indigo/40 hover:bg-paper ${
+    <div className={`group relative rounded-lg border bg-paper p-3.5 shadow-sm transition-colors hover:border-indigo/40 ${
       paper.source === "user_upload" ? "border-l-4 border-l-indigo" : 
-      paper.source === "arxiv" ? "border-l-4 border-l-red-400" : 
-      "border-l-4 border-l-blue-400"
+      paper.source === "arxiv" ? "border-l-4 border-l-gold" : 
+      "border-l-4 border-l-ink-soft/40"
     }`}>
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-start gap-2 min-w-0">
@@ -35,7 +35,8 @@ export function PaperCard({
         {paper.source === "user_upload" && (
           <button
             onClick={() => onDeletePaper(paper)}
-            className="opacity-0 group-hover:opacity-100 transition text-red-500 hover:text-red-700"
+            aria-label="Remove uploaded PDF"
+            className="opacity-0 group-hover:opacity-100 transition text-ink-soft hover:text-danger shrink-0"
           >
             <X className="h-4 w-4" />
           </button>
@@ -55,10 +56,10 @@ export function PaperCard({
             <span className="text-[10px] font-medium text-indigo">PDF</span>
           )}
           {paper.source === "arxiv" && (
-            <span className="text-[10px] font-medium text-red-500">arXiv</span>
+            <span className="text-[10px] font-medium text-gold">arXiv</span>
           )}
           {paper.source === "openalex" && (
-            <span className="text-[10px] font-medium text-blue-500">OpenAlex</span>
+            <span className="text-[10px] font-medium text-ink-soft">OpenAlex</span>
           )}
         </div>
         {(paper.link || paper.file_url) &&

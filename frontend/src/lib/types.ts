@@ -39,6 +39,7 @@ export type ChatTurn = {
   streaming?: boolean;
   stopped?: boolean;
   statusLabel?: string;
+  statusSteps?: StatusStep[];
   requestId?: string;
   filename?: string;
   sourceQuery?: string;
@@ -98,11 +99,18 @@ export type RegenerateRequest = {
 };
 
 export type StreamEvent =
-  | { type: "progress"; label: string }
+  | { type: "progress"; label: string; stage?: string; detail?: string; items?: string[] }
   | { type: "token"; text: string }
   | { type: "result"; payload: ChatResponse }
   | { type: "cancelled" }
   | { type: "error"; message: string };
+
+export type StatusStep = {
+  stage: string;
+  label: string;
+  detail?: string;
+  items?: string[];
+};
 
 export type UploadStreamEvent =
   | {

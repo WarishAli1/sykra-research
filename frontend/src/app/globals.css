@@ -2,17 +2,20 @@
 @import "katex/dist/katex.min.css";
 
 :root {
-  --paper: #1e2229;
-  --paper-dim: #252a31;
-  --ink: #f4f4f6;
-  --ink-soft: #b7bcc5;
-  --indigo: #8f9e8b;
-  --indigo-dark: #768370;
-  --indigo-tint: #293128;
-  --gold: #d9a05b;
-  --gold-tint: #4a3824;
-  --line: #3a4049;
-  --danger: #d98a5b;
+  --paper: #ffffff;
+  --paper-dim: #f5f6f7;
+  --ink: #17181c;
+  --ink-soft: #6b6f78;
+
+  --indigo: #cd846b;
+  --indigo-dark: #b56a51;
+  --indigo-tint: #f6e9e4;
+
+  --gold: #7a9e8e;
+  --gold-tint: #eaf1ee;
+
+  --line: #dcdde2;
+  --danger: #d64f45;
 }
 
 @theme inline {
@@ -34,7 +37,7 @@
 }
 
 body {
-  background: linear-gradient(180deg, #1e2229 0%, #252a31 100%);
+  background: #ffffff;
   color: var(--ink);
   font-family: var(--font-sans);
   min-height: 100vh;

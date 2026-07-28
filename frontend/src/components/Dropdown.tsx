@@ -41,7 +41,7 @@ export function Dropdown<T extends string>({
     <div className="relative shrink-0" ref={ref}>
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[11px] font-medium text-ink-soft hover:text-ink hover:bg-paper/60 transition-colors"
+        className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[11px] font-medium text-ink-soft hover:text-indigo hover:bg-paper transition-colors"
       >
         {selected?.label}
         <ChevronDown className="h-3 w-3" />

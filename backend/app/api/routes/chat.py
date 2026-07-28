@@ -162,7 +162,19 @@ def chat_stream(req: ChatRequest):
 
                     for node_name, delta in update.items():
                         state.update(delta)
-                        yield progress_event(node_name)
+
+                        detail = None
+                        items = None
+                        if node_name in ("plan_query", "search"):
+                            queries = delta.get("search_queries") or state.get("search_queries")
+                            if queries:
+                                detail = queries[0] if isinstance(queries, list) else str(queries)
+                        elif node_name in ("rank", "validate"):
+                            papers = delta.get("ranked_papers") or state.get("ranked_papers")
+                            if papers:
+                                items = [p.get("title", "") for p in papers[:5] if p.get("title")]
+
+                        yield progress_event(node_name, detail=detail, items=items)
             except Exception as e:
                 print(f"[chat_stream] graph execution failed: {type(e).__name__}: {e}")
                 yield sse_event("error", message="Something went wrong while generating this answer.")
