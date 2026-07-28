@@ -65,7 +65,7 @@ function TabButton({
     <button
       onClick={onClick}
       className={`flex flex-1 items-center justify-center gap-1.5 border-b-2 px-3 py-2.5 text-[12px] font-medium transition-colors ${
-        active ? "border-indigo text-indigo" : "border-transparent text-ink-soft hover:text-ink"
+        active ? "border-gold text-ink" : "border-transparent text-ink-soft hover:text-ink"
       }`}
     >
       {icon}

@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { ChevronsLeft, ChevronsRight, FlaskConical, Library, Network, ArrowLeft } from "lucide-react";
+import { ChevronsLeft, ChevronsRight, Library, Network, ArrowLeft, PanelLeftOpen, Plus } from "lucide-react";
+import Image from "next/image";
 import { RightRail } from "./RightRail";
 import { ChatPanel } from "./ChatPanel";
 import { GraphView } from "./GraphView";
@@ -22,6 +23,7 @@ function mergePapers(existing: Paper[], incoming: Paper[]): Paper[] {
 
 const RAIL_WIDTH = 340;
 const STRIP_WIDTH = 44;
+const SIDEBAR_WIDTH = 224;
 
 export function AppShell() {
   const [papers, setPapers] = useState<Paper[]>([]);
@@ -29,6 +31,7 @@ export function AppShell() {
   const [uploadedFilename, setUploadedFilename] = useState<string | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [railOpen, setRailOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [tab, setTab] = useState<"library" | "explore">("library");
   const [showGraphView, setShowGraphView] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -73,11 +76,6 @@ export function AppShell() {
   };
 
   const handleDeletePaper = async (paper: Paper) => {
-    // Optimistic update first — mirrors ChatPanel's own upload-card close
-    // handler, so both delete entry points (Library X, chat-field X) behave
-    // identically regardless of network latency. Roll back only if the
-    // server call actually fails, instead of leaving the UI stuck if the
-    // await above ever throws.
     setPapers(prev => prev.filter(p => p.link !== paper.link));
 
     const wasActiveUpload = paper.link === uploadState.fileUrl || (uploadState.filename && paper.title === uploadState.filename);
@@ -165,32 +163,106 @@ export function AppShell() {
   }
 
   return (
-    <div className="flex h-screen flex-col bg-paper">
-      <header className="flex items-center gap-2 border-b border-line px-4 py-2.5 shrink-0">
-        <FlaskConical className="h-4 w-4 text-indigo" />
-        <span className="font-serif text-[14px] font-semibold text-ink">
-          AI Research Assistant
-        </span>
-        <button
-          onClick={handleNewChat}
-          className="ml-auto text-[11px] px-2 py-1 rounded bg-paper-dim text-ink-soft hover:text-indigo hover:bg-paper"
-        >
-          New Chat
-        </button>
-      </header>
+    <div className="flex h-screen bg-paper overflow-hidden">
+      <div
+        className="shrink-0 h-full overflow-hidden transition-[width] duration-200 ease-out border-r border-line bg-paper-dim"
+        style={{ width: sidebarOpen ? SIDEBAR_WIDTH : 0 }}
+      >
+        <div className="flex h-full flex-col" style={{ width: SIDEBAR_WIDTH }}>
+          <div className="flex items-center gap-2.5 px-4 py-4 shrink-0">
+            <Image
+              src="/sykra-icon.png"
+              alt="Sykra Research"
+              width={789}
+              height={146}
+              className="w-[150px] h-auto shrink-0 -mt-3"
+              priority
+            />
+            <button
+              onClick={() => setSidebarOpen(false)}
+              aria-label="Collapse sidebar"
+              className="ml-auto flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-ink-soft hover:bg-paper hover:text-ink transition-colors"
+            >
+              <ChevronsLeft className="h-3.5 w-3.5" />
+            </button>
+          </div>
 
-      <div ref={containerRef} className="flex flex-1 min-h-0">
+          <div className="px-3">
+            <button
+              onClick={handleNewChat}
+              className="flex w-full items-center gap-2 rounded-lg bg-gold-tint border border-gold/40 px-3 py-2 text-[12.5px] font-medium text-ink hover:bg-gold-tint/70 hover:border-gold/60 transition-colors"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              New Chat
+            </button>
+          </div>
+
+          <div className="mt-5 px-3">
+            <p className="px-1.5 pb-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-ink-soft/70">
+              Workspace
+            </p>
+            <button
+              onClick={() => {
+                setShowGraphView(false);
+                setTab("library");
+                setRailOpen(true);
+              }}
+              className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+                !showGraphView && tab === "library" && railOpen
+                  ? "bg-gold-tint text-ink font-medium"
+                  : "text-ink-soft hover:bg-paper hover:text-ink"
+              }`}
+            >
+              <Library className="h-3.5 w-3.5 shrink-0" />
+              Library
+              {papers.length > 0 && (
+                <span className="ml-auto rounded-full bg-paper px-1.5 py-0 text-[10px] text-ink-soft">
+                  {papers.length}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={handleOpenGraph}
+              className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+                showGraphView
+                  ? "bg-gold-tint text-ink font-medium"
+                  : "text-ink-soft hover:bg-paper hover:text-ink"
+              }`}
+            >
+              <Network className="h-3.5 w-3.5 shrink-0" />
+              Explore Graph
+            </button>
+          </div>
+
+          <div className="mt-auto px-4 py-3 text-[10.5px] text-ink-soft/50 shrink-0">
+            AI Research Assistant
+          </div>
+        </div>
+      </div>
+
+      {!sidebarOpen && (
+        <button
+          onClick={() => setSidebarOpen(true)}
+          aria-label="Expand sidebar"
+          className="absolute left-2 top-4 z-10 flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink"
+        >
+          <PanelLeftOpen className="h-4 w-4" />
+        </button>
+      )}
+
+      <div ref={containerRef} className="flex flex-1 min-h-0 min-w-0">
         <main className="flex-1 min-w-0">
           {showGraphView ? (
             <div className="h-full flex flex-col">
               <div className="flex items-center justify-between border-b border-line px-4 py-3">
                 <button
                   onClick={handleBackToChat}
-                  className="flex items-center gap-2 text-[13px] text-ink-soft hover:text-indigo"
+                  className="flex items-center gap-2 text-[13px] text-ink-soft hover:text-ink"
                 >
                   <ArrowLeft className="h-4 w-4" /> Back to Chat
                 </button>
                 <span className="font-serif text-[15px] font-semibold text-ink">Knowledge Graph</span>
+                <span className="w-[90px]" />
               </div>
               <div className="flex-1 min-h-0">
                 <GraphView sessionId={sessionId} activeTurnId={lastAssistantTurnId} />
@@ -228,16 +300,16 @@ export function AppShell() {
         </main>
 
         <div
-          className="relative shrink-0 h-full border-l border-line"
+          className="relative shrink-0 h-full border-l border-line overflow-hidden transition-[width] duration-200 ease-out"
           style={{ width: railOpen ? RAIL_WIDTH : STRIP_WIDTH }}
         >
           {railOpen ? (
-            <div className="h-full flex flex-col">
-              <div className="flex items-center justify-end px-2 py-1.5 border-b border-line">
+            <div className="h-full flex flex-col" style={{ width: RAIL_WIDTH }}>
+              <div className="flex items-center justify-end px-2 py-1.5 border-b border-line shrink-0">
                 <button
                   onClick={() => setRailOpen(false)}
                   aria-label="Collapse panel"
-                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-indigo"
+                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink"
                 >
                   <ChevronsRight className="h-3.5 w-3.5" />
                 </button>
@@ -254,11 +326,11 @@ export function AppShell() {
               </div>
             </div>
           ) : (
-            <div className="h-full flex flex-col items-center gap-1 py-2">
+            <div className="h-full flex flex-col items-center gap-1 py-2" style={{ width: STRIP_WIDTH }}>
               <button
                 onClick={() => setRailOpen(true)}
                 aria-label="Expand panel"
-                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-indigo mb-1"
+                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink mb-1"
               >
                 <ChevronsLeft className="h-3.5 w-3.5" />
               </button>
@@ -268,7 +340,7 @@ export function AppShell() {
                   setRailOpen(true);
                 }}
                 aria-label="Open library"
-                className="relative flex h-8 w-8 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-indigo"
+                className="relative flex h-8 w-8 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink"
               >
                 <Library className="h-4 w-4" />
                 {papers.length > 0 && (
@@ -281,7 +353,7 @@ export function AppShell() {
                   setRailOpen(true);
                 }}
                 aria-label="Open explore"
-                className="relative flex h-8 w-8 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-indigo"
+                className="relative flex h-8 w-8 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink"
               >
                 <Network className="h-4 w-4" />
               </button>

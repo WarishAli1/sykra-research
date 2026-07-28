@@ -1,6 +1,7 @@
 import time
 import functools
 from langgraph.graph import StateGraph, END
+
 from app.agents.state import AgentState
 from app.agents.nodes.plan_query_node import plan_query_node
 from app.agents.nodes.search_node import search_node
@@ -28,6 +29,13 @@ def timed(name):
     return decorator
 
 
+
+def after_critique_node(state):
+    return {
+        "revision_count": state.get("revision_count", 0)
+    }
+
+
 def build_graph():
     graph = StateGraph(AgentState)
 
@@ -39,9 +47,14 @@ def build_graph():
     graph.add_node("validate", timed("validate")(validate_node))
     graph.add_node("rank", timed("rank")(rank_node))
     graph.add_node("summarize", timed("summarize")(summarize_node))
-    graph.add_node("critique", timed("critique")(critique_node))
-    graph.add_node("revise", timed("revise")(revise_node))
-    graph.add_node("after_critique", lambda s: {})
+
+
+    # graph.add_node("critique", timed("critique")(critique_node))
+    # graph.add_node("revise", timed("revise")(revise_node))
+
+    # Temporary replacement node
+    graph.add_node("after_critique", after_critique_node)
+
     graph.add_node("compare", timed("compare")(compare_node))
     graph.add_node("chart", timed("chart")(chart_node))
     graph.add_node("graph_write", timed("graph_write")(graph_write_node))
@@ -53,21 +66,34 @@ def build_graph():
     graph.add_edge("validate", "rank")
     graph.add_edge("rank", "summarize")
 
-    graph.add_edge("summarize", "critique")
 
-    def route_after_critique(state):
-        return "revise" if state.get("needs_revision") else "after_critique"
+    # graph.add_edge("summarize", "critique")
 
-    graph.add_conditional_edges("critique", route_after_critique, {
-        "revise": "revise",
-        "after_critique": "after_critique",
-    })
-    graph.add_edge("revise", "after_critique")
+    # Temporary flow
+    graph.add_edge("summarize", "after_critique")
+
+    # def route_after_critique(state):
+    #     return "revise" if state.get("needs_revision") else "after_critique"
+
+    # graph.add_conditional_edges(
+    #     "critique",
+    #     route_after_critique,
+    #     {
+    #         "revise": "revise",
+    #         "after_critique": "after_critique",
+    #     },
+    # )
+
+    # graph.add_edge("revise", "after_critique")
 
     graph.add_edge("after_critique", "compare")
     graph.add_edge("after_critique", "chart")
     graph.add_edge("after_critique", "graph_write")
-    graph.add_edge(["compare", "chart", "graph_write"], "cite")
+
+    graph.add_edge(
+        ["compare", "chart", "graph_write"],
+        "cite",
+    )
 
     graph.add_edge("cite", END)
 

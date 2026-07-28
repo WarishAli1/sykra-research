@@ -12,6 +12,9 @@ NODE_LABELS = {
     "summarize": "Synthesizing the answer...",
     "cite": "Formatting citations...",
     "graph_write": "Updating the knowledge graph...",
+    "after_critique": "Refining the answer...",
+    "chart": "Preparing a chart...",
+    "compare": "Comparing sources...",
 }
 
 _CHUNK_PATTERN = re.compile(r"\S+\s*")
@@ -24,9 +27,14 @@ def sse_event(event_type: str, **fields) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
-def progress_event(node: str) -> str:
+def progress_event(node: str, detail: str | None = None, items: list[str] | None = None) -> str:
     label = NODE_LABELS.get(node, f"Running {node}...")
-    return sse_event("progress", node=node, label=label)
+    fields = {"stage": node, "label": label}
+    if detail is not None:
+        fields["detail"] = detail
+    if items is not None:
+        fields["items"] = items
+    return sse_event("progress", **fields)
 
 
 def stream_text_chunks(
