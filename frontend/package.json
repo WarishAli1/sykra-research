@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
@@ -36,6 +36,7 @@
   "overrides": {
     "next": {
       "sharp": "^0.35.3"
-    }
+    },
+    "pdfjs-dist": "4.8.69"
   }
 }

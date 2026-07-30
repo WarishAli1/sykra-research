@@ -10,7 +10,7 @@ def retrieve_uploaded_node(state: AgentState) -> AgentState:
     results = vector_store.query_session(
         session_id=state["session_id"],
         query_text=state["query"],
-        n_results=5,
+        n_results=12,
     )
 
     documents = results.get("documents", [[]])[0]

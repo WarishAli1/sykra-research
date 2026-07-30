@@ -131,7 +131,10 @@ async def upload_pdf(file: UploadFile = File(...), session_id: str = "default"):
         "paper_type": "user_upload",
     }
     vector_store.upsert_paper(paper, session_id)
-    graph_store.upsert_paper(paper, session_id)
+    try:
+        graph_store.upsert_paper(paper, session_id)
+    except Exception as exc:
+        print(f"[upload] graph_store.upsert_paper failed: {exc}; continuing without graph data")
 
     chunk_count = max(len(text.split()) // 500, 1)
 
@@ -178,6 +181,7 @@ async def delete_uploaded_pdf(
 
 _CANCEL_POLL_INTERVAL = 0.25
 _CANCELLED = object()
+_GRAPH_WRITE_TIMEOUT_SECONDS = 12
 
 
 async def _await_with_cancel_watch(task: "asyncio.Task", request_id: str, sentinel_ok: bool = False):
@@ -315,10 +319,18 @@ async def upload_pdf_stream(file: UploadFile = File(...), session_id: str = "def
                 graph_task = asyncio.create_task(
                     asyncio.to_thread(graph_store.upsert_paper, paper, session_id)
                 )
-                graph_result = await _await_with_cancel_watch(graph_task, request_id, sentinel_ok=True)
-                if graph_result is _CANCELLED:
-                    yield sse_event("cancelled")
-                    return
+                try:
+                    graph_result = await asyncio.wait_for(
+                        _await_with_cancel_watch(graph_task, request_id, sentinel_ok=True),
+                        timeout=_GRAPH_WRITE_TIMEOUT_SECONDS,
+                    )
+                    if graph_result is _CANCELLED:
+                        yield sse_event("cancelled")
+                        return
+                except asyncio.TimeoutError:
+                    print(f"[upload/stream] graph_store.upsert_paper timed out after {_GRAPH_WRITE_TIMEOUT_SECONDS}s for {safe_name}; continuing without graph data")
+                except Exception as exc:
+                    print(f"[upload/stream] graph_store.upsert_paper failed: {exc}; continuing without graph data")
 
                 yield sse_event("result", payload={
                     "filename": safe_name,

@@ -2,20 +2,20 @@
 @import "katex/dist/katex.min.css";
 
 :root {
-  --paper: #ffffff;
-  --paper-dim: #f5f6f7;
-  --ink: #17181c;
-  --ink-soft: #6b6f78;
+  --paper: #fbfcfc;
+  --paper-dim: #eef2f2;
+  --ink: #14181b;
+  --ink-soft: #5f676d;
 
-  --indigo: #cd846b;
-  --indigo-dark: #b56a51;
-  --indigo-tint: #f6e9e4;
+  --indigo: #0e6b62;        /* brand / links / active  — deep petrol-teal */
+  --indigo-dark: #0a524b;
+  --indigo-tint: #e1efed;
 
-  --gold: #7a9e8e;
-  --gold-tint: #eaf1ee;
+  --gold: #4d7a84;          /* secondary / semantic    — cool steel-teal  */
+  --gold-tint: #e7eff1;
 
-  --line: #dcdde2;
-  --danger: #d64f45;
+  --line: #dce3e3;
+  --danger: #c2453c;
 }
 
 @theme inline {

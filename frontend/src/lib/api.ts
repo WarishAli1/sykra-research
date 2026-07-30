@@ -33,6 +33,19 @@ export function resolveAssetUrl(path: string | null | undefined): string | null 
   if (/^https?:\/\//i.test(path)) return path;
   return `${BACKEND_ORIGIN}${path.startsWith("/") ? "" : "/"}${path}`;
 }
+const UPLOAD_SCHEME = /^user_upload:\/\//i;
+
+export function resolvePdfUrl(paper: {
+  file_url?: string | null;
+  link?: string;
+}): string | null {
+  for (const raw of [paper.file_url, paper.link]) {
+    if (!raw) continue;
+    const cleaned = raw.replace(UPLOAD_SCHEME, "").trim();
+    if (/^https?:\/\//i.test(cleaned)) return cleaned;
+  }
+  return null;
+}
 
 export class ApiAbortError extends Error {
   constructor() {
@@ -266,14 +279,12 @@ export const api = {
     });
   },
 
-  // Conversation-level knowledge graph: everything discussed in the session.
   getFullGraph(sessionId: string): Promise<FullGraphData> {
     return request<FullGraphData>(`/graph/${encodeURIComponent(sessionId)}/full`, {
       method: "GET",
     });
   },
 
-  // NEW — Message-level knowledge graph: only what a specific turn discussed.
   getTurnGraph(sessionId: string, turnId: string): Promise<FullGraphData> {
     return request<FullGraphData>(
       `/graph/${encodeURIComponent(sessionId)}/turn/${encodeURIComponent(turnId)}/full`,

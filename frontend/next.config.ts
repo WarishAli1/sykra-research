@@ -5,10 +5,8 @@ import { fileURLToPath } from "node:url";
 const frontendRoot = path.dirname(fileURLToPath(import.meta.url));
 
 const nextConfig: NextConfig = {
-  reactCompiler: true,
-  turbopack: {
-    root: frontendRoot,
-  },
+  reactCompiler: false,
+  outputFileTracingRoot: path.join(frontendRoot),
 };
 
 export default nextConfig;
