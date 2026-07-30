@@ -171,6 +171,15 @@ export function GraphView({
       </button>
     </div>
   );
+  
+  const safeGraphData = useMemo(() => {
+    if (!graphData) return null;
+    const ids = new Set(graphData.nodes.map((n: any) => n.id));
+    return {
+      nodes: graphData.nodes,
+      links: graphData.links.filter((l: any) => ids.has(l.source) && ids.has(l.target)),
+    };
+  }, [graphData]) as FullGraphData | null;
 
   if (loading)
     return (
@@ -182,15 +191,6 @@ export function GraphView({
         </div>
       </div>
     );
-
-  const safeGraphData = useMemo(() => {
-    if (!graphData) return null;
-    const ids = new Set(graphData.nodes.map((n: any) => n.id));
-    return {
-      nodes: graphData.nodes,
-      links: graphData.links.filter((l: any) => ids.has(l.source) && ids.has(l.target)),
-    };
-  }, [graphData]) as FullGraphData | null;
 
   if (!graphData || graphData.nodes.length === 0)
     return (

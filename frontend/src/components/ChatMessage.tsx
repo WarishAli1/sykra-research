@@ -24,10 +24,14 @@ import {
 } from "lucide-react";
 import type { ChatTurn } from "@/lib/types";
 import { api, ApiError, resolveAssetUrl } from "@/lib/api";
+
 function stripReferencesBlock(text: string): string {
-  const marker = "\n\n---\n\n**References**";
-  const idx = text.indexOf(marker);
-  return idx === -1 ? text : text.slice(0, idx).trim();
+  const rule = "\n\n---\n\n";
+  const i = text.indexOf(rule);
+  if (i === -1) return text;
+  const tail = text.slice(i + rule.length).replace(/^#+\s*/, "").trimStart();
+  if (/^references\b/i.test(tail)) return text.slice(0, i).trim();
+  return text;
 }
 
 function stripMarkdown(text: string): string {
@@ -37,8 +41,8 @@ function stripMarkdown(text: string): string {
   s = s.replace(/\*\*(.+?)\*\*/g, "$1");
   s = s.replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, "$1");
   s = s.replace(/`([^`]+?)`/g, "$1");
-  s = s.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
   s = s.replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1");
+  s = s.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
   s = s.replace(/^#{1,6}\s+/gm, "");
   s = s.replace(/^\s*[-*+]\s+/gm, "");
   s = s.replace(/^\s*\d+[.)]\s+/gm, "");
@@ -46,15 +50,27 @@ function stripMarkdown(text: string): string {
   return s.trim();
 }
 
-function formatRefPlain(ref: { id: number; title: string; authors?: string[]; link?: string; published?: string | null }): string {
+function formatRefPlain(ref: {
+  id: number;
+  title: string;
+  authors?: string[];
+  link?: string;
+  published?: string | null;
+}): string {
   const authors = ref.authors?.length ? ref.authors.slice(0, 3).join(", ") + ". " : "";
-  const year = ref.published ? ` (${ref.published})` : "";
+  const year = ref.published ? `(${ref.published})` : "";
   return `[${ref.id}] ${authors}${ref.title}${year}. ${ref.link ?? ""}`;
 }
 
-function formatRefMarkdown(ref: { id: number; title: string; authors?: string[]; link?: string; published?: string | null }): string {
-  const authors = ref.authors?.length ? ` — ${ref.authors.slice(0, 3).join(", ")}` : "";
-  const year = ref.published ? ` (${ref.published})` : "";
+function formatRefMarkdown(ref: {
+  id: number;
+  title: string;
+  authors?: string[];
+  link?: string;
+  published?: string | null;
+}): string {
+  const authors = ref.authors?.length ? `— ${ref.authors.slice(0, 3).join(", ")}` : "";
+  const year = ref.published ? `(${ref.published})` : "";
   return `${ref.id}. [${ref.title}](${ref.link ?? ""})${authors}${year}`;
 }
 
@@ -68,6 +84,57 @@ function downloadTextFile(filename: string, content: string, mime: string) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+function isMathFenceLine(line: string): boolean {
+  return /^[ \t]*\$\$[ \t]*$/.test(line);
+}
+function isMathProseBoundary(line: string): boolean {
+  return /^[ \t]*$/.test(line) || /^[ \t]*#{1,6}\s/.test(line);
+}
+function normalizeMathFences(md: string): string {
+  let s = md;
+  for (let pass = 0; pass < 2; pass++) {
+    s = s.replace(/([^\n])\$\$/g, "$1\n$$");
+    s = s.replace(/\$\$([^\n])/g, "$$\n$1");
+  }
+  s = s.replace(/\n{3,}/g, "\n\n");
+
+  const lines = s.split("\n");
+  const out: string[] = [];
+  let inMath = false;
+  const ensureBlank = () => {
+    if (out.length && out[out.length - 1].trim() !== "") out.push("");
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isMathFenceLine(line)) {
+      if (!inMath) {
+        if (i + 1 < lines.length && isMathFenceLine(lines[i + 1])) {
+          i++;
+          continue;
+        }
+        ensureBlank();
+        out.push("$$");
+        inMath = true;
+      } else {
+        out.push("$$");
+        inMath = false;
+        ensureBlank();
+      }
+    } else if (inMath && isMathProseBoundary(line)) {
+      out.push("$$");
+      inMath = false;
+      out.push(line);
+      if (line.trim() !== "") ensureBlank();
+    } else {
+      out.push(line);
+    }
+  }
+  if (inMath) out.push("$$");
+
+  return out.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
 const markdownComponents = {
@@ -230,7 +297,7 @@ export function ChatMessage({
         content += "\n" + formatRefMarkdown(r);
       }
     }
-    downloadTextFile(`${turn.filename ?? "research-answer"}.md`,content,"text/markdown");
+    downloadTextFile(`${turn.filename ?? "research-answer"}.md`, content, "text/markdown");
     setMenuOpen(false);
   }
 
@@ -265,6 +332,7 @@ export function ChatMessage({
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
+      /* clipboard unavailable */
     }
   }
 
@@ -275,41 +343,38 @@ export function ChatMessage({
         await navigator.share({ text: shareText });
         return;
       } catch {
+        /* user dismissed the share sheet */
       }
     }
     await handleCopy();
   }
+
   const hasSteps = !!turn.statusSteps?.length;
   const showStatusFallback = isStreaming && !!turn.statusLabel && !hasText && !hasSteps;
   const hasBody = hasText || isStopped || regenerating || showMetadata;
-    return (
+
+  return (
     <div className="animate-fade-up space-y-3">
       <div className="rounded-2xl rounded-bl-sm border border-line bg-paper/85 px-4 py-3 shadow-sm shadow-black/5">
         {hasSteps && (
-          <ResearchSteps
-            embedded
-            steps={turn.statusSteps!}
-            streaming={isStreaming}
-          />
+          <ResearchSteps embedded steps={turn.statusSteps!} streaming={isStreaming} />
         )}
-
         {showStatusFallback && (
           <div className="flex items-center gap-2 text-[12.5px] text-ink-soft">
             <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
             <span>{turn.statusLabel}</span>
           </div>
         )}
-
         {hasBody && (
           <div className={hasSteps ? "border-t border-line pt-3" : ""}>
             {hasText && (
               <div className="prose-chat text-[13.5px] leading-relaxed text-ink">
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm, remarkMath]}
-                  rehypePlugins={[rehypeKatex]}
+                  rehypePlugins={[[rehypeKatex, { throwOnError: false, errorColor: "#8a9099" }]]}
                   components={markdownComponents}
                 >
-                  {stripReferencesBlock(turn.text)}
+                  {normalizeMathFences(stripReferencesBlock(turn.text))}
                 </ReactMarkdown>
                 {isStreaming && (
                   <span
@@ -319,28 +384,24 @@ export function ChatMessage({
                 )}
               </div>
             )}
-
             {isStopped && (
               <div className="mt-2 flex items-center gap-1.5 text-[11.5px] text-ink-soft">
                 <OctagonX className="h-3 w-3 shrink-0" />
                 <span>Generation stopped.</span>
               </div>
             )}
-
             {showMetadata && turn.domainCaveat && (
               <div className="mt-3 flex items-start gap-2 rounded-md bg-gold-tint px-2.5 py-2 text-[12px] text-ink-soft">
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gold" />
                 <span>{turn.domainCaveat}</span>
               </div>
             )}
-
             {showMetadata && !!turn.coverageGaps?.length && (
               <div className="mt-2 text-[12px] text-ink-soft">
                 <span className="font-medium text-ink">Coverage gaps: </span>
                 {turn.coverageGaps.join("; ")}
               </div>
             )}
-
             {showMetadata && !!turn.sources?.length && (
               <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-line pt-2.5">
                 <BookMarked className="h-3.5 w-3.5 text-ink-soft" />
@@ -354,19 +415,22 @@ export function ChatMessage({
                 ))}
               </div>
             )}
-
             {showMetadata && showReferencesInline && (
               <div className="mt-3 border-t border-line pt-2.5">
                 <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-soft">
                   <BookMarked className="h-3.5 w-3.5" />
                   {isResearched ? "References" : "Key References"}
                 </div>
-
                 {isResearched ? (
                   <ol className="space-y-1 text-[12px] text-ink-soft list-decimal list-inside">
                     {turn.references!.map((r) => (
                       <li key={r.id} value={r.id}>
-                        <a href={r.link} target="_blank" rel="noopener noreferrer" className="text-indigo hover:underline">
+                        <a
+                          href={r.link}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-indigo hover:underline"
+                        >
                           {r.title}
                         </a>
                         {r.authors?.length ? ` — ${r.authors.slice(0, 3).join(", ")}` : ""}
@@ -378,7 +442,12 @@ export function ChatMessage({
                   <ul className="space-y-1.5 text-[12.5px]">
                     {turn.references!.map((r) => (
                       <li key={r.id} className="flex items-baseline gap-2">
-                        <a href={r.link} target="_blank" rel="noopener noreferrer" className="text-indigo hover:underline font-medium">
+                        <a
+                          href={r.link}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-indigo hover:underline font-medium"
+                        >
                           {r.title}
                         </a>
                         {r.published && <span className="text-ink-soft shrink-0">({r.published})</span>}
@@ -388,27 +457,24 @@ export function ChatMessage({
                 )}
               </div>
             )}
-
             {showMetadata && !showReferencesInline && !!turn.references?.length && (
               <div className="mt-2 text-[11.5px] text-ink-soft">
-                {turn.references.length} reference{turn.references.length === 1 ? "" : "s"} added to Library.
+                {turn.references.length} reference{turn.references.length === 1 ? "" : "s"} added to
+                Library.
               </div>
             )}
-
             {showMetadata && !!turn.papers?.length && (
               <div className="mt-3 flex items-center gap-1.5 border-t border-line pt-2.5 text-[11.5px] text-ink-soft">
                 <BookMarked className="h-3.5 w-3.5 shrink-0" />
                 {turn.papers.length} paper{turn.papers.length === 1 ? "" : "s"} added to Library
               </div>
             )}
-
             {regenerating && (
               <div className="mt-3 flex items-center gap-2 border-t border-line pt-2.5 text-[11.5px] text-ink-soft">
                 <Loader2 className="h-3 w-3 animate-spin" />
                 Regenerating this answer…
               </div>
             )}
-
             {showMetadata && !regenerating && (
               <div className="mt-3 flex items-center gap-1 border-t border-line pt-2.5">
                 <button
@@ -418,14 +484,9 @@ export function ChatMessage({
                   title="Download standard PDF"
                   className="flex items-center gap-1 rounded-md bg-paper-dim px-2 py-1 text-[11px] text-ink-soft hover:text-indigo disabled:opacity-50"
                 >
-                  {exporting ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <Download className="h-3 w-3" />
-                  )}
+                  {exporting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                   PDF
                 </button>
-
                 <button
                   onClick={handleShare}
                   aria-label="Share answer"
@@ -434,7 +495,6 @@ export function ChatMessage({
                 >
                   <Share2 className="h-3.5 w-3.5" />
                 </button>
-
                 <button
                   onClick={handleCopy}
                   aria-label="Copy answer"
@@ -443,7 +503,6 @@ export function ChatMessage({
                 >
                   {copied ? <Check className="h-3.5 w-3.5 text-green-600" /> : <Copy className="h-3.5 w-3.5" />}
                 </button>
-
                 <button
                   onClick={() => setFeedback((f) => (f === "up" ? null : "up"))}
                   aria-label="Good response"
@@ -455,7 +514,6 @@ export function ChatMessage({
                 >
                   <ThumbsUp className="h-3.5 w-3.5" />
                 </button>
-
                 <button
                   onClick={() => setFeedback((f) => (f === "down" ? null : "down"))}
                   aria-label="Bad response"
@@ -467,7 +525,6 @@ export function ChatMessage({
                 >
                   <ThumbsDown className="h-3.5 w-3.5" />
                 </button>
-
                 <div className="relative ml-1" ref={menuRef}>
                   <button
                     onClick={() => setMenuOpen((o) => !o)}
@@ -479,7 +536,6 @@ export function ChatMessage({
                   >
                     <MoreHorizontal className="h-3.5 w-3.5" />
                   </button>
-
                   {menuOpen && (
                     <div
                       role="menu"
@@ -526,10 +582,7 @@ export function ChatMessage({
                 </div>
               </div>
             )}
-
-            {exportError && (
-              <div className="mt-1.5 text-[11px] text-danger">{exportError}</div>
-            )}
+            {exportError && <div className="mt-1.5 text-[11px] text-danger">{exportError}</div>}
           </div>
         )}
       </div>

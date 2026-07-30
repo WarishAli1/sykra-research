@@ -19,7 +19,7 @@ from app.services.embeddings import embed_texts, similarity
 from app.services.reference_builder import build_references, format_reference_block
 from app.services import cancellation
 from app.services.sse import sse_event, progress_event, stream_text_chunks
-from app.utils.text_cleaning import normalize_dashes
+from app.utils.text_cleaning import normalize_dashes, normalize_math_fences
 from app.services.filename_service import generate_filename
 from app.services.reference_builder import filter_cited_references
 
@@ -111,7 +111,7 @@ def _finalize_chat_response(req: ChatRequest, session_id: str, turn_id: str, fin
         final_state.get("final_answer", "")
     )
     return ChatResponse(
-        answer=normalize_dashes(final_state.get("final_answer", "")),
+        answer=normalize_math_fences(normalize_dashes(final_state.get("final_answer", ""))),
         session_id=session_id,
         turn_id=turn_id,
         papers=papers,

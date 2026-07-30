@@ -1,24 +1,33 @@
 import { ExternalLink, X } from "lucide-react";
 import { RelevanceStack } from "./RelevanceStack";
+import { resolvePdfUrl } from "@/lib/api";
 import type { Paper } from "@/lib/types";
 
 export function PaperCard({
   paper,
   index,
   onOpenPdf,
-  onDeletePaper
+  onDeletePaper,
 }: {
   paper: Paper;
   index?: number;
   onOpenPdf: (url: string) => void;
   onDeletePaper: (paper: Paper) => void | Promise<void>;
 }) {
+  const isUpload = paper.source === "user_upload";
+  const pdfUrl = isUpload ? resolvePdfUrl(paper) : null;
+  const canOpen = isUpload ? !!pdfUrl : !!paper.link;
+
   return (
-    <div className={`group relative rounded-lg border bg-paper p-3.5 shadow-sm transition-colors hover:border-indigo/40 ${
-      paper.source === "user_upload" ? "border-l-4 border-l-indigo" : 
-      paper.source === "arxiv" ? "border-l-4 border-l-gold" : 
-      "border-l-4 border-l-ink-soft/40"
-    }`}>
+    <div
+      className={`group relative rounded-lg border bg-paper p-3.5 shadow-sm transition-colors hover:border-indigo/40 ${
+        paper.source === "user_upload"
+          ? "border-l-4 border-l-indigo"
+          : paper.source === "arxiv"
+          ? "border-l-4 border-l-gold"
+          : "border-l-4 border-l-ink-soft/40"
+      }`}
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-start gap-2 min-w-0">
           {typeof index === "number" && (
@@ -26,12 +35,10 @@ export function PaperCard({
               [{index}]
             </span>
           )}
-
           <h4 className="font-serif text-[13.5px] leading-snug text-ink line-clamp-2">
             {paper.title}
           </h4>
         </div>
-
         {paper.source === "user_upload" && (
           <button
             onClick={() => onDeletePaper(paper)}
@@ -42,13 +49,16 @@ export function PaperCard({
           </button>
         )}
       </div>
+
       <p className="mt-1 text-[11.5px] text-ink-soft line-clamp-1">
         {paper.authors.join(", ") || "Unknown authors"}
         {paper.published ? ` · ${paper.published}` : ""}
       </p>
+
       <p className="mt-2 text-[12.5px] leading-relaxed text-ink-soft line-clamp-3">
         {paper.summary}
       </p>
+
       <div className="mt-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <RelevanceStack score={paper.relevance_score} />
@@ -62,10 +72,11 @@ export function PaperCard({
             <span className="text-[10px] font-medium text-ink-soft">OpenAlex</span>
           )}
         </div>
-        {(paper.link || paper.file_url) &&
-          (paper.source === "user_upload" ? (
+
+        {canOpen &&
+          (isUpload ? (
             <button
-              onClick={() => onOpenPdf(paper.file_url!)}
+              onClick={() => onOpenPdf(pdfUrl!)}
               className="flex items-center gap-1 text-[11.5px] font-medium text-indigo hover:text-indigo-dark"
             >
               Open PDF

@@ -1,7 +1,14 @@
 "use client";
-
 import { useCallback, useRef, useState } from "react";
-import { ChevronsLeft, ChevronsRight, Library, Network, ArrowLeft, PanelLeftOpen, Plus } from "lucide-react";
+import {
+  ChevronsLeft,
+  ChevronsRight,
+  Library,
+  Network,
+  ArrowLeft,
+  PanelLeftOpen,
+  Plus,
+} from "lucide-react";
 import Image from "next/image";
 import { RightRail } from "./RightRail";
 import { ChatPanel } from "./ChatPanel";
@@ -9,21 +16,41 @@ import { GraphView } from "./GraphView";
 import { api, ApiError } from "@/lib/api";
 import type { ChatTurn, Paper, EvidenceMode } from "@/lib/types";
 import dynamic from "next/dynamic";
-const PdfViewer = dynamic(
-  () => import("./PdfViewer").then((m) => m.PdfViewer),
-  {
-    ssr: false,
-  }
-);
+
+const PdfViewer = dynamic(() => import("./PdfViewer").then((m) => m.PdfViewer), {
+  ssr: false,
+});
+import { PdfViewerBoundary } from "./PdfViewerBoundary";
+
+const isHttpUrl = (v?: string | null) =>
+  !!v && /^https?:\/\//i.test(v.replace(/^user_upload:\/\//i, ""));
+
 function mergePapers(existing: Paper[], incoming: Paper[]): Paper[] {
   const byTitle = new Map(existing.map((p) => [p.title, p]));
-  for (const p of incoming) byTitle.set(p.title, p);
+  for (const p of incoming) {
+    const prev = byTitle.get(p.title);
+    if (!prev) {
+      byTitle.set(p.title, p);
+      continue;
+    }
+    byTitle.set(p.title, {
+      ...prev,
+      ...p,
+      file_url: isHttpUrl(p.file_url) ? p.file_url : prev.file_url,
+      link: p.link || prev.link,
+      is_uploaded: prev.is_uploaded || p.is_uploaded,
+      source: p.source ?? prev.source,
+    });
+  }
   return Array.from(byTitle.values());
 }
 
 const RAIL_WIDTH = 340;
 const STRIP_WIDTH = 44;
 const SIDEBAR_WIDTH = 224;
+const PDF_WIDTH_DEFAULT = 50;
+const PDF_WIDTH_MIN = 30;
+const PDF_WIDTH_MAX = 70;
 
 export function AppShell() {
   const [papers, setPapers] = useState<Paper[]>([]);
@@ -35,7 +62,11 @@ export function AppShell() {
   const [tab, setTab] = useState<"library" | "explore">("library");
   const [showGraphView, setShowGraphView] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
   const [pdfViewerUrl, setPdfViewerUrl] = useState<string | null>(null);
+  const [pdfWidthPct, setPdfWidthPct] = useState(PDF_WIDTH_DEFAULT);
+  const [draggingPdf, setDraggingPdf] = useState(false);
+
   const [uploadState, setUploadState] = useState({
     status: "idle" as "idle" | "uploading" | "processing" | "done" | "error",
     filename: "",
@@ -46,7 +77,8 @@ export function AppShell() {
   const [hasUpload, setHasUpload] = useState(false);
   const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>("literature");
 
-  const lastAssistantTurnId = [...turns].reverse().find((t) => t.role === "assistant" && t.turnId)?.turnId ?? null;
+  const lastAssistantTurnId =
+    [...turns].reverse().find((t) => t.role === "assistant" && t.turnId)?.turnId ?? null;
 
   const handleNewPapers = useCallback((incoming: Paper[]) => {
     if (!incoming.length) return;
@@ -58,12 +90,34 @@ export function AppShell() {
     setRailOpen(true);
     setTab("explore");
   };
+  const handleBackToChat = () => setShowGraphView(false);
 
-  const handleBackToChat = () => {
-    setShowGraphView(false);
-  };
   const handleOpenPdf = (url: string) => setPdfViewerUrl(url);
   const handleClosePdf = () => setPdfViewerUrl(null);
+  const startPdfResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const container = containerRef.current;
+    if (!container) return;
+    setDraggingPdf(true);
+    const onMove = (ev: MouseEvent) => {
+      const rect = container.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const fromRight = rect.right - ev.clientX;
+      const pct = Math.min(
+        PDF_WIDTH_MAX,
+        Math.max(PDF_WIDTH_MIN, (fromRight / rect.width) * 100)
+      );
+      setPdfWidthPct(pct);
+    };
+    const onUp = () => {
+      setDraggingPdf(false);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, []);
+
   const handleNewChat = () => {
     setTurns([]);
     setPapers([]);
@@ -76,21 +130,21 @@ export function AppShell() {
   };
 
   const handleDeletePaper = async (paper: Paper) => {
-    setPapers(prev => prev.filter(p => p.link !== paper.link));
-
-    const wasActiveUpload = paper.link === uploadState.fileUrl || (uploadState.filename && paper.title === uploadState.filename);
+    setPapers((prev) => prev.filter((p) => p.link !== paper.link));
+    const wasActiveUpload =
+      paper.link === uploadState.fileUrl ||
+      (uploadState.filename && paper.title === uploadState.filename);
     if (wasActiveUpload) {
       setUploadState({ status: "idle", filename: "", progress: "", stage: "", fileUrl: "" });
       setHasUpload(false);
       setEvidenceMode("literature");
       setUploadedFilename(null);
     }
-
     try {
       await api.deleteUploadedPdf(sessionId, paper.link);
     } catch (e) {
       console.error("Failed to delete paper:", e);
-      setPapers(prev => (prev.some(p => p.link === paper.link) ? prev : [...prev, paper]));
+      setPapers((prev) => (prev.some((p) => p.link === paper.link) ? prev : [...prev, paper]));
       if (wasActiveUpload) {
         setUploadedFilename(paper.title);
         setHasUpload(true);
@@ -109,23 +163,19 @@ export function AppShell() {
   const handleDownloadConversationPdf = useCallback(async () => {
     const assistantTurns = turns.filter((t) => t.role === "assistant");
     if (!assistantTurns.length) return;
-
     const combinedAnswer = assistantTurns
       .map((t, i) => `## Turn ${i + 1}\n\n${t.text}`)
       .join("\n\n---\n\n");
     const combinedReferences = Array.from(
-      new Map(
-        assistantTurns.flatMap((t) => t.references ?? []).map((r) => [r.id, r])
-      ).values()
+      new Map(assistantTurns.flatMap((t) => t.references ?? []).map((r) => [r.id, r])).values()
     );
-
     try {
       const blob = await api.exportPdf({
         session_id: sessionId,
         format: "standard",
         answer: combinedAnswer,
         references: combinedReferences,
-        title: "Research Assistant \u2014 Conversation",
+        title: "Research Assistant — Conversation",
       });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -140,13 +190,8 @@ export function AppShell() {
     }
   }, [turns, sessionId]);
 
-  function handleUploadComplete(data: {
-    filename: string;
-    fileUrl: string;
-    link: string;
-  }) {
+  function handleUploadComplete(data: { filename: string; fileUrl: string; link: string }) {
     setUploadedFilename(data.filename);
-
     handleNewPapers([
       {
         title: data.filename,
@@ -279,9 +324,9 @@ export function AppShell() {
               sessionId={sessionId}
               onOpenGraph={handleOpenGraph}
               onDeletePaper={async (link) => {
-                const paper = papers.find((p) => p.link === link)
-                  ?? papers.find((p) => uploadState.filename && p.title === uploadState.filename)
-                  ?? {
+                const paper =
+                  papers.find((p) => p.link === link) ??
+                  papers.find((p) => uploadState.filename && p.title === uploadState.filename) ?? {
                     title: uploadState.filename,
                     authors: [],
                     summary: "",
@@ -299,69 +344,103 @@ export function AppShell() {
           )}
         </main>
 
-        <div
-          className="relative shrink-0 h-full border-l border-line overflow-hidden transition-[width] duration-200 ease-out"
-          style={{ width: railOpen ? RAIL_WIDTH : STRIP_WIDTH }}
-        >
-          {railOpen ? (
-            <div className="h-full flex flex-col" style={{ width: RAIL_WIDTH }}>
-              <div className="flex items-center justify-end px-2 py-1.5 border-b border-line shrink-0">
+        {!pdfViewerUrl && (
+          <div
+            className="relative shrink-0 h-full border-l border-line overflow-hidden transition-[width] duration-200 ease-out"
+            style={{ width: railOpen ? RAIL_WIDTH : STRIP_WIDTH }}
+          >
+            {railOpen ? (
+              <div className="h-full flex flex-col" style={{ width: RAIL_WIDTH }}>
+                <div className="flex items-center justify-end px-2 py-1.5 border-b border-line shrink-0">
+                  <button
+                    onClick={() => setRailOpen(false)}
+                    aria-label="Collapse panel"
+                    className="flex h-6 w-6 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink"
+                  >
+                    <ChevronsRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <div className="flex-1 min-h-0">
+                  <RightRail
+                    papers={papers}
+                    sessionId={sessionId}
+                    tab={tab}
+                    setTab={setTab}
+                    onOpenPdf={handleOpenPdf}
+                    onDeletePaper={handleDeletePaper}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div
+                className="h-full flex flex-col items-center gap-1 py-2"
+                style={{ width: STRIP_WIDTH }}
+              >
                 <button
-                  onClick={() => setRailOpen(false)}
-                  aria-label="Collapse panel"
-                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink"
+                  onClick={() => setRailOpen(true)}
+                  aria-label="Expand panel"
+                  className="flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink mb-1"
                 >
-                  <ChevronsRight className="h-3.5 w-3.5" />
+                  <ChevronsLeft className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  onClick={() => {
+                    setTab("library");
+                    setRailOpen(true);
+                  }}
+                  aria-label="Open library"
+                  className="relative flex h-8 w-8 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink"
+                >
+                  <Library className="h-4 w-4" />
+                  {papers.length > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-gold" />
+                  )}
+                </button>
+                <button
+                  onClick={() => {
+                    setTab("explore");
+                    setRailOpen(true);
+                  }}
+                  aria-label="Open explore"
+                  className="relative flex h-8 w-8 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink"
+                >
+                  <Network className="h-4 w-4" />
                 </button>
               </div>
-              <div className="flex-1 min-h-0">
-                <RightRail
-                  papers={papers}
-                  sessionId={sessionId}
-                  tab={tab}
-                  setTab={setTab}
-                  onOpenPdf={handleOpenPdf}
-                  onDeletePaper={handleDeletePaper}
-                />
-              </div>
+            )}
+          </div>
+        )}
+
+        {pdfViewerUrl && (
+          <>
+            <div
+              onMouseDown={startPdfResize}
+              title="Drag to resize"
+              className="group relative z-10 flex w-3 shrink-0 cursor-col-resize items-center justify-center select-none hover:bg-paper-dim/60 transition-colors"
+            >
+              <span
+                className={`rounded-full transition-all duration-150 ${
+                  draggingPdf
+                    ? "h-20 w-1.5 bg-ink"
+                    : "h-12 w-1.5 bg-line group-hover:h-16 group-hover:bg-ink-soft"
+                }`}
+              />
             </div>
-          ) : (
-            <div className="h-full flex flex-col items-center gap-1 py-2" style={{ width: STRIP_WIDTH }}>
-              <button
-                onClick={() => setRailOpen(true)}
-                aria-label="Expand panel"
-                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink mb-1"
-              >
-                <ChevronsLeft className="h-3.5 w-3.5" />
-              </button>
-              <button
-                onClick={() => {
-                  setTab("library");
-                  setRailOpen(true);
-                }}
-                aria-label="Open library"
-                className="relative flex h-8 w-8 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink"
-              >
-                <Library className="h-4 w-4" />
-                {papers.length > 0 && (
-                  <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-gold" />
-                )}
-              </button>
-              <button
-                onClick={() => {
-                  setTab("explore");
-                  setRailOpen(true);
-                }}
-                aria-label="Open explore"
-                className="relative flex h-8 w-8 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink"
-              >
-                <Network className="h-4 w-4" />
-              </button>
+            <div
+              className="h-full min-w-0 overflow-hidden"
+              style={{ width: `${pdfWidthPct}%`, flexShrink: 0 }}
+            >
+              <PdfViewerBoundary onClose={handleClosePdf}>
+                <PdfViewer url={pdfViewerUrl} onClose={handleClosePdf} />
+              </PdfViewerBoundary>
             </div>
-          )}
-        </div>
+          </>
+        )}
       </div>
-       {pdfViewerUrl && <PdfViewer url={pdfViewerUrl} onClose={handleClosePdf} />}
+
+      {draggingPdf && (
+        <div className="fixed inset-0 z-[60] cursor-col-resize" aria-hidden="true" />
+      )}
     </div>
   );
 }

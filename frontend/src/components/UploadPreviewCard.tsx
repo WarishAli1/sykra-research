@@ -1,4 +1,4 @@
-import { FileText, Loader2, Square, X } from "lucide-react";
+import { AlertCircle, FileText, Loader2, Square, X } from "lucide-react";
 
 export function UploadPreviewCard({ 
   filename, 
@@ -22,6 +22,25 @@ export function UploadPreviewCard({
   onClose: () => void;
   onCancel?: () => void;
 }) {
+  if (status === "error") {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-danger/30 bg-danger/5 px-3 py-2 mb-2">
+        <AlertCircle className="h-4 w-4 text-danger shrink-0" />
+        <div className="flex-1 min-w-0">
+          <p className="text-[12.5px] font-medium text-ink truncate">{filename}</p>
+          <p className="text-[10.5px] text-danger">{progress || "Upload failed"}</p>
+        </div>
+        <button
+          onClick={onClose}
+          aria-label="Dismiss"
+          className="text-ink-soft hover:text-danger shrink-0"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    );
+  }
+
   if (status === "done") {
     return (
       <div 
