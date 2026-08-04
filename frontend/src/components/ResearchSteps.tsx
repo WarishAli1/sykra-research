@@ -1,4 +1,5 @@
 "use client";
+
 import { useState } from "react";
 import {
   ChevronUp,
@@ -6,6 +7,8 @@ import {
   Search,
   Layers,
   PenLine,
+  ShieldCheck,
+  CheckCheck,
   Loader2,
   Check,
 } from "lucide-react";
@@ -18,8 +21,9 @@ export type StepEvent = {
   done?: boolean;
 };
 
-type PhaseId = "search" | "review" | "synthesize";
+type PhaseId = "search" | "review" | "synthesize" | "refine" | "finalize";
 type Mode = "label" | "silent";
+
 type PhaseDef = {
   id: PhaseId;
   title: string;
@@ -34,7 +38,12 @@ const PHASES: PhaseDef[] = [
     title: "Searching the web",
     icon: Search,
     placeholder: "Searching",
-    stages: { plan_query: "label", search: "label", retrieve_uploaded: "label" },
+    stages: {
+      plan_query: "label",
+      plan_report: "label",
+      search: "label",
+      retrieve_uploaded: "label",
+    },
   },
   {
     id: "review",
@@ -49,12 +58,29 @@ const PHASES: PhaseDef[] = [
     icon: PenLine,
     placeholder: "Writing the response",
     stages: {
+      quick_preview: "label",
+      preview_answer: "label",
       summarize: "silent",
-      after_critique: "silent",
-      chart: "silent",         
-      compare: "silent", 
+    },
+  },
+  {
+    id: "refine",
+    title: "Checking answer quality",
+    icon: ShieldCheck,
+    placeholder: "Cross-checking the draft against your question",
+    stages: { critique: "label", revise: "label", after_critique: "silent" },
+  },
+  {
+    id: "finalize",
+    title: "Finalizing the response",
+    icon: CheckCheck,
+    placeholder: "Adding citations and finishing up",
+    stages: {
       cite: "label",
-      graph_write: "label",
+      answer_ready: "silent",
+      compare: "silent",
+      chart: "silent",
+      graph_write: "silent",
     },
   },
 ];
@@ -80,11 +106,15 @@ function buildPhases(steps: StepEvent[]): PhaseState[] {
     search: { def: PHASES[0], seen: false, lines: [], chips: [], items: [] },
     review: { def: PHASES[1], seen: false, lines: [], chips: [], items: [] },
     synthesize: { def: PHASES[2], seen: false, lines: [], chips: [], items: [] },
+    refine: { def: PHASES[3], seen: false, lines: [], chips: [], items: [] },
+    finalize: { def: PHASES[4], seen: false, lines: [], chips: [], items: [] },
   };
+
   for (const s of steps) {
     const { def, mode } = phaseForStage(s.stage);
     const st = states[def.id];
     st.seen = true;
+
     if (mode === "label") {
       if (s.label && !st.lines.includes(s.label)) st.lines.push(s.label);
       if (s.detail && !st.chips.includes(s.detail)) st.chips.push(s.detail);
@@ -92,6 +122,7 @@ function buildPhases(steps: StepEvent[]): PhaseState[] {
         for (const it of s.items) if (it && !st.items.includes(it)) st.items.push(it);
     }
   }
+
   return PHASES.map((d) => states[d.id]).filter((st) => st.seen);
 }
 
@@ -116,9 +147,10 @@ export function ResearchSteps({
 }: {
   steps: StepEvent[];
   streaming: boolean;
-  embedded?: boolean; 
+  embedded?: boolean;
 }) {
   const [open, setOpen] = useState(true);
+
   if (!steps.length) return null;
 
   const phases = buildPhases(steps);
@@ -127,31 +159,21 @@ export function ResearchSteps({
   const rootCls = embedded
     ? "animate-fade-up"
     : "mb-3 rounded-xl border border-line bg-paper/70 shadow-sm shadow-black/5 animate-fade-up";
+
   const headerCls = embedded
     ? "flex w-full items-center gap-2 -mx-1 px-1 py-2 rounded-md text-left transition-colors hover:bg-paper-dim/50"
     : "flex w-full items-center gap-2 px-3.5 py-2.5 text-left";
+
   const bodyCls = embedded ? "pt-1 pb-1" : "border-t border-line px-3.5 py-3";
 
   return (
     <div className={rootCls}>
-      <button
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className={headerCls}
-      >
+      <button onClick={() => setOpen((v) => !v)} aria-expanded={open} className={headerCls}>
         <Layers className="h-3.5 w-3.5 text-indigo shrink-0" />
-        <span className="text-[12.5px] font-medium text-ink">
-          Steps taken by AI Agent
-        </span>
-        {streaming && (
-          <Loader2 className="h-3 w-3 animate-spin text-ink-soft shrink-0" />
-        )}
+        <span className="text-[12.5px] font-medium text-ink">Steps taken by AI Agent</span>
+        {streaming && <Loader2 className="h-3 w-3 animate-spin text-ink-soft shrink-0" />}
         <span className="ml-auto shrink-0 text-ink-soft">
-          {open ? (
-            <ChevronUp className="h-3.5 w-3.5" />
-          ) : (
-            <ChevronDown className="h-3.5 w-3.5" />
-          )}
+          {open ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
         </span>
       </button>
 
@@ -166,6 +188,7 @@ export function ResearchSteps({
               const active = streaming && i === lastIndex;
               const hasContent =
                 st.lines.length > 0 || st.chips.length > 0 || st.items.length > 0;
+
               return (
                 <div key={def.id} className="relative">
                   <span
@@ -179,16 +202,13 @@ export function ResearchSteps({
                     ) : (
                       <Icon className="h-3.5 w-3.5 text-ink-soft" />
                     )}
-                    {def.title}
+                    <span>{def.title}</span>
                   </div>
 
                   {(hasContent || active) && (
                     <div className="mt-1.5 space-y-1.5 rounded-lg border border-line bg-paper-dim/50 px-3 py-2">
                       {st.lines.map((line, j) => (
-                        <p
-                          key={`l${j}`}
-                          className="text-[12px] leading-relaxed text-ink-soft"
-                        >
+                        <p key={`l${j}`} className="text-[12px] leading-relaxed text-ink-soft">
                           {line}
                         </p>
                       ))}

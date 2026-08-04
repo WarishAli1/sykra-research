@@ -1,52 +1,41 @@
 "use client";
+
 import { useEffect, useRef, useState, useCallback } from "react";
 import { ArrowUp, Paperclip, Loader2, Square, MoreHorizontal, Pin, Share2, Check } from "lucide-react";
 import Image from "next/image";
 import { api, ApiError, ApiAbortError } from "@/lib/api";
-import type { ChatTurn, Paper, ResponseMode, EvidenceMode, StreamEvent, UploadStreamEvent } from "@/lib/types";
+import type {
+  ChatTurn,
+  Paper,
+  ResponseMode,
+  EvidenceMode,
+  StreamEvent,
+  ChatResponse,
+} from "@/lib/types";
 import { ChatMessage } from "./ChatMessage";
 import { UploadPreviewCard } from "./UploadPreviewCard";
 import { Dropdown } from "@/components/Dropdown";
 
 function getGreeting(): { title: string; subtitle: string } {
   const h = new Date().getHours();
-  if (h >= 0 && h < 5) {
-    return {
-      title: "Late-night research",
-      subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it.",
-    };
-  }
-  if (h < 12) {
-    return {
-      title: "Good morning",
-      subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it.",
-    };
-  }
-  if (h < 18) {
-    return {
-      title: "Good afternoon",
-      subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it.",
-    };
-  }
-  if (h < 23) {
-    return {
-      title: "Good evening",
-      subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it.",
-    };
-  }
-  return {
-    title: "Still thinking?",
-    subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it.",
-  };
+  if (h >= 0 && h < 5)
+    return { title: "Late-night research", subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it." };
+  if (h < 12)
+    return { title: "Good morning", subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it." };
+  if (h < 18)
+    return { title: "Good afternoon", subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it." };
+  if (h < 23)
+    return { title: "Good evening", subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it." };
+  return { title: "Still thinking?", subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it." };
 }
 
-export function ChatPanel({ 
-  onUploadComplete, 
+export function ChatPanel({
+  onUploadComplete,
   uploadedFilename,
-  turns, 
-  setTurns, 
-  sessionId, 
-  onNewPapers, 
+  turns,
+  setTurns,
+  sessionId,
+  onNewPapers,
   onOpenGraph,
   onOpenPdf,
   onDeletePaper,
@@ -56,16 +45,13 @@ export function ChatPanel({
   setHasUpload,
   evidenceMode,
   setEvidenceMode,
-}: { 
-  onUploadComplete: (data: {
-    filename: string;
-    fileUrl: string;
-    link: string;}) => void;
-  uploadedFilename: string | null; 
-  turns: ChatTurn[]; 
+}: {
+  onUploadComplete: (data: { filename: string; fileUrl: string; link: string }) => void;
+  uploadedFilename: string | null;
+  turns: ChatTurn[];
   setTurns: React.Dispatch<React.SetStateAction<ChatTurn[]>>;
-  sessionId: string; 
-  onNewPapers: (papers: Paper[]) => void; 
+  sessionId: string;
+  onNewPapers: (papers: Paper[]) => void;
   onOpenGraph: () => void;
   onOpenPdf: (url: string) => void;
   onDeletePaper?: (link: string) => Promise<void>;
@@ -76,13 +62,15 @@ export function ChatPanel({
     stage: string;
     fileUrl: string;
   };
-  setUploadState: React.Dispatch<React.SetStateAction<{
-    status: "idle" | "uploading" | "processing" | "done" | "error";
-    filename: string;
-    progress: string;
-    stage: string;
-    fileUrl: string;
-  }>>;
+  setUploadState: React.Dispatch<
+    React.SetStateAction<{
+      status: "idle" | "uploading" | "processing" | "done" | "error";
+      filename: string;
+      progress: string;
+      stage: string;
+      fileUrl: string;
+    }>
+  >;
   hasUpload: boolean;
   setHasUpload: React.Dispatch<React.SetStateAction<boolean>>;
   evidenceMode: EvidenceMode;
@@ -96,6 +84,7 @@ export function ChatPanel({
   const [menuOpen, setMenuOpen] = useState(false);
   const [pinned, setPinned] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -104,7 +93,7 @@ export function ChatPanel({
   const turnsRef = useRef<ChatTurn[]>(turns);
   const menuRef = useRef<HTMLDivElement>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  
+
   const MAX_FILES_PER_MESSAGE = 3;
   const MAX_CONCURRENT_UPLOADS = 1;
 
@@ -118,19 +107,26 @@ export function ChatPanel({
     link: string;
     requestId: string | null;
   };
+
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const uploadControllersRef = useRef<Map<string, AbortController>>(new Map());
   const uploadQueueRef = useRef<{ id: string; file: File }[]>([]);
   const activeUploadCountRef = useRef(0);
 
   function patchUpload(id: string, patch: Partial<UploadItem> | ((prev: UploadItem) => Partial<UploadItem>)) {
-    setUploads((prev) => prev.map((u) => (u.id !== id ? u : { ...u, ...(typeof patch === "function" ? patch(u) : patch) })));
+    setUploads((prev) =>
+      prev.map((u) => (u.id !== id ? u : { ...u, ...(typeof patch === "function" ? patch(u) : patch) }))
+    );
   }
 
-  useEffect(() => { turnsRef.current = turns; }, [turns]);
-  useEffect(() => { 
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); 
+  useEffect(() => {
+    turnsRef.current = turns;
+  }, [turns]);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [turns, loading]);
+
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -138,7 +134,6 @@ export function ChatPanel({
     el.style.height = `${el.scrollHeight}px`;
   }, [input]);
 
-  // Close the kebab menu on outside click.
   useEffect(() => {
     function onDown(e: MouseEvent) {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
@@ -147,7 +142,6 @@ export function ChatPanel({
     return () => document.removeEventListener("mousedown", onDown);
   }, []);
 
-  // Pin state is per-session; re-read whenever the session changes.
   useEffect(() => {
     try {
       setPinned(localStorage.getItem(`sykra:pinned:${sessionId}`) === "1");
@@ -178,7 +172,6 @@ export function ChatPanel({
         if (next) localStorage.setItem(`sykra:pinned:${sessionId}`, "1");
         else localStorage.removeItem(`sykra:pinned:${sessionId}`);
       } catch {
-        /* storage unavailable — toggle still gives feedback */
       }
       flashToast(next ? "Conversation pinned" : "Conversation unpinned");
       return next;
@@ -187,9 +180,7 @@ export function ChatPanel({
 
   async function handleShareConversation() {
     setMenuOpen(false);
-    const body = turns
-      .map((t) => `${t.role === "user" ? "You" : "Sykra"}: ${t.text}`)
-      .join("\n\n");
+    const body = turns.map((t) => `${t.role === "user" ? "You" : "Sykra"}: ${t.text}`).join("\n\n");
     if (!body.trim()) {
       flashToast("Nothing to share yet.");
       return;
@@ -200,7 +191,7 @@ export function ChatPanel({
         return;
       }
     } catch {
-      return; // user dismissed the native share sheet
+      return;
     }
     try {
       await navigator.clipboard.writeText(body);
@@ -215,12 +206,16 @@ export function ChatPanel({
     if (el) setScrolled(el.scrollTop > 6);
   }
 
-  function appendAssistantTurn(turn: ChatTurn) { setTurns((t) => [...t, turn]); }
+  function appendAssistantTurn(turn: ChatTurn) {
+    setTurns((t) => [...t, turn]);
+  }
 
   function updateTurn(id: string, patch: Partial<ChatTurn> | ((prev: ChatTurn) => Partial<ChatTurn>)) {
-    setTurns((prev) => prev.map((turn) => 
-      turn.id !== id ? turn : { ...turn, ...(typeof patch === "function" ? patch(turn) : patch) }
-    ));
+    setTurns((prev) =>
+      prev.map((turn) =>
+        turn.id !== id ? turn : { ...turn, ...(typeof patch === "function" ? patch(turn) : patch) }
+      )
+    );
   }
 
   function applyStreamEvent(turnId: string, event: StreamEvent, opts: { isChat: boolean }) {
@@ -234,30 +229,99 @@ export function ChatPanel({
           ],
         }));
         break;
-      case "token": updateTurn(turnId, (prev) => ({ text: prev.text + event.text, statusLabel: undefined })); break;
-      case "result": {
-        if (opts.isChat) {
-          const res = event.payload as import("@/lib/types").ChatResponse;
-          onNewPapers(res.papers ?? []);
-          updateTurn(turnId, { 
-            papers: res.papers, 
-            citations: res.citations, 
-            coverageGaps: res.coverage_gaps, 
-            domainCaveat: res.domain_caveat, 
-            papersBelowThreshold: res.papers_below_threshold, 
-            references: res.references, 
-            responseMode: res.response_mode, 
-            streaming: false, 
-            statusLabel: undefined, 
-            turnId: res.turn_id,
-            chartUrl: res.chart_url ?? null,
-            filename: res.filename ?? undefined
+
+      case "notice":
+        updateTurn(turnId, { reportNotice: event.message });
+        break;
+
+      case "token":
+        if (event.kind === "preview") {
+          updateTurn(turnId, (prev) => ({
+            previewText: (prev.previewText ?? "") + event.text,
+            statusLabel: undefined,
+          }));
+        } else {
+          updateTurn(turnId, (prev) => ({
+            text: prev.text + event.text,
+            statusLabel: undefined,
+          }));
+        }
+        break;
+
+      case "artifact":
+        updateTurn(turnId, (prev) => {
+          const artifacts = { ...(prev.artifacts ?? {}) };
+
+          if (event.artifact_type === "chart") {
+            artifacts.chartUrl = event.url;
+            artifacts.chartSpecRaw = event.raw_spec ?? null;
+          } else if (event.artifact_type === "comparison_table") {
+            artifacts.comparisonTableMarkdown = event.markdown;
+            artifacts.comparisonTableCaption = event.caption ?? null;
+          } else if (event.artifact_type === "graph_entities") {
+            artifacts.graphEntities = event.entities;
+          }
+
+          return {
+            artifacts,
+            chartUrl: artifacts.chartUrl ?? prev.chartUrl,
+          };
+        });
+        break;
+
+      case "filename":
+        updateTurn(turnId, { filename: event.filename });
+        break;
+
+      case "done": {
+        updateTurn(turnId, { streaming: false, statusLabel: undefined });
+
+        const current = turnsRef.current.find((t) => t.id === turnId);
+        if (current && !current.filename && current.turnId) {
+          const tid = current.turnId;
+          api.pollFilename(tid).then((fn) => {
+            if (fn) updateTurn(turnId, { filename: fn });
           });
         }
         break;
       }
-      case "cancelled": updateTurn(turnId, { streaming: false, stopped: true, statusLabel: undefined }); break;
-      case "error": updateTurn(turnId, { streaming: false, statusLabel: undefined }); setError(event.message); break;
+
+      case "result": {
+        if (opts.isChat) {
+          const res = event.payload as ChatResponse;
+          onNewPapers(res.papers ?? []);
+          updateTurn(turnId, {
+            papers: res.papers,
+            citations: res.citations,
+            coverageGaps: res.coverage_gaps,
+            domainCaveat: res.domain_caveat,
+            papersBelowThreshold: res.papers_below_threshold,
+            references: res.references,
+            responseMode: res.response_mode,
+            streaming: false,
+            statusLabel: undefined,
+            turnId: res.turn_id,
+            chartUrl: res.chart_url ?? null,
+            filename: res.filename || undefined,
+            reportPlan: res.report_plan ?? null,
+            sections: res.sections ?? [],
+            dynamicConfidence: res.dynamic_confidence ?? null,
+            informationNeeds: res.information_needs ?? [],
+            complexityScore: res.complexity_score ?? 0,
+            reportNotice: res.report_notice ?? undefined,
+          });
+        }
+        break;
+      }
+
+      case "cancelled":
+        updateTurn(turnId, { streaming: false, stopped: true, statusLabel: undefined });
+        break;
+
+      case "error":
+        updateTurn(turnId, { streaming: false, statusLabel: undefined });
+        setError(event.message);
+        break;
     }
   }
 
@@ -269,8 +333,10 @@ export function ChatPanel({
   ) {
     const controller = new AbortController();
     abortRef.current = controller;
+
     const requestId = crypto.randomUUID();
     activeRequestIdRef.current = requestId;
+
     const assistantId = crypto.randomUUID();
     const kgTurnId = crypto.randomUUID();
 
@@ -306,13 +372,17 @@ export function ChatPanel({
   async function handleSend() {
     const query = input.trim();
     if (!query || loading) return;
+
     setError(null);
     setInput("");
+
     const userTurn: ChatTurn = { role: "user", id: crypto.randomUUID(), text: query };
     setTurns((t) => [...t, userTurn]);
     setUploads((prev) => prev.filter((u) => u.status !== "done"));
     setLoading(true);
-    const history = turns.map(t => ({ role: t.role as "user" | "assistant", content: t.text }));
+
+    const history = turns.map((t) => ({ role: t.role as "user" | "assistant", content: t.text }));
+
     try {
       await runChatTurn(query, responseMode, evidenceMode, history);
     } catch (e) {
@@ -347,11 +417,9 @@ export function ChatPanel({
     activeUploadCountRef.current = Math.max(0, activeUploadCountRef.current - 1);
     pumpUploadQueue();
   }
+
   const pumpUploadQueue = useCallback(() => {
-    while (
-      activeUploadCountRef.current < MAX_CONCURRENT_UPLOADS &&
-      uploadQueueRef.current.length > 0
-    ) {
+    while (activeUploadCountRef.current < MAX_CONCURRENT_UPLOADS && uploadQueueRef.current.length > 0) {
       const next = uploadQueueRef.current.shift();
       if (!next) break;
       activeUploadCountRef.current += 1;
@@ -368,37 +436,41 @@ export function ChatPanel({
     patchUpload(id, { requestId });
 
     try {
-      await api.uploadPdfStream(file, sessionId, (event) => {
-        if (event.type === "cancelled") {
-          setUploads((prev) => prev.filter((u) => u.id !== id));
-          return;
-        }
-        if (event.type === "progress") {
-          patchUpload(id, { status: "processing", progress: event.label, stage: event.stage ?? "" });
-        }
-        if (event.type === "result") {
-          patchUpload(id, {
-            status: "done",
-            progress: "Ready",
-            fileUrl: event.payload.file_url,
-            link: event.payload.link,
-            filename: event.payload.filename,
-          });
-
-          setHasUpload(true);
-          setEvidenceMode((prevMode) => (prevMode === "literature" ? "blended" : prevMode));
-
-          onUploadComplete({
-            filename: event.payload.filename,
-            fileUrl: event.payload.file_url,
-            link: event.payload.link,
-          });
-        }
-        if (event.type === "error") {
-          setError(event.message);
-          patchUpload(id, { status: "error" });
-        }
-      }, controller.signal, requestId);
+      await api.uploadPdfStream(
+        file,
+        sessionId,
+        (event) => {
+          if (event.type === "cancelled") {
+            setUploads((prev) => prev.filter((u) => u.id !== id));
+            return;
+          }
+          if (event.type === "progress") {
+            patchUpload(id, { status: "processing", progress: event.label, stage: event.stage ?? "" });
+          }
+          if (event.type === "result") {
+            patchUpload(id, {
+              status: "done",
+              progress: "Ready",
+              fileUrl: event.payload.file_url,
+              link: event.payload.link,
+              filename: event.payload.filename,
+            });
+            setHasUpload(true);
+            setEvidenceMode((prevMode) => (prevMode === "literature" ? "blended" : prevMode));
+            onUploadComplete({
+              filename: event.payload.filename,
+              fileUrl: event.payload.file_url,
+              link: event.payload.link,
+            });
+          }
+          if (event.type === "error") {
+            setError(event.message);
+            patchUpload(id, { status: "error" });
+          }
+        },
+        controller.signal,
+        requestId
+      );
     } catch (err) {
       if (!(err instanceof ApiAbortError)) {
         setError(err instanceof ApiError ? err.message : "Upload failed.");
@@ -419,7 +491,6 @@ export function ChatPanel({
     setUploads((prev) => {
       const currentCount = prev.filter((u) => u.status !== "error").length;
       const room = MAX_FILES_PER_MESSAGE - currentCount;
-
       const accepted = selected.slice(0, Math.max(room, 0));
       const rejected = selected.slice(Math.max(room, 0));
 
@@ -463,69 +534,71 @@ export function ChatPanel({
   const composer = (
     <div className="w-full">
       {uploads.length > 0 && (
-          <div className="flex flex-col">
-            {uploads.map((u) => (
-              <UploadPreviewCard
-                  key={u.id}
-                  filename={u.filename}
-                  status={u.status === "queued" ? "uploading" : u.status}
-                  progress={u.progress}
-                  fileUrl={u.fileUrl}
-                  onOpen={() => {
-                      if (u.fileUrl) onOpenPdf(u.fileUrl);
-                  }}
-                  onCancel={() => handlePauseUpload(u.id)}
-                  onClose={() => {
-                      if (u.status === "done") {
-                          const link = u.fileUrl;
-                          setUploads((prev) => prev.filter((x) => x.id !== u.id));
-                          if (uploads.length <= 1) {
-                            setHasUpload(false);
-                            setEvidenceMode("literature");
-                          }
-                          onDeletePaper?.(link);
-                      } else {
-                          handlePauseUpload(u.id);
-                      }
-                  }}
-              />
-            ))}
-          </div>
+        <div className="mb-2 flex flex-col gap-1.5">
+          {uploads.map((u) => (
+            <UploadPreviewCard
+              key={u.id}
+              filename={u.filename}
+              status={u.status === "queued" ? "uploading" : u.status}
+              progress={u.progress}
+              fileUrl={u.fileUrl}
+              onOpen={() => {
+                if (u.fileUrl) onOpenPdf(u.fileUrl);
+              }}
+              onCancel={() => handlePauseUpload(u.id)}
+              onClose={() => {
+                if (u.status === "done") {
+                  const link = u.fileUrl;
+                  setUploads((prev) => prev.filter((x) => x.id !== u.id));
+                  if (uploads.length <= 1) {
+                    setHasUpload(false);
+                    setEvidenceMode("literature");
+                  }
+                  onDeletePaper?.(link);
+                } else {
+                  handlePauseUpload(u.id);
+                }
+              }}
+            />
+          ))}
+        </div>
       )}
 
-      <div className="flex items-center gap-2 rounded-2xl border border-line bg-paper-dim/70 px-3 py-2.5 min-h-[44px] shadow-sm shadow-black/5 focus-within:border-indigo/50 transition-colors">
-        <button 
-          onClick={() => fileInputRef.current?.click()} 
+      <div className="flex items-end gap-2 rounded-2xl border border-line bg-paper-dim/70 px-2.5 py-1.5 shadow-sm shadow-black/5 transition-colors focus-within:border-indigo/50">
+        <button
+          onClick={() => fileInputRef.current?.click()}
           disabled={uploads.filter((u) => u.status !== "error").length >= MAX_FILES_PER_MESSAGE}
-          aria-label="Attach PDF (up to 3 files)" 
+          aria-label="Attach PDF (up to 3 files)"
           title={`Attach up to ${MAX_FILES_PER_MESSAGE} PDFs`}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-ink-soft hover:bg-paper hover:text-ink disabled:opacity-50"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-ink-soft transition-colors hover:bg-paper hover:text-ink disabled:opacity-50"
         >
-          {uploads.some((u) => u.status === "uploading" || u.status === "processing" || u.status === "queued")
-            ? <Loader2 className="h-4 w-4 animate-spin" />
-            : <Paperclip className="h-4 w-4" />}
+          {uploads.some((u) => u.status === "uploading" || u.status === "processing" || u.status === "queued") ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Paperclip className="h-4 w-4" />
+          )}
         </button>
-        <input 
-          ref={fileInputRef} 
-          type="file" 
-          accept="application/pdf" 
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/pdf"
           multiple
-          className="hidden" 
-          onChange={handleFilesChange} 
+          className="hidden"
+          onChange={handleFilesChange}
         />
-        <textarea 
-          ref={textareaRef} 
-          value={input} 
-          onChange={(e) => setInput(e.target.value)} 
-          onKeyDown={(e) => { 
-            if (e.key === "Enter" && !e.shiftKey) { 
-              e.preventDefault(); 
-              handleSend(); 
-            } 
-          }} 
-          rows={1} 
-          placeholder="Ask a question, or drop a PDF to ground it" 
-          className="max-h-40 min-h-[22px] flex-1 resize-none overflow-y-auto bg-transparent text-[13.5px] leading-relaxed text-ink placeholder:text-ink-soft/60 focus:outline-none py-1" 
+        <textarea
+          ref={textareaRef}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              handleSend();
+            }
+          }}
+          rows={1}
+          placeholder="Ask a question, or drop a PDF to ground it"
+          className="min-h-[24px] max-h-28 flex-1 resize-none overflow-y-auto bg-transparent py-1.5 text-[13.5px] leading-6 text-ink placeholder:text-ink-soft/60 focus:outline-none"
         />
 
         {hasUpload && (
@@ -533,52 +606,36 @@ export function ChatPanel({
             value={evidenceMode}
             onChange={setEvidenceMode}
             items={[
-              {
-                value: "uploaded",
-                label: "Uploaded document",
-                hint: "Answer using only the uploaded document.",
-              },
-              {
-                value: "blended",
-                label: "Blend",
-                hint: "Combine the uploaded document with external literature.",
-              },
+              { value: "uploaded", label: "Uploaded document", hint: "Answer using only the uploaded document." },
+              { value: "blended", label: "Blend", hint: "Combine the uploaded document with external literature." },
             ]}
           />
         )}
-        
+
         <Dropdown
           value={responseMode}
           onChange={setResponseMode}
           items={[
-            {
-              value: "normal",
-              label: "Normal",
-              hint: "Quick, concise answers.",
-            },
-            {
-              value: "researched",
-              label: "Researched",
-              hint: "Full structured report with inline citations and references.",
-            },
+            { value: "normal", label: "Normal", hint: "Quick, concise answers." },
+            { value: "researched", label: "Researched", hint: "Full structured report with inline citations and references." },
           ]}
         />
-        
+
         {loading ? (
-          <button 
-            onClick={handlePause} 
-            aria-label="Pause generation" 
-            title="Stop generating this response" 
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-danger text-white transition-opacity hover:bg-danger/90"
+          <button
+            onClick={handlePause}
+            aria-label="Pause generation"
+            title="Stop generating this response"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-danger text-white transition hover:bg-danger/90 active:scale-95"
           >
             <Square className="h-3 w-3 fill-current" />
           </button>
         ) : (
-          <button 
-            onClick={handleSend} 
-            disabled={!input.trim()} 
-            aria-label="Send message" 
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo text-white transition-opacity hover:bg-indigo-dark disabled:opacity-30"
+          <button
+            onClick={handleSend}
+            disabled={!input.trim()}
+            aria-label="Send message"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo text-white transition hover:bg-indigo-dark active:scale-95 disabled:opacity-30"
           >
             <ArrowUp className="h-4 w-4" />
           </button>
@@ -591,10 +648,7 @@ export function ChatPanel({
     const greeting = getGreeting();
     return (
       <div className="relative flex h-full flex-col overflow-hidden">
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-0 grid place-items-center"
-        >
+        <div aria-hidden="true" className="pointer-events-none absolute inset-0 grid place-items-center">
           <div className="relative h-[640px] w-[640px] origin-center text-ink opacity-[0.08] animate-[spin_120s_linear_infinite]">
             <svg width="640" height="640" viewBox="0 0 640 640" className="absolute inset-0">
               <circle cx="320" cy="320" r="90" fill="none" stroke="currentColor" strokeWidth="1" />
@@ -612,23 +666,18 @@ export function ChatPanel({
 
         <div className="relative flex-1 flex flex-col items-center justify-center px-6">
           <div className="w-full max-w-[600px] flex flex-col items-center">
-            <Image
-              src="/sykra-logo.svg"
-              alt="Sykra"
-              width={64}
-              height={64}
-              className="mb-3 object-contain"
-            />
+            <Image src="/sykra-logo.svg" alt="Sykra" width={64} height={64} className="mb-3 object-contain" />
             <h1 className="font-serif text-[30px] font-semibold tracking-tight text-ink mb-2.5 text-center">
               {greeting.title}
             </h1>
             <p className="text-[13.5px] text-ink-soft mb-8 text-center max-w-[440px] leading-relaxed">
-              Ask anything across your papers and the open literature — every answer
-              arrives cited, sourced, and ready to export.
+              Ask anything across your papers and the open literature — every answer arrives cited, sourced, and ready to
+              export.
             </p>
             {composer}
           </div>
         </div>
+
         {error && (
           <div className="relative px-6 pb-4">
             <div className="mx-auto max-w-[560px] rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-[12px] text-danger">
@@ -644,10 +693,8 @@ export function ChatPanel({
     <div className="flex h-full flex-col">
       <div className="relative flex-1 min-h-0 flex flex-col">
         <div
-            className={`pointer-events-none absolute inset-x-0 top-0 z-20 flex items-center justify-end px-4 transition-all duration-300 ${
-            scrolled
-              ? "h-12 bg-paper/70 backdrop-blur-md border-b border-line/70 shadow-[0_1px_0_rgba(0,0,0,0.02)]"
-              : "h-14 bg-transparent border-b border-transparent"
+          className={`pointer-events-none absolute inset-x-0 top-0 z-20 flex items-center justify-end px-4 transition-all duration-300 ${
+            scrolled ? "h-12 bg-paper/70 backdrop-blur-md border-b border-line/70 shadow-[0_1px_0_rgba(0,0,0,0.02)]" : "h-14 bg-transparent border-b border-transparent"
           }`}
         >
           <div className="relative pointer-events-auto" ref={menuRef}>
@@ -662,6 +709,7 @@ export function ChatPanel({
             >
               <MoreHorizontal className="h-4 w-4" />
             </button>
+
             {menuOpen && (
               <div
                 role="menu"
@@ -706,10 +754,11 @@ export function ChatPanel({
           style={{ paddingTop: 56, paddingBottom: 16 }}
         >
           {turns.map((t) => (
-            <ChatMessage 
-              key={t.id} 
-              turn={t} 
-              sessionId={sessionId} 
+            <ChatMessage
+              key={t.id}
+              turn={t}
+              sessionId={sessionId}
+              onOpenGraph={onOpenGraph}
               onRegenerate={async () => {
                 if (loading) return;
                 setError(null);
@@ -718,37 +767,51 @@ export function ChatPanel({
                   const controller = new AbortController();
                   abortRef.current = controller;
                   const mode = t.responseMode ?? "normal";
-                  const res = await api.chatRegenerate({
-                    session_id: sessionId,
-                    turn_id: t.turnId,
-                    query: t.sourceQuery ?? "",
-                    response_mode: mode,
-                    is_followup: false,
-                    evidence_mode: t.sourceEvidenceMode ?? "literature",
-                  }, controller.signal);
-                  setTurns((prev) => prev.map((turn) => 
-                    turn.id === t.id ? { 
-                      ...turn, 
-                      text: res.answer, 
-                      citations: res.citations, 
-                      references: res.references, 
-                      responseMode: res.response_mode, 
-                      stopped: false, 
-                      turnId: res.turn_id,
-                      chartUrl: res.chart_url ?? null,
-                      filename: res.filename ?? undefined
-                    } : turn
-                  ));
+                  const res = await api.chatRegenerate(
+                    {
+                      session_id: sessionId,
+                      turn_id: t.turnId,
+                      query: t.sourceQuery ?? "",
+                      response_mode: mode,
+                      is_followup: false,
+                      evidence_mode: t.sourceEvidenceMode ?? "literature",
+                    },
+                    controller.signal
+                  );
+                  setTurns((prev) =>
+                    prev.map((turn) =>
+                      turn.id === t.id
+                        ? {
+                            ...turn,
+                            text: res.answer,
+                            citations: res.citations,
+                            references: res.references,
+                            responseMode: res.response_mode,
+                            stopped: false,
+                            turnId: res.turn_id,
+                            chartUrl: res.chart_url ?? null,
+                            filename: res.filename || turn.filename,
+                            /* Dynamic report */
+                            reportPlan: res.report_plan ?? null,
+                            sections: res.sections ?? [],
+                            dynamicConfidence: res.dynamic_confidence ?? null,
+                            informationNeeds: res.information_needs ?? [],
+                            complexityScore: res.complexity_score ?? 0,
+                          }
+                        : turn
+                    )
+                  );
                 } catch (e) {
-                  if (!(e instanceof ApiAbortError)) 
+                  if (!(e instanceof ApiAbortError))
                     setError(e instanceof ApiError ? e.message : "Could not regenerate this answer.");
                 } finally {
                   setLoading(false);
                   abortRef.current = null;
                 }
-              }} 
+              }}
             />
           ))}
+
           {error && (
             <div className="rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-[12px] text-danger animate-fade-up">
               {error}
@@ -756,10 +819,8 @@ export function ChatPanel({
           )}
         </div>
       </div>
-      
-      <div className="border-t border-line p-3">
-        {composer}
-      </div>
+
+      <div className="border-t border-line p-3">{composer}</div>
     </div>
   );
 }

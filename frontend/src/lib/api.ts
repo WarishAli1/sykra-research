@@ -17,7 +17,6 @@ import type {
 
 export class ApiError extends Error {
   status: number;
-
   constructor(message: string, status: number) {
     super(message);
     this.name = "ApiError";
@@ -33,6 +32,7 @@ export function resolveAssetUrl(path: string | null | undefined): string | null 
   if (/^https?:\/\//i.test(path)) return path;
   return `${BACKEND_ORIGIN}${path.startsWith("/") ? "" : "/"}${path}`;
 }
+
 const UPLOAD_SCHEME = /^user_upload:\/\//i;
 
 export function resolvePdfUrl(paper: {
@@ -69,7 +69,6 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
 
   if (!response.ok) {
     let message = `Request failed with status ${response.status}`;
-
     try {
       const data = (await response.json()) as { detail?: string | { message?: string } };
       if (typeof data.detail === "string") {
@@ -81,7 +80,6 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
       const text = await response.text();
       if (text) message = text;
     }
-
     throw new ApiError(message, response.status);
   }
 
@@ -90,7 +88,6 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
 
 async function requestBlob(path: string, init: RequestInit): Promise<Blob> {
   const response = await fetch(`${API_BASE_URL}${path}`, { ...init });
-
   if (!response.ok) {
     let message = `Request failed with status ${response.status}`;
     try {
@@ -100,17 +97,14 @@ async function requestBlob(path: string, init: RequestInit): Promise<Blob> {
     }
     throw new ApiError(message, response.status);
   }
-
   return await response.blob();
 }
 
 function queryString(params: Record<string, string | undefined>): string {
   const searchParams = new URLSearchParams();
-
   for (const [key, value] of Object.entries(params)) {
     if (value) searchParams.set(key, value);
   }
-
   const query = searchParams.toString();
   return query ? `?${query}` : "";
 }
@@ -246,7 +240,6 @@ export const api = {
   uploadPdf(file: File, sessionId: string): Promise<UploadResponse> {
     const formData = new FormData();
     formData.append("file", file);
-
     return request<UploadResponse>(`/upload${queryString({ session_id: sessionId })}`, {
       method: "POST",
       body: formData,
@@ -314,6 +307,26 @@ export const api = {
     return request(`/filename/${encodeURIComponent(turnId)}`, { method: "GET" });
   },
 
+  async pollFilename(
+    turnId: string,
+    opts?: { timeoutMs?: number; intervalMs?: number }
+  ): Promise<string | null> {
+    const timeoutMs = opts?.timeoutMs ?? 20000;
+    const intervalMs = opts?.intervalMs ?? 1200;
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      try {
+        const res = await api.getFilename(turnId);
+        if (res.filename) return res.filename;
+      } catch {
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+
+    return null;
+  },
+
   deleteUploadedPdf(sessionId: string, link: string) {
     return request<{ success: boolean }>(
       `/uploads/${sessionId}?link=${encodeURIComponent(link)}`,
@@ -322,6 +335,17 @@ export const api = {
       }
     );
   },
-
+  ensureGraph(sessionId: string, force = false): Promise<FullGraphData> {
+    return request<FullGraphData>(
+      `/graph/${encodeURIComponent(sessionId)}/ensure${force ? "?force=true" : ""}`,
+      { method: "GET" }
+    );
+  },
+  queryGraph(sessionId: string, q: string): Promise<{ matches: { id: string; name: string; type: string; score: number }[] }> {
+    return request(`/graph/${encodeURIComponent(sessionId)}/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ q }),
+    });
+  },
 };
-

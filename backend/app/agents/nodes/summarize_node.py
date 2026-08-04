@@ -1,685 +1,1114 @@
-import json
 import re
+import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from langchain_core.messages import SystemMessage, HumanMessage
-from difflib import SequenceMatcher
 from app.agents.state import AgentState
-from app.agents.schemas import BatchPaperSummaries, NormalAnswer, ResearchAnswer, PaperSummaryItem
+from app.agents.schemas import SectionBatch, SectionOutput
 from app.services.llm_client import get_llm
 from app.services.reference_builder import (
-    build_references, paper_id_to_ref_id_map, rewrite_inline_citations, format_reference_block,
+    build_references,
+    paper_id_to_ref_id_map,
+    rewrite_inline_citations,
+    format_reference_block,
+    extract_paper_ids,
 )
-from app.utils.text_cleaning import sanitize_abstract
+from app.agents.report_modules import default_report_plan, MODULE_LIBRARY
+from app.utils.text_sanitizer import sanitize_for_web
+from app.services.sse import bridge_push
+from app.config import settings
 
-LATEX_INSTRUCTION = """
-MATH FORMATTING (use whenever a formula, equation, or mathematical
-expression is part of the answer):
-- Always express formulas using real LaTeX delimiters, never plain text or
-  ASCII approximations.
-- Inline math: wrap in single dollar signs, e.g. $d_k$ or $Q, K, V$.
-- Display/standalone equations: wrap in double dollar signs on their own line, e.g.
-  $$\\text{Attention}(Q,K,V) = \\text{softmax}\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V$$
-- Do NOT use \\( \\) or \\[ \\] delimiters, and do NOT emit raw HTML/XML tags
-  (e.g. <font>, <para>) around equations — dollar-sign delimiters only.
-- Every symbol used in a formula (e.g. Q, K, V, d_k) must be briefly defined
-  in prose immediately after the equation.
+llm = get_llm(temperature=0, task="default")
+
+FORMAT_INSTRUCTION = """
+MATH FORMATTING:
+Use LaTeX delimiters for formulas.
+Inline math: $x$.
+Display math:
+$$y = mx + b$$
+Define symbols in prose.
+CURRENCY RULE:
+Never use the $ symbol for currency amounts.
+Write "USD 48/MWh" or "48 USD/MWh" instead of "$48/MWh".
+CITATION RULE:
+Use ONLY ASCII square brackets for citations: [paper_id=N].
+Never use fullwidth brackets like 【paper_id=N】.
 """
 
 
-def _evidence_mode_instruction(mode: str) -> str:
-    """Step 6: single prompt-level switch instead of forked answer schemas.
-    Confidence semantics also shift per mode (Step 8) — this text makes that
-    explicit to the LLM rather than relying on a separate confidence field."""
-    if mode == "uploaded":
-        return """
-EVIDENCE MODE: UPLOADED DOCUMENT ONLY
-- Answer ONLY using the uploaded document provided in the papers below.
-- Never invent information not present in the document.
-- If the document lacks evidence for part of the question, say so explicitly.
-- Do NOT cite or reference any outside/external papers.
-- CONFIDENCE here means: "How well does the uploaded document answer the
-  question?" — NOT how strong external scientific evidence is. High = the
-  document directly and thoroughly answers it. Low = the document barely
-  touches on it or doesn't address it.
-"""
-    if mode == "blended":
-        return """
-EVIDENCE MODE: BLENDED (uploaded document + literature)
-- Treat the uploaded document as the PRIMARY source.
-- Use retrieved literature only for validation, comparison, or background —
-  clearly separate literature-derived claims from document-derived claims.
-- CONFIDENCE here means how strong the combined available evidence is
-  (document + literature), same as standard literature-mode confidence.
-"""
-    return """
-EVIDENCE MODE: LITERATURE
-- Use retrieved literature only.
-- CONFIDENCE here means how strong the available research evidence is.
-"""
+class _OrderedSectionEmitter:
+    """
+    Holds completed sections and emits them strictly in plan order.
+    If the analysis batch finishes a section early, it is held until
+    all preceding core sections have been emitted.
+    Thread-safe: two batch workers may call submit() concurrently.
+    """
+
+    def __init__(
+        self,
+        ordered_module_ids: list[str],
+        request_id: str,
+        cancel_check=None,
+    ):
+        self.order = ordered_module_ids
+        self.request_id = request_id
+        self.cancel_check = cancel_check
+        self._ready: dict[str, str] = {}
+        self._next = 0
+        self._lock = threading.Lock()
+
+    def submit(self, module_id: str, content: str) -> None:
+        with self._lock:
+            self._ready[module_id] = content
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        while self._next < len(self.order):
+            mid = self.order[self._next]
+            if mid not in self._ready:
+                break
+            content = self._ready.pop(mid)
+            self._next += 1
+            if self.cancel_check and self.cancel_check():
+                return
+            bridge_push(self.request_id, ("section", mid, content))
+
+    def flush_remaining(self) -> None:
+        with self._lock:
+            for mid in self.order[self._next:]:
+                if mid in self._ready:
+                    content = self._ready.pop(mid)
+                    bridge_push(self.request_id, ("section", mid, content))
+            self._next = len(self.order)
 
 
-def _invoke_structured_with_repair(llm, messages, schema, max_retries=2):
-    """Invokes the LLM with structured output, retrying with error feedback if validation fails."""
-    for attempt in range(max_retries + 1):
-        try:
-            result = llm.with_structured_output(schema).invoke(messages, config={"timeout": 90})
-            if isinstance(result, dict):
-                result = schema.model_validate(result)
-            return result
-        except Exception as e:
-            if attempt == max_retries:
-                print(f"[summarize] Structured output failed after {max_retries} retries: {type(e).__name__}: {e}")
-                return None
-
-            error_str = str(e)
-            if len(error_str) > 1000:
-                error_str = error_str[:1000] + "... (truncated)"
-
-            repair_msg = (
-                f"Your previous output failed schema validation.\n"
-                f"Errors:\n{error_str}\n\n"
-                f"CRITICAL: You MUST correct your output to exactly match the required schema. "
-                f"Do not omit any required fields, and ensure all fields are of the correct type. "
-                f"Return ONLY a valid function call with no additional text."
-            )
-            messages = messages + [HumanMessage(content=repair_msg)]
-            print(f"[summarize] Schema validation failed, retrying ({attempt + 1}/{max_retries})...")
-
-
-def _classify_evidence_type(paper: dict, query: str, summaries: dict) -> str:
-    """Classify paper as direct, supporting, or background evidence."""
-    summary = summaries.get(paper.get("_idx", "0"), {})
-    relevance = summary.get("relevance_to_query", "").lower()
-    contribution = summary.get("key_contribution", "").lower()
-    title = paper.get("title", "").lower()
-
-    direct_indicators = ["directly addresses", "explicitly studies", "proposes", "introduces", "framework for"]
-    if any(ind in relevance for ind in direct_indicators):
-        return "direct"
-
-    query_words = set(query.lower().split())
-    title_words = set(title.split())
-    if len(query_words & title_words) >= 3:
-        return "direct"
-
-    supporting_indicators = ["related to", "similar approach", "applies to", "uses", "dataset for"]
-    if any(ind in relevance for ind in supporting_indicators):
-        return "supporting"
-
-    return "background"
-
-def _build_paper_block_with_classification(papers: list[dict], summaries: dict) -> str:
-    """Build paper block with evidence type classification."""
-    paper_parts = []
-    for i, p in enumerate(papers):
-        p["_idx"] = str(i) 
-        abstract = p.get("text", sanitize_abstract(p.get("summary", " ")))
-        if len(abstract) < 20 or "\x02" in abstract or "\x01" in abstract:
-            abstract = f"[Abstract stripped. Paper: {p['title']}]"
-
-        evidence_type = _classify_evidence_type(p, "", summaries)
-        paper_parts.append(
-            f"[paper_id={i}] [Evidence: {evidence_type.upper()}]\n"
-            f"Title: {p['title']}\n"
-            f"Abstract: {abstract[:1500]}"
-        )
-    return "\n\n".join(paper_parts)
-
-def _summarize_papers(llm, papers: list[dict], query: str) -> dict:
-    """Summarize papers and classify evidence type."""
-    paper_block = _build_paper_block_with_classification(papers, {})
-
-    batch_messages = [
-        SystemMessage(
-            content=(
-                "You MUST return a JSON object with this EXACT structure:\n"
-                '{\n'
-                '  "summaries": [\n'
-                '    {\n'
-                '      "paper_id": "0",\n'
-                '      "key_contribution": "what the paper proposed",\n'
-                '      "methodology": "methods, datasets, evaluation",\n'
-                '      "findings": "main results and findings",\n'
-                '      "relevance_to_query": "how directly it addresses the query",\n'
-                '      "evidence_type": "direct" | "supporting" | "background",\n'
-                '      "key_metrics": ["exact numeric figures stated in the text, e.g. '
-                '\'top-1 accuracy +2-4% over CNN\', \'published 2023\', \'O(N^2) attention cost\'"]\n'
-                '    },\n'
-                '    { "paper_id": "1", ... }\n'
-                '  ]\n'
-                '}\n\n'
-                "CRITICAL: You MUST wrap the array in a 'summaries' key. "
-                "Do NOT return just the array. "
-                "All field names must be exactly as shown (lowercase, case-sensitive). "
-                "paper_id MUST be a string, not a number.\n\n"
-                "KEY_METRICS RULES:\n"
-                "- Copy numbers/figures VERBATIM from the abstract/text — never estimate or infer.\n"
-                "- Include comparative figures (e.g. accuracy deltas, FLOPs, latency, dataset sizes, "
-                "parameter counts) if explicitly stated, even approximate ranges like '2-4%'.\n"
-                "- If the paper states no such figures, return an empty list — do not fabricate."
-            )
-        ),
-        HumanMessage(content=f"Query: {query}\n\n{paper_block}"),
-    ]
-
-    try:
-        result: BatchPaperSummaries = llm.with_structured_output(BatchPaperSummaries).invoke(
-            batch_messages, config={"timeout": 20}
-        )
-        summaries = {s.paper_id: s.model_dump() for s in result.summaries}
-
-        for i, p in enumerate(papers):
-            p["_idx"] = str(i)
-
-        return summaries
-    except Exception:
-        return {
-            str(i): {
-                "paper_id": str(i),
-                "key_contribution": p['title'],
-                "methodology": "",
-                "findings": "",
-                "relevance_to_query": "",
-                "evidence_type": "supporting",
-                "key_metrics": []
-            }
-            for i, p in enumerate(papers)
-        }
-
-def _count_evidence_types(summaries: dict) -> dict:
-    """Count papers by evidence type."""
-    counts = {"direct": 0, "supporting": 0, "background": 0}
-    for s in summaries.values():
-        etype = s.get("evidence_type", "supporting")
-        counts[etype] = counts.get(etype, 0) + 1
-    return counts
-
-def _select_top_references(papers: list[dict], summaries: dict, mode: str, max_refs: int = 5) -> list[str]:
-    """Select most relevant paper IDs for references."""
-    direct_ids = []
-    supporting_ids = []
-
-    for i, p in enumerate(papers):
-        sid = str(i)
-        if sid not in summaries:
-            continue
-        etype = summaries[sid].get("evidence_type", "supporting")
-        if etype == "direct":
-            direct_ids.append(sid)
-        elif etype == "supporting":
-            supporting_ids.append(sid)
-
-    if mode == "normal":
-        selected = direct_ids[:2] + supporting_ids[:1]
-        return selected[:3]
-    else:
-        selected = direct_ids + supporting_ids
-        return selected[:max_refs]
-
-def _run_normal_mode_json(llm, state: AgentState, papers: list[dict], summaries: dict) -> NormalAnswer:
-    """Normal mode via JSON mode – no function calling, no retries."""
-    evidence_counts = _count_evidence_types(summaries)
-    n_direct = evidence_counts["direct"]
-    n_supporting = evidence_counts["supporting"]
-
-    if n_direct >= 2:
-        evidence_strength = "High"
-        strength_reason = "Multiple directly relevant studies found with consistent evidence."
-    elif n_direct == 1:
-        evidence_strength = "Medium"
-        strength_reason = "Only one direct study found; lacks broader validation or comparisons."
-    else:
-        evidence_strength = "Low"
-        strength_reason = "No direct studies found; relying on indirect or theoretical support."
-
-    paper_block = "\n\n".join([
-        f"[{i}] [{summaries.get(str(i), {}).get('evidence_type', 'supporting').upper()}] "
-        f"{p['title']}: {summaries.get(str(i), {}).get('key_contribution', '')}"
-        for i, p in enumerate(papers)
-    ])
-
-    prompt = f"""You are a research assistant providing a direct but thorough answer.
-QUERY: {state['query']}
-EVIDENCE AVAILABLE:
-Direct evidence: {n_direct} paper(s)
-Supporting evidence: {n_supporting} paper(s)
-PAPERS:
-{paper_block}
-
-You MUST return a JSON object with EXACTLY these field names:
-- "direct_answer": string (2-4 sentences directly answering the query)
-- "brief_context": string or null (EXACTLY ONE sentence if strictly necessary, otherwise null)
-- "evidence": string (detailed summary with markdown formatting)
-- "limitations": array of strings (3-5 distinct methodological gaps)
-- "conclusion": string (what is supported, what remains uncertain, what future work)
-- "confidence": "High" | "Medium" | "Low"
-- "confidence_explanation": string
-- "references": array of paper_id strings
-
-CONFIDENCE RULES:
-- If direct evidence >= 2: "High"
-- If direct evidence == 1: "Medium"
-- If direct evidence == 0: "Low"
-
-CRITICAL RULES:
-- Do NOT claim a paper solves the problem unless it explicitly does.
-- Do NOT combine unrelated papers into a fictional framework.
-{_evidence_mode_instruction(state.get("evidence_mode", "literature"))}
-{LATEX_INSTRUCTION}"""
-
-    messages = [
-        SystemMessage(content="You are a research assistant. Respond with JSON only."),
-        HumanMessage(content=prompt)
-    ]
-
-    try:
-        answer = llm.invoke_json_mode(messages, schema=NormalAnswer)
-        answer.confidence = evidence_strength
-        answer.confidence_explanation = strength_reason
-        return answer
-    except Exception as e:
-        print(f"[summarize] Normal mode JSON failed: {e}")
-        return NormalAnswer(
-            direct_answer="I could not generate a structured answer due to a processing error.",
-            brief_context=None,
-            evidence="",
-            limitations=["Processing error occurred."],
-            conclusion="Please try again.",
-            confidence="Low",
-            confidence_explanation="Processing error.",
-            references=[]
-        )
-
-
-def _run_researched_mode_json(llm, state: AgentState, papers: list[dict], summaries: dict) -> ResearchAnswer:
-    """Research mode via JSON mode – no function calling, no retries."""
-    evidence_counts = _count_evidence_types(summaries)
-    n_direct = evidence_counts["direct"]
-    n_total = len(papers)
-
-    paper_block = "\n\n".join([
-        f"[{i}] [{summaries.get(str(i), {}).get('evidence_type', 'supporting').upper()}] "
-        f"{p['title']}: {summaries.get(str(i), {}).get('key_contribution', '')}"
-        for i, p in enumerate(papers)
-    ])
-
-    include_comparative = n_direct >= 2
-
-    user_query_lower = state['query'].lower()
-    explicitly_wants_table = any(w in user_query_lower for w in ("table", "tabular", "tabulate"))
-
-    table_instruction = ""
-    if explicitly_wants_table:
-        table_instruction = (
-            "\n\nTABLE REQUIREMENT (MANDATORY — the user explicitly asked for a table):\n"
-            "You MUST include a markdown table in the COMPARATIVE ANALYSIS field. "
-            "The table must compare what the user actually asked to compare "
-            f"(re-read the query: \"{state['query']}\") — if the user asked to "
-            "compare architectures/methods/models (e.g. 'compare CNNs and ViTs'), "
-            "the table rows must be comparison DIMENSIONS (e.g. accuracy, compute "
-            "cost, data efficiency, interpretability) with one column per "
-            "architecture/method being compared, populated with real findings "
-            "cited via [paper_id=N] — NOT a list of the source papers themselves. "
-            "Only build a table of the papers themselves if the user explicitly "
-            "asked to compare the papers/studies/literature directly."
-        )
-
-    prompt = f"""You are a domain researcher writing a detailed literature review.
-QUERY: {state['query']}
-EVIDENCE AVAILABLE:
-Total papers: {n_total}
-Direct evidence: {n_direct} paper(s)
-Supporting evidence: {evidence_counts['supporting']} paper(s)
-PAPERS:
-{paper_block}
-
-You MUST return a JSON object with EXACTLY these field names:
-- "executive_summary": string
-- "background_concepts": string
-- "related_research": string
-- "literature_review": string
-- "comparative_analysis": string or null
-- "evidence_assessment": string
-- "research_gaps": string
-- "practical_implications": string
-- "final_answer": string
-- "confidence": "High" | "Medium" | "Low"
-- "confidence_explanation": string
-- "references": array of paper_id strings
-
-Content per field:
-1. EXECUTIVE SUMMARY: High-level summary of what literature supports, what is uncertain, and the final answer.
-2. BACKGROUND CONCEPTS: Explain concepts from general → specific. Teach before evaluating. Only include what's relevant.
-3. RELATED RESEARCH: Briefly cover adjacent areas and explain their relevance to the question.
-4. LITERATURE REVIEW: Synthesize key papers (methods, datasets, metrics, findings). Synthesize, do NOT just list papers one by one.
-5. COMPARATIVE ANALYSIS {'(REQUIRED - multiple direct studies exist)' if include_comparative else '(OPTIONAL - include only if meaningful)'}: Compare methods, datasets, or findings. Use a markdown table if helpful.
-6. EVIDENCE ASSESSMENT: Discuss strength, consistency, and limitations of current evidence.
-7. RESEARCH GAPS: Identify genuine unanswered questions or missing areas.
-8. PRACTICAL IMPLICATIONS: Actionable implications. Clearly separate established evidence from speculation.
-9. FINAL ANSWER: The definitive, synthesized answer to the user's original question.
-
-FORMATTING REQUIREMENTS:
-- Use proper markdown formatting throughout.
-- Use ## for section headers.
-- Use bullet points (- item) for lists.
-- Each paragraph should be separated by a blank line.
-- Do NOT write a "References", "Bibliography", or "Works Cited" section
-  anywhere in any field. The application appends a single formatted
-  references list automatically after your answer — writing your own
-  creates a duplicate, messy list. Only use inline [paper_id=N] citations.
-{table_instruction}
-
-CRITICAL RULES:
-- Synthesize literature instead of listing papers.
-- Support claims with citations (use [paper_id=N] format).
-- Clearly distinguish established evidence from speculation.
-- Do NOT combine unrelated studies into fictional frameworks.
-- If no direct evidence exists, state "No direct evidence was found" and explain the closest research.
-{_evidence_mode_instruction(state.get("evidence_mode", "literature"))}
-{LATEX_INSTRUCTION}
-Generate a ResearchAnswer JSON object matching the schema exactly."""
-
-    messages = [
-        SystemMessage(content="You are a domain researcher. Respond with JSON only."),
-        HumanMessage(content=prompt)
-    ]
-
-    try:
-        answer = llm.invoke_json_mode(messages, schema=ResearchAnswer)
-        if not include_comparative:
-            answer.comparative_analysis = None
-        return answer
-    except Exception as e:
-        print(f"[summarize] Research mode JSON failed: {e}")
-        return ResearchAnswer(
-            executive_summary="Processing error occurred.",
-            background_concepts="",
-            related_research="",
-            literature_review="",
-            comparative_analysis=None,
-            evidence_assessment="",
-            research_gaps="",
-            practical_implications="",
-            final_answer="I could not generate a structured answer due to a processing error.",
-            confidence="Low",
-            confidence_explanation="Processing error.",
-            references=[]
-        )
-
-
-def _wants_paper_comparison_table(query: str) -> bool:
-    """True only when the user explicitly asks to compare the RETRIEVED
-    PAPERS/STUDIES THEMSELVES as the subject of the table (title/year/
-    contribution/methodology per paper) — e.g. 'compare these papers in a
-    table'. This is intentionally narrow: a query like 'compare CNNs and
-    ViTs... from the retrieved papers' is asking to compare CNNs vs ViTs
-    (a table of comparison DIMENSIONS with citations), not a table listing
-    the papers — incidental words like 'paper'/'research' anywhere in the
-    query must NOT trigger this path, or the wrong table gets substituted
-    in for whatever the LLM's comparative_analysis field produced."""
-    q = query.lower()
-    return any(pattern in q for pattern in _PAPER_AS_SUBJECT_PATTERNS)
-
-
-def _generate_fallback_table(papers: list[dict], summaries: dict, query: str) -> str | None:
-    """Generate a basic comparison table from papers, used ONLY as a last
-    resort when the query explicitly asked to compare the papers themselves
-    (see _wants_paper_comparison_table) and the LLM produced no table at all."""
-    if len(papers) < 2:
-        return None
-
-    lines = ["| # | Paper | Year | Key Contribution | Methodology |", "|---|-------|------|------------------|-------------|"]
-    for i, p in enumerate(papers[:6]):
-        sid = str(i)
-        summary = summaries.get(sid, {})
-        year = p.get('published', '')
-        if year and len(year) > 4:
-            year = year[:4]
-
-        title = p.get('title', '')
-        contribution = summary.get('key_contribution', '')[:90]
-        methodology = summary.get('methodology', '')[:90]
-
-        lines.append(
-            f"| {i+1} | {title[:50]}{'...' if len(title)>50 else ''} "
-            f"| {year or 'N/A'} | {contribution}{'...' if len(summary.get('key_contribution',''))>90 else ''} "
-            f"| {methodology}{'...' if len(summary.get('methodology',''))>90 else ''} |"
-        )
-
-    return "\n".join(lines)
-
-
-def _stitch_normal_answer(answer: NormalAnswer) -> str:
-    """Format normal mode answer."""
-    parts = []
-    parts.append(f"## Direct Answer\n\n{answer.direct_answer}\n")
-
-    if answer.brief_context:
-        parts.append(f"## Brief Context\n\n{answer.brief_context}\n")
-
-    evidence = answer.evidence.replace("\\n", "\n")
-    parts.append(f"## Evidence\n\n{evidence}\n")
-
-    if answer.limitations:
-        parts.append("## Limitations\n")
-        for lim in answer.limitations:
-            parts.append(f"- {lim}")
-        parts.append("")
-
-    conclusion = answer.conclusion.replace("\\n", "\n")
-    parts.append(f"## Conclusion\n\n{conclusion}\n")
-    parts.append(f"**Confidence**: {answer.confidence} – {answer.confidence_explanation}\n")
-
-    return "\n".join(parts)
+def _clean_content(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def _strip_headers(text: str) -> str:
-    """Strip leading markdown headers from LLM-generated field content."""
     if not text:
         return text
-    lines = text.split('\n')
+    lines = text.split("\n")
     cleaned = []
     for line in lines:
         stripped = line.strip()
-        if re.match(r'^#{1,4}\s+\S', stripped) and len(stripped) < 60:
+        if re.match(r"^#{1,4}\s+\S", stripped) and len(stripped) < 60:
             continue
         cleaned.append(line)
-    return '\n'.join(cleaned)
+    return "\n".join(cleaned)
 
 
-def _stitch_research_answer(answer: ResearchAnswer) -> str:
-    """Format research mode answer with proper markdown."""
-    parts = []
+def _has_module(plan: dict, module_id: str) -> bool:
+    return any(m.get("module_id") == module_id for m in plan.get("modules", []))
 
-    fields = [
-        ("Executive Summary", answer.executive_summary),
-        ("Background Concepts", answer.background_concepts),
-        ("Related Research", answer.related_research),
-        ("Literature Review", answer.literature_review),
-        ("Comparative Analysis", answer.comparative_analysis),
-        ("Evidence Assessment", answer.evidence_assessment),
-        ("Research Gaps", answer.research_gaps),
-        ("Practical Implications", answer.practical_implications),
-        ("Final Answer", answer.final_answer),
-    ]
 
-    for section_name, field_value in fields:
-        if not field_value:
-            continue
-        content = field_value.replace(chr(92)+'n', chr(10))
-        content = _strip_headers(content)
-        if section_name == "Research Gaps":
-            content = re.sub(r'\d+\)\s*', '- ', content)
-        parts.append(f"## {section_name}\n\n{content}\n")
+def _important_query_terms(state: AgentState) -> list[str]:
+    qu = state.get("query_understanding") or {}
+    terms = set()
+    q = state.get("query", "").lower()
+    terms.update([w for w in re.split(r"[^a-z0-9+#.-]+", q) if len(w) > 3])
+    for field in ("main_topic", "application_domain"):
+        v = qu.get(field)
+        if v:
+            terms.add(v.lower().strip())
+    for lst in ("methods_techniques", "entities", "academic_terminology"):
+        for v in (qu.get(lst) or [])[:6]:
+            if v:
+                terms.add(v.lower().strip())
+    for v in (qu.get("acronyms") or {}).values():
+        if v:
+            terms.add(v.lower().strip())
+    return [t for t in terms if t]
 
-    ce = answer.confidence_explanation.replace(chr(92)+'n', chr(10))
-    parts.append(f"## Confidence: {answer.confidence}\n\n{ce}\n")
 
-    return "\n".join(parts)
-
-def _build_paper_block(papers: list[dict]) -> str:
-    parts = []
+def _fast_summaries(papers: list[dict], state: AgentState) -> dict[str, dict]:
+    summaries = {}
     for i, p in enumerate(papers):
-        abstract = p.get("summary", "")
-        if len(abstract) < 20:
-            abstract = f"[Abstract not available]"
-        parts.append(
-            f"[paper_id={i}] Title: {p['title']}\nAbstract: {abstract[:1500]}"
+        score = float(
+            p.get("final_score")
+            or p.get("_relevance_orig")
+            or p.get("_initial_sim")
+            or p.get("score")
+            or 0.0
         )
+        if score >= 0.62:
+            evidence_type = "direct"
+        elif score >= 0.45:
+            evidence_type = "supporting"
+        else:
+            evidence_type = "background"
+        summaries[str(i)] = {
+            "paper_id": str(i),
+            "key_contribution": p.get("title", ""),
+            "methodology": "",
+            "findings": (p.get("summary") or p.get("text") or "")[:600],
+            "relevance_to_query": "",
+            "evidence_type": evidence_type,
+            "key_metrics": [],
+        }
+    return summaries
+
+
+def _build_paper_block(
+    papers: list[dict],
+    summaries: dict[str, dict],
+    max_abstract: int = 700,
+    max_papers: int = 8,
+) -> str:
+    parts = []
+    for i, p in enumerate(papers[:max_papers]):
+        s = summaries.get(str(i), {})
+        if s:
+            metrics = "; ".join((s.get("key_metrics") or [])[:4])
+            parts.append(
+                f"[paper_id={i}] [{s.get('evidence_type', 'supporting').upper()}] "
+                f"Title: {p.get('title', '')}\n"
+                f"Key contribution: {s.get('key_contribution', '')}\n"
+                f"Findings: {s.get('findings', '')}\n"
+                f"Metrics: {metrics}"
+            )
+        else:
+            abstract = p.get("summary") or p.get("text") or ""
+            parts.append(
+                f"[paper_id={i}] Title: {p.get('title', '')}\n"
+                f"Abstract: {abstract[:max_abstract]}"
+            )
     return "\n\n".join(parts)
 
-_PLAIN_LATEX = """
-MATH FORMATTING — if your answer contains formulas, equations, or mathematical
-expressions, use LaTeX delimiters:
-- Inline math: wrap in single dollar signs, e.g. $d_k$ or $Q, K, V$.
-- Display equations: wrap in double dollar signs on their own line, e.g.
-  $$\\text{Attention}(Q,K,V) = \\text{softmax}\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V$$
-- Define every symbol in prose immediately after the equation.
-"""
 
-
-def _run_plain_mode(llm, state: AgentState, papers: list[dict], summaries: dict, detailed: bool) -> str:
-    """Used when evidence_mode == 'uploaded' — skip the multi-section
-    literature-review schema entirely. detailed=True (researched) gets a
-    thorough answer; detailed=False (normal) gets a short direct one."""
-    paper_block = "\n\n".join([
-        f"[{i}] {p['title']}: {summaries.get(str(i), {}).get('key_contribution', '')} "
-        f"{summaries.get(str(i), {}).get('findings', '')}"
-        for i, p in enumerate(papers)
-    ])
-    length_instr = (
-        "Answer thoroughly and in detail, covering every part of the question, "
-        "using clear structure (headers/bullets) only where it aids clarity."
-        if detailed else
-        "Answer directly and concisely — a few sentences to a short paragraph. "
-        "No section headers, no literature-review scaffolding."
+def _reclassify_evidence_types(papers: list[dict], summaries: dict, state: AgentState) -> dict:
+    terms = _important_query_terms(state)
+    direct_phrases = (
+        "directly address", "directly study", "directly investigat",
+        "proposes", "introduces", "presents",
+        "framework for", "method for", "model for",
     )
-    prompt = f"""Answer the user's question using ONLY the uploaded document below.
-QUERY: {state['query']}
-DOCUMENT CONTENT:
-{paper_block}
+    supporting_phrases = (
+        "related", "similar", "applies", "uses",
+        "dataset", "background", "supports",
+    )
+    for i, p in enumerate(papers):
+        sid = str(i)
+        s = summaries.get(sid) or {}
+        rel = (s.get("relevance_to_query") or "").lower()
+        contrib = (s.get("key_contribution") or "").lower()
+        title = (p.get("title") or "").lower()
+        text = f"{title} {contrib} {rel}"
+        sim = float(
+            p.get("_relevance_orig")
+            or p.get("_initial_sim")
+            or p.get("final_score")
+            or p.get("score")
+            or 0.0
+        )
+        term_hits = 0
+        for t in terms:
+            if not t:
+                continue
+            if t in title:
+                term_hits += 2
+            elif t in text:
+                term_hits += 1
+        if sim >= 0.62 or term_hits >= 4 or any(ph in rel for ph in direct_phrases):
+            etype = "direct"
+        elif sim >= 0.45 or term_hits >= 2 or any(ph in rel for ph in supporting_phrases):
+            etype = "supporting"
+        else:
+            etype = "background"
+        if p.get("_foundational_candidate") and sim >= 0.45 and etype == "background":
+            etype = "supporting"
+        s["evidence_type"] = etype
+        summaries[sid] = s
+    return summaries
 
-{length_instr}
-Never invent information not present in the document. If the document doesn't
-address part of the question, say so plainly.
-{_PLAIN_LATEX}"""
+
+def _count_evidence_types(summaries: dict) -> dict:
+    counts = {"direct": 0, "supporting": 0, "background": 0}
+    for s in summaries.values():
+        etype = (s.get("evidence_type") or "supporting").lower().strip()
+        if etype not in counts:
+            etype = "supporting"
+        counts[etype] += 1
+    return counts
+
+
+def _status_from_paper_ids(paper_ids: list[str], summaries: dict) -> str:
+    if not paper_ids:
+        return "none"
+    direct_count = 0
+    supporting_count = 0
+    for pid in paper_ids:
+        etype = summaries.get(str(pid), {}).get("evidence_type", "background")
+        if etype == "direct":
+            direct_count += 1
+        elif etype == "supporting":
+            supporting_count += 1
+    if direct_count >= 2 or (direct_count >= 1 and len(paper_ids) >= 3):
+        return "strong"
+    if direct_count >= 1 or len(paper_ids) >= 2:
+        return "mixed"
+    if supporting_count >= 1:
+        return "weak"
+    return "weak"
+
+
+def _build_module_evidence_map(
+    plan: dict,
+    papers: list[dict],
+    summaries: dict[str, dict],
+    state: AgentState,
+) -> dict[str, dict]:
+    evidence_map = {}
+    direct_ids = [sid for sid, s in summaries.items() if s.get("evidence_type") == "direct"]
+    supporting_ids = [sid for sid, s in summaries.items() if s.get("evidence_type") == "supporting"]
+    background_ids = [sid for sid, s in summaries.items() if s.get("evidence_type") == "background"]
+    understanding = state.get("query_understanding") or {}
+    comparison_candidates = []
+    comparison_candidates.extend(understanding.get("methods_techniques") or [])
+    comparison_candidates.extend(understanding.get("entities") or [])
+    comparison_candidates = list(dict.fromkeys([c.strip() for c in comparison_candidates if c and c.strip()]))
+    keyword_map = {
+        "risk_analysis": ["risk", "failure", "safety", "adverse", "side effect", "threat", "limitation"],
+        "tradeoffs": ["tradeoff", "trade-off", "pros", "cons", "advantage", "disadvantage", "comparison"],
+        "cost_resources": ["cost", "budget", "compute", "gpu", "memory", "latency", "resource", "price"],
+        "implementation_plan": ["implement", "deploy", "pipeline", "architecture", "build", "practice"],
+        "timeline_roadmap": ["roadmap", "timeline", "milestone", "phase", "future"],
+        "future_outlook": ["future", "forecast", "prediction", "trend", "outlook", "scenario"],
+        "alternatives": ["alternative", "baseline", "other", "approach", "method"],
+    }
+    for module in plan.get("modules", []):
+        mid = module.get("module_id")
+        entry = {
+            "module_id": mid,
+            "evidence_status": "none",
+            "paper_ids": [],
+            "notes": "",
+        }
+        if mid in ("references", "confidence_uncertainty"):
+            entry["evidence_status"] = "not_applicable"
+        elif mid in ("background", "key_concepts"):
+            entry["paper_ids"] = (background_ids + supporting_ids + direct_ids)[:4]
+            entry["evidence_status"] = "not_applicable"
+            entry["notes"] = "Use background knowledge and retrieved context; cite only if directly useful."
+        elif mid == "comparative_analysis":
+            entry["paper_ids"] = (direct_ids + supporting_ids)[:6]
+            entry["evidence_status"] = _status_from_paper_ids(entry["paper_ids"], summaries)
+            if len(comparison_candidates) >= 2:
+                entry["notes"] = f"Candidates: {', '.join(comparison_candidates[:6])}."
+            else:
+                entry["notes"] = "Infer comparison items from the query and evidence."
+        elif mid in ("research_findings", "methodology"):
+            entry["paper_ids"] = (direct_ids + supporting_ids)[:6]
+            entry["evidence_status"] = _status_from_paper_ids(entry["paper_ids"], summaries)
+        elif mid in keyword_map:
+            matched = []
+            kws = keyword_map[mid]
+            for sid, s in summaries.items():
+                text = " ".join([
+                    str(s.get("key_contribution", "")),
+                    str(s.get("findings", "")),
+                    str(s.get("relevance_to_query", "")),
+                ]).lower()
+                if any(k in text for k in kws):
+                    matched.append(sid)
+            if matched:
+                entry["paper_ids"] = matched[:6]
+            else:
+                entry["paper_ids"] = (direct_ids + supporting_ids)[:3]
+            entry["evidence_status"] = _status_from_paper_ids(entry["paper_ids"], summaries)
+        else:
+            entry["paper_ids"] = (direct_ids + supporting_ids + background_ids)[:5]
+            entry["evidence_status"] = _status_from_paper_ids(entry["paper_ids"], summaries)
+        evidence_map[mid] = entry
+    return evidence_map
+
+
+def _evidence_mode_instruction(mode: str) -> str:
+    if mode == "uploaded":
+        return (
+            "EVIDENCE MODE: UPLOADED DOCUMENT ONLY. "
+            "Use only the uploaded document. Do not invent outside facts. "
+            "If the document does not cover something, say so explicitly."
+        )
+    if mode == "blended":
+        return (
+            "EVIDENCE MODE: BLENDED. "
+            "Treat uploaded documents as primary and retrieved literature as supporting/validation. "
+            "Clearly separate document-derived claims from literature-derived claims."
+        )
+    return (
+        "EVIDENCE MODE: LITERATURE. "
+        "Use retrieved literature. Clearly distinguish evidence from inference."
+    )
+
+
+def _section_batch_prompt(
+    batch_modules: list[dict],
+    paper_block: str,
+    state: AgentState,
+    evidence_map: dict[str, dict],
+    guardrails: list[str],
+    plan: dict,
+) -> str:
+    module_lines = []
+    for m in batch_modules:
+        module_lines.append(
+            f"- module_id: {m['module_id']}\n"
+            f"  title: {m['title']}\n"
+            f"  purpose: {m['purpose']}\n"
+            f"  target_words: {m.get('target_words', 180)}\n"
+            f"  evidence_policy: {m.get('evidence_policy', 'evidence_preferred')}"
+        )
+    evidence_lines = []
+    for m in batch_modules:
+        e = evidence_map.get(m["module_id"], {})
+        evidence_lines.append(
+            f"- {m['module_id']}: status={e.get('evidence_status', 'none')}, "
+            f"allowed_paper_ids={','.join(e.get('paper_ids', [])[:6]) or 'none'}, "
+            f"note={e.get('notes', '')}"
+        )
+    guardrail_text = "\n".join(f"- {g}" for g in guardrails) if guardrails else "- None"
+    batch_ids = {m["module_id"] for m in batch_modules}
+    other_titles = [
+        m.get("title", m.get("module_id", ""))
+        for m in plan.get("modules", [])
+        if m.get("module_id") not in batch_ids
+        and m.get("module_id") not in ("references", "confidence_uncertainty")
+    ]
+    dedup_instruction = ""
+    if other_titles:
+        dedup_instruction = (
+            f"\nOTHER SECTIONS IN THIS REPORT (do NOT repeat their content): "
+            f"{', '.join(other_titles)}.\n"
+            f"Each section must contain UNIQUE information. If a fact belongs in "
+            f"another section, reference it briefly (e.g. 'as discussed in the "
+            f"Comparative Analysis section') but do NOT restate numbers or arguments.\n"
+        )
+    return f"""
+You are writing part of a dynamic research report.
+USER QUERY:
+{state.get('query', '')}
+REPORT DEPTH:
+{plan.get('depth', 'medium')}
+REASONING POLICY:
+{plan.get('reasoning_policy', 'evidence_plus_analysis')}
+{_evidence_mode_instruction(state.get('evidence_mode', 'literature'))}
+DOMAIN GUARDRAILS:
+{guardrail_text}
+WRITE THESE MODULES EXACTLY:
+{chr(10).join(module_lines)}
+EVIDENCE STATUS:
+{chr(10).join(evidence_lines)}
+AVAILABLE SOURCES:
+{paper_block or "(no retrieved sources)"}
+{dedup_instruction}
+CITATION RULES:
+Use inline citations as [paper_id=N].
+Only cite paper_ids that appear in AVAILABLE SOURCES.
+Do not invent citations.
+If evidence is weak/none, say so explicitly.
+If policy allows first-principles reasoning, label it with "Inference:".
+If policy allows speculation, label it with "Speculative:".
+For independent_analysis, tradeoffs, risk_analysis, use:
+Evidence:
+Inference:
+Recommendation:
+FORMATTING RULES:
+Return markdown content for each module.
+Do NOT include the module title as a heading. The system will add headings.
+Use bullets, short paragraphs, and tables where useful.
+Keep each module near its target_words.
+Do NOT create a References section.
+{FORMAT_INSTRUCTION}
+""".strip()
+
+
+def _parse_plain_sections(batch_modules: list[dict], text: str) -> dict[str, dict]:
+    text = _clean_content(text)
+    sections = {}
+    parts = re.split(r"^##\s+(.+?)\s*$", text, flags=re.MULTILINE)
+    parsed = []
+    if len(parts) >= 3:
+        for i in range(1, len(parts), 2):
+            title = parts[i].strip()
+            content = parts[i + 1].strip() if i + 1 < len(parts) else ""
+            parsed.append((title, content))
+    title_to_module = {}
+    for m in batch_modules:
+        title_to_module[m["title"].lower()] = m
+        title_to_module[m["module_id"].replace("_", " ").lower()] = m
+    used = set()
+    for title, content in parsed:
+        m = title_to_module.get(title.lower())
+        if m and m["module_id"] not in used:
+            sections[m["module_id"]] = {
+                "module_id": m["module_id"],
+                "title": m["title"],
+                "content": content,
+                "cited_paper_ids": extract_paper_ids(content),
+                "evidence_status": "mixed",
+                "confidence": "medium",
+            }
+            used.add(m["module_id"])
+    if not sections and batch_modules:
+        sections[batch_modules[0]["module_id"]] = {
+            "module_id": batch_modules[0]["module_id"],
+            "title": batch_modules[0]["title"],
+            "content": text,
+            "cited_paper_ids": extract_paper_ids(text),
+            "evidence_status": "mixed",
+            "confidence": "medium",
+        }
+        used.add(batch_modules[0]["module_id"])
+    return sections
+
+
+def _invoke_section_batch(
+    batch_modules: list[dict],
+    paper_block: str,
+    state: AgentState,
+    evidence_map: dict[str, dict],
+    guardrails: list[str],
+    plan: dict,
+    timeout: int,
+) -> dict[str, dict]:
+    prompt = _section_batch_prompt(
+        batch_modules=batch_modules,
+        paper_block=paper_block,
+        state=state,
+        evidence_map=evidence_map,
+        guardrails=guardrails,
+        plan=plan,
+    )
+    full_prompt = (
+        prompt
+        + "\n\nOUTPUT FORMAT:\n"
+        + "Return markdown only. Start each module with a level-2 heading "
+        + "exactly matching its title, e.g.:\n"
+        + "## Direct Answer\n\n(content)\n\n## Research Findings\n\n(content)\n"
+        + "Do NOT wrap in JSON. Do NOT use code fences. Do NOT return a "
+        + "SectionBatch object."
+    )
+    messages = [
+        SystemMessage(content="You are a modular research report writer. Return markdown only."),
+        HumanMessage(content=full_prompt),
+    ]
     try:
-        response = llm.invoke([
-            SystemMessage(content="Answer in plain prose based only on the provided document."),
-            HumanMessage(content=prompt)
-        ], config={"timeout": 60})
-        return response.content.strip()
+        llm = get_llm(temperature=0, task="strong")
+        raw = llm.invoke(messages, config={"timeout": timeout})
+        return _parse_plain_sections(batch_modules, raw.content)
     except Exception as e:
-        print(f"[summarize] Plain mode failed: {e}")
-        return "I could not generate an answer due to a processing error."
+        print(f"[summarize] section batch generation failed: {type(e).__name__}: {e}")
+        return {}
+
+
+def _stream_invoke_section_batch(
+    batch_modules: list[dict],
+    paper_block: str,
+    state: AgentState,
+    evidence_map: dict[str, dict],
+    guardrails: list[str],
+    plan: dict,
+    timeout: int,
+    emitter: _OrderedSectionEmitter | None,
+    id_map: dict,
+) -> dict[str, dict]:
+    """
+    Streaming version: uses llm.stream(), splits on ## header boundaries,
+    rewrites citations + sanitizes per section, pushes to ordered emitter.
+    Returns partial results on stream error (caller retries missing).
+    """
+    cancel_check = state.get("_cancel_check")
+
+    prompt = _section_batch_prompt(
+        batch_modules=batch_modules,
+        paper_block=paper_block,
+        state=state,
+        evidence_map=evidence_map,
+        guardrails=guardrails,
+        plan=plan,
+    )
+    full_prompt = (
+        prompt
+        + "\n\nOUTPUT FORMAT:\n"
+        + "Return markdown only. Start each module with a level-2 heading "
+        + "exactly matching its title, e.g.:\n"
+        + "## Direct Answer\n\n(content)\n\n## Research Findings\n\n(content)\n"
+        + "Do NOT wrap in JSON. Do NOT use code fences. Do NOT return a "
+        + "SectionBatch object."
+    )
+    messages = [
+        SystemMessage(content="You are a modular research report writer. Return markdown only."),
+        HumanMessage(content=full_prompt),
+    ]
+
+    title_to_module = {}
+    for m in batch_modules:
+        title_to_module[m["title"].lower()] = m
+        title_to_module[m["module_id"].replace("_", " ").lower()] = m
+
+    def _emit_section(title: str, raw_content: str):
+        m = title_to_module.get(title.lower())
+        if not m:
+            return None
+        mid = m["module_id"]
+        cleaned = _clean_content(raw_content)
+        cited_ids = extract_paper_ids(cleaned)
+        content = rewrite_inline_citations(cleaned, id_map)
+        content = sanitize_for_web(content)
+        if emitter is not None:
+            emitter.submit(mid, f"## {m['title']}\n\n{content}\n")
+        return {
+            "module_id": mid,
+            "title": m["title"],
+            "content": content,
+            "cited_paper_ids": cited_ids,
+            "evidence_status": evidence_map.get(mid, {}).get("evidence_status", "mixed"),
+            "confidence": "medium",
+        }
+
+    sections: dict[str, dict] = {}
+    try:
+        llm = get_llm(temperature=0, task="strong")
+        buffer = ""
+        current_title = None
+        current_content = ""
+
+        for chunk in llm.stream(messages, config={"timeout": timeout}):
+            if cancel_check and cancel_check():
+                break
+            text = chunk.content if hasattr(chunk, "content") else str(chunk)
+            buffer += text
+
+            if current_title is None and buffer.startswith("## "):
+                line_end = buffer.find("\n")
+                if line_end == -1:
+                    continue
+                current_title = buffer[3:line_end].strip()
+                current_content = ""
+                buffer = buffer[line_end + 1:]
+                continue
+
+            while True:
+                match = re.search(r"\n## (.+)", buffer)
+                if not match:
+                    break
+                header_start = match.start()
+                if current_title is not None:
+                    current_content += buffer[:header_start]
+                    sec = _emit_section(current_title, current_content)
+                    if sec:
+                        sections[sec["module_id"]] = sec
+                after_header = buffer[match.end():]
+                line_end = after_header.find("\n")
+                if line_end == -1:
+                    current_title = after_header.strip()
+                    current_content = ""
+                    buffer = ""
+                    break
+                current_title = after_header[:line_end].strip()
+                current_content = ""
+                buffer = after_header[line_end + 1:]
+
+        if current_title is not None:
+            current_content += buffer
+            sec = _emit_section(current_title, current_content)
+            if sec:
+                sections[sec["module_id"]] = sec
+        elif buffer.strip() and batch_modules:
+            m0 = batch_modules[0]
+            cleaned = _clean_content(buffer)
+            cited_ids = extract_paper_ids(cleaned)
+            content = rewrite_inline_citations(cleaned, id_map)
+            content = sanitize_for_web(content)
+            if emitter is not None:
+                emitter.submit(m0["module_id"], f"## {m0['title']}\n\n{content}\n")
+            sections[m0["module_id"]] = {
+                "module_id": m0["module_id"],
+                "title": m0["title"],
+                "content": content,
+                "cited_paper_ids": cited_ids,
+                "evidence_status": evidence_map.get(m0["module_id"], {}).get("evidence_status", "mixed"),
+                "confidence": "medium",
+            }
+
+    except Exception as e:
+        print(f"[summarize] streaming batch failed, returning partial: {type(e).__name__}: {e}")
+
+    return sections
+
+
+def _generate_sections_batch(
+    batch_modules: list[dict],
+    paper_block: str,
+    state: AgentState,
+    evidence_map: dict[str, dict],
+    guardrails: list[str],
+    plan: dict,
+    timeout: int,
+) -> list[dict]:
+    if not batch_modules:
+        return []
+    sections = _invoke_section_batch(
+        batch_modules, paper_block, state, evidence_map, guardrails, plan, timeout,
+    )
+    missing = [m for m in batch_modules if m["module_id"] not in sections]
+    if missing:
+        print(f"[summarize] retrying {len(missing)} missing module(s): {[m['module_id'] for m in missing]}")
+        retry_sections = _invoke_section_batch(
+            missing, paper_block, state, evidence_map, guardrails, plan, timeout,
+        )
+        sections.update(retry_sections)
+    for m in batch_modules:
+        mid = m["module_id"]
+        if mid not in sections:
+            sections[mid] = {
+                "module_id": mid,
+                "title": m["title"],
+                "content": "No content could be generated for this section.",
+                "cited_paper_ids": [],
+                "evidence_status": evidence_map.get(mid, {}).get("evidence_status", "none"),
+                "confidence": "low",
+            }
+    return [sections[m["module_id"]] for m in batch_modules]
+
+
+def _generate_sections_batch_streaming(
+    batch_modules: list[dict],
+    paper_block: str,
+    state: AgentState,
+    evidence_map: dict[str, dict],
+    guardrails: list[str],
+    plan: dict,
+    timeout: int,
+    emitter: _OrderedSectionEmitter | None,
+    id_map: dict,
+) -> list[dict]:
+    if not batch_modules:
+        return []
+
+    cancel_check = state.get("_cancel_check")
+    sections = _stream_invoke_section_batch(
+        batch_modules, paper_block, state, evidence_map,
+        guardrails, plan, timeout, emitter, id_map,
+    )
+
+    missing = [m for m in batch_modules if m["module_id"] not in sections]
+    if missing and not (cancel_check and cancel_check()):
+        print(f"[summarize:stream] retrying {len(missing)} missing module(s)")
+        retry = _invoke_section_batch(
+            missing, paper_block, state, evidence_map,
+            guardrails, plan, timeout,
+        )
+        for mid, sec in retry.items():
+            cleaned = _clean_content(sec.get("content", ""))
+            cited_ids = extract_paper_ids(cleaned)
+            content = rewrite_inline_citations(cleaned, id_map)
+            content = sanitize_for_web(content)
+            sec["content"] = content
+            sec["cited_paper_ids"] = cited_ids
+            if emitter is not None:
+                emitter.submit(mid, f"## {sec['title']}\n\n{content}\n")
+        sections.update(retry)
+
+    for m in batch_modules:
+        mid = m["module_id"]
+        if mid not in sections:
+            placeholder = {
+                "module_id": mid,
+                "title": m["title"],
+                "content": "No content could be generated for this section.",
+                "cited_paper_ids": [],
+                "evidence_status": evidence_map.get(mid, {}).get("evidence_status", "none"),
+                "confidence": "low",
+            }
+            sections[mid] = placeholder
+            if emitter is not None:
+                emitter.submit(mid, f"## {m['title']}\n\n{placeholder['content']}\n")
+
+    return [sections[m["module_id"]] for m in batch_modules]
+
+
+def _split_batches(modules: list[dict], depth: str) -> list[list[dict]]:
+    if depth == "low" or len(modules) <= 4:
+        return [modules]
+    core_ids = {
+        "direct_answer", "executive_summary", "background",
+        "key_concepts", "methodology", "research_findings",
+    }
+    core = [m for m in modules if m["module_id"] in core_ids]
+    analysis = [m for m in modules if m["module_id"] not in core_ids]
+    if not core:
+        return [analysis] if analysis else [modules]
+    if not analysis:
+        return [core]
+    return [core, analysis]
+
+
+def _generate_all_sections(
+    modules: list[dict],
+    paper_block: str,
+    state: AgentState,
+    evidence_map: dict[str, dict],
+    guardrails: list[str],
+    plan: dict,
+    depth: str,
+) -> list[dict]:
+    batches = _split_batches(modules, depth)
+    timeout = (
+        settings.REPORT_SECTION_TIMEOUT_DEEP
+        if depth == "high"
+        else settings.REPORT_SECTION_TIMEOUT_NORMAL
+    )
+    if len(batches) == 1:
+        return _generate_sections_batch(
+            batches[0], paper_block, state, evidence_map,
+            guardrails, plan, timeout,
+        )
+    sections = []
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futures = {
+            ex.submit(
+                _generate_sections_batch,
+                batch, paper_block, state, evidence_map,
+                guardrails, plan, timeout,
+            ): batch
+            for batch in batches
+        }
+        for future in as_completed(futures):
+            try:
+                sections.extend(future.result())
+            except Exception as e:
+                print(f"[summarize] parallel section generation failed: {type(e).__name__}: {e}")
+    return sections
+
+
+def _generate_all_sections_streaming(
+    modules: list[dict],
+    paper_block: str,
+    state: AgentState,
+    evidence_map: dict[str, dict],
+    guardrails: list[str],
+    plan: dict,
+    depth: str,
+    emitter: _OrderedSectionEmitter | None,
+    id_map: dict,
+) -> list[dict]:
+    batches = _split_batches(modules, depth)
+    timeout = (
+        settings.REPORT_SECTION_TIMEOUT_DEEP
+        if depth == "high"
+        else settings.REPORT_SECTION_TIMEOUT_NORMAL
+    )
+    if len(batches) == 1:
+        return _generate_sections_batch_streaming(
+            batches[0], paper_block, state, evidence_map,
+            guardrails, plan, timeout, emitter, id_map,
+        )
+    sections: list[dict] = []
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futures = {
+            ex.submit(
+                _generate_sections_batch_streaming,
+                batch, paper_block, state, evidence_map,
+                guardrails, plan, timeout, emitter, id_map,
+            ): batch
+            for batch in batches
+        }
+        for future in as_completed(futures):
+            try:
+                sections.extend(future.result())
+            except Exception as e:
+                print(f"[summarize:stream] parallel generation failed: {type(e).__name__}: {e}")
+    if emitter is not None:
+        emitter.flush_remaining()
+    return sections
+
+
+def _collect_cited_paper_ids(sections: list[dict], papers: list[dict]) -> list[str]:
+    cited = set()
+    for s in sections:
+        content = s.get("content", "")
+        for pid in extract_paper_ids(content):
+            cited.add(str(pid))
+        for pid in s.get("cited_paper_ids", []):
+            cited.add(str(pid))
+    valid = []
+    for pid in cited:
+        if pid.isdigit() and 0 <= int(pid) < len(papers):
+            valid.append(pid)
+    return sorted(valid, key=lambda x: int(x))
+
+
+def _select_default_cited_ids(papers: list[dict], summaries: dict, plan: dict) -> list[str]:
+    direct_ids = [sid for sid, s in summaries.items() if s.get("evidence_type") == "direct"]
+    supporting_ids = [sid for sid, s in summaries.items() if s.get("evidence_type") == "supporting"]
+    ids = direct_ids[:3] + supporting_ids[:2]
+    if not ids:
+        ids = [str(i) for i, _ in enumerate(papers[:3])]
+    return ids
+
+
+def _select_references(
+    references: list[dict],
+    cited_ref_ids: set[int],
+    plan: dict,
+    papers: list[dict],
+    summaries: dict,
+) -> list[dict]:
+    policy = plan.get("reference_policy", "standard")
+    if policy == "none":
+        return []
+    max_refs = {
+        "minimal": 3, "standard": 8, "research": 12, "documentation": 8,
+    }.get(policy, 8)
+    if cited_ref_ids:
+        selected = [r for r in references if r.get("id") in cited_ref_ids]
+    else:
+        selected = []
+    if not selected:
+        direct_ids = [sid for sid, s in summaries.items() if s.get("evidence_type") == "direct"]
+        supporting_ids = [sid for sid, s in summaries.items() if s.get("evidence_type") == "supporting"]
+        preferred_paper_ids = direct_ids[:max_refs] + supporting_ids[:max_refs]
+        link_to_ref = {r["link"]: r for r in references}
+        for pid in preferred_paper_ids:
+            if not pid.isdigit():
+                continue
+            idx = int(pid)
+            if idx < len(papers):
+                link = papers[idx].get("link")
+                if link in link_to_ref:
+                    selected.append(link_to_ref[link])
+    if not selected:
+        selected = references[:max_refs]
+    seen = set()
+    capped = []
+    for r in selected:
+        rid = r.get("id")
+        if rid in seen:
+            continue
+        seen.add(rid)
+        capped.append(r)
+        if len(capped) >= max_refs:
+            break
+    return capped
+
+
+def _compute_dynamic_confidence(
+    state: AgentState,
+    papers: list[dict],
+    summaries: dict,
+    sections: list[dict],
+    evidence_map: dict[str, dict],
+    plan: dict,
+) -> dict:
+    total = len(papers)
+    if total == 0:
+        return {
+            "evidence_quality": "low",
+            "answer_confidence": "low",
+            "prediction_confidence": None,
+            "recommendation_confidence": None,
+            "data_completeness": "low",
+            "uncertainty": "high",
+            "explanation": "No retrieved evidence was available.",
+        }
+    counts = _count_evidence_types(summaries)
+    direct = counts["direct"]
+    supporting = counts["supporting"]
+    points = 0.0
+    reasons = []
+    points += min(direct, 3) * 2.0
+    points += min(supporting, 4) * 0.75
+    reasons.append(f"{direct} direct and {supporting} supporting papers")
+    rels = []
+    for p in papers[:6]:
+        r = float(
+            p.get("_relevance_orig") or p.get("_initial_sim")
+            or p.get("final_score") or p.get("score") or 0.0
+        )
+        rels.append(r)
+    avg_rel = sum(rels) / len(rels) if rels else 0.0
+    if avg_rel >= 0.65:
+        points += 2.0
+    elif avg_rel >= 0.55:
+        points += 1.5
+    elif avg_rel >= 0.45:
+        points += 1.0
+    elif avg_rel >= 0.35:
+        points += 0.5
+    reasons.append(f"average relevance {avg_rel:.2f}")
+    max_cite = max((p.get("citation_count") or 0) for p in papers) if papers else 0
+    if max_cite >= 1000:
+        points += 1.5
+    elif max_cite >= 200:
+        points += 1.0
+    elif max_cite >= 50:
+        points += 0.5
+    if total >= 6:
+        points += 0.5
+    elif total >= 3:
+        points += 0.25
+    if state.get("low_confidence_results"):
+        points -= 1.25
+    if direct == 0:
+        points -= 1.0
+    if points >= 5.5:
+        evidence_quality = "high"
+        answer_confidence = "high"
+    elif points >= 3.0:
+        evidence_quality = "medium"
+        answer_confidence = "medium"
+    else:
+        evidence_quality = "low"
+        answer_confidence = "low"
+    if evidence_quality == "high" and direct == 0:
+        evidence_quality = "medium"
+        answer_confidence = "medium"
+    weak_or_none = 0
+    considered = 0
+    for mid, entry in evidence_map.items():
+        if mid in ("references", "confidence_uncertainty", "background", "key_concepts"):
+            continue
+        considered += 1
+        if entry.get("evidence_status") in ("weak", "none"):
+            weak_or_none += 1
+    if considered == 0:
+        data_completeness = "medium"
+    elif weak_or_none == 0:
+        data_completeness = "high"
+    elif weak_or_none <= max(1, considered // 3):
+        data_completeness = "medium"
+    else:
+        data_completeness = "low"
+    uncertainty = {"high": "low", "medium": "moderate", "low": "high"}.get(
+        evidence_quality, "moderate"
+    )
+    explanation = "Evidence: " + "; ".join(reasons) + "."
+    return {
+        "evidence_quality": evidence_quality,
+        "answer_confidence": answer_confidence,
+        "prediction_confidence": None,
+        "recommendation_confidence": None,
+        "data_completeness": data_completeness,
+        "uncertainty": uncertainty,
+        "explanation": explanation,
+    }
+
+
+def _merge_sections(sections: list[dict], plan: dict) -> str:
+    order = {
+        m["module_id"]: m.get("order", MODULE_LIBRARY.get(m["module_id"], {}).get("order", 9999))
+        for m in plan.get("modules", [])
+    }
+    sections = sorted(sections, key=lambda s: order.get(s.get("module_id"), 9999))
+    parts = []
+    for s in sections:
+        content = _clean_content(s.get("content", ""))
+        if not content:
+            continue
+        title = s.get("title") or MODULE_LIBRARY.get(s.get("module_id"), {}).get("title", "Section")
+        content = _strip_headers(content)
+        parts.append(f"## {title}\n\n{content}\n")
+    return "\n".join(parts).strip()
 
 
 def summarize_node(state: AgentState) -> AgentState:
     llm = get_llm(temperature=0)
-    papers = state["ranked_papers"]
-    mode = state.get("response_mode", "normal")
-
-    if not papers:
-        if mode == "researched":
-            final = _run_researched_mode_json(llm, state, [], {})
-            answer_text = _stitch_research_answer(final)
-        else:
-            final = _run_normal_mode_json(llm, state, [], {})
-            answer_text = _stitch_normal_answer(final)
-        return {
-            **state,
-            "final_answer": answer_text,
-            "coverage_gaps": state.get("search_terms", []),
-            "references": [],
-        }
-
-    paper_block = _build_paper_block(papers)
-    summary_schema_desc = """{
-        "summaries": [
-            {
-            "paper_id": "0",
-            "key_contribution": "what the paper proposed",
-            "methodology": "methods, datasets, evaluation",
-            "findings": "main results and findings",
-            "relevance_to_query": "how directly it addresses the query",
-            "evidence_type": "direct" | "supporting" | "background",
-            "key_metrics": ["exact numeric figures stated in the text, e.g. 'top-1 accuracy +2-4% over CNN', 'published 2023', 'O(N^2) attention cost'"]
-            },
-            { "paper_id": "1", ... }
-        ]
-        }
-        CRITICAL: paper_id MUST be a string, not a number. key_metrics must be an array of strings.
-        If no metrics are stated, return an empty list.
-        """
-
-    summary_messages = [
-        SystemMessage(content="You are an expert paper summarizer. Respond with JSON only."),
-        HumanMessage(content=f"Query: {state['query']}\n\nPapers:\n{paper_block}\n\nReturn a JSON object matching this schema exactly:\n{summary_schema_desc}")
+    papers = state.get("ranked_papers", [])
+    plan = state.get("report_plan") or default_report_plan(state)
+    depth = plan.get("depth", "low")
+    generative_modules = [
+        m for m in plan.get("modules", [])
+        if m.get("module_id") not in ("references", "confidence_uncertainty")
     ]
-    
-    try:
-        summaries_raw = llm.invoke_json_mode(summary_messages, schema=None)  # raw dict
-        summaries = {s["paper_id"]: s for s in summaries_raw["summaries"]}
-    except Exception as e:
-        print(f"[summarize] Paper summaries failed: {e}")
-        summaries = {
-            str(i): {
-                "paper_id": str(i),
-                "key_contribution": p["title"],
-                "methodology": "",
-                "findings": "",
-                "relevance_to_query": "",
-                "evidence_type": "background",
-                "key_metrics": []
-            } for i, p in enumerate(papers)
-        }
+    if not generative_modules:
+        generative_modules = [
+            {
+                "module_id": "direct_answer",
+                "title": "Direct Answer",
+                "order": 100,
+                "purpose": "Give the explicit answer.",
+                "evidence_policy": "evidence_preferred",
+                "requires_citations": True,
+                "target_words": 200,
+            }
+        ]
+    summaries = _fast_summaries(papers, state)
+    summaries = _reclassify_evidence_types(papers, summaries, state)
+    evidence_map = _build_module_evidence_map(plan, papers, summaries, state)
+    max_papers = 5 if depth == "low" else 8
+    max_abstract = 500 if depth == "low" else 900
+    paper_block = _build_paper_block(
+        papers, summaries, max_abstract=max_abstract, max_papers=max_papers,
+    )
+    guardrails = plan.get("domain_guardrails", [])
 
+    references = build_references(papers)
     if state.get("evidence_mode") == "uploaded":
-        answer_text = _run_plain_mode(llm, state, papers, summaries, detailed=(mode == "researched"))
-        ref_ids = [str(i) for i in range(len(papers))]
-        references = build_references(papers)
         references = [r for r in references if r.get("source") == "user_upload"]
-        id_map = paper_id_to_ref_id_map(papers, references)
-        answer_text = rewrite_inline_citations(answer_text, id_map)
-        frontend_references = []
-    else:
-        if mode == "researched":
-            final = _run_researched_mode_json(llm, state, papers, summaries)
-            answer_text = _stitch_research_answer(final)
-            ref_ids = final.references if hasattr(final, 'references') else _select_top_references(papers, summaries, mode, max_refs=8)
-        else:
-            final = _run_normal_mode_json(llm, state, papers, summaries)
-            answer_text = _stitch_normal_answer(final)
-            ref_ids = final.references if hasattr(final, 'references') else _select_top_references(papers, summaries, mode, max_refs=3)
+    id_map = paper_id_to_ref_id_map(papers, references)
 
-        evidence_mode = state.get("evidence_mode", "literature")
-        references = build_references(papers)
-        if evidence_mode == "uploaded":
-            references = [r for r in references if r.get("source") == "user_upload"]
-        id_map = paper_id_to_ref_id_map(papers, references)
-        answer_text = rewrite_inline_citations(answer_text, id_map)
-        selected_refs = [r for i, r in enumerate(references) if str(i) in ref_ids] if references else []
-        frontend_references = references if mode == "researched" else selected_refs
-        if mode == "researched" and frontend_references:
-            answer_text = re.sub(
-                r'\n\n(?:---\n\n)?#{0,4}\s*\*{0,2}(?:References|Bibliography|Works Cited)\*{0,2}\s*\n.*',
-                '',
-                answer_text,
-                flags=re.DOTALL | re.IGNORECASE
-            ).strip()
-            answer_text = answer_text + "\n\n---\n\n**References**\n\n" + format_reference_block(frontend_references)
+    request_id = state.get("_request_id", "")
+    streaming_enabled = bool(request_id and state.get("_streaming_enabled"))
+
+    if streaming_enabled:
+        ordered_ids = [m["module_id"] for m in generative_modules]
+        emitter = _OrderedSectionEmitter(
+            ordered_module_ids=ordered_ids,
+            request_id=request_id,
+            cancel_check=state.get("_cancel_check"),
+        )
+        sections = _generate_all_sections_streaming(
+            generative_modules, paper_block, state, evidence_map,
+            guardrails, plan, depth, emitter, id_map,
+        )
+    else:
+        sections = _generate_all_sections(
+            generative_modules, paper_block, state, evidence_map,
+            guardrails, plan, depth,
+        )
+
+    cited_paper_ids = _collect_cited_paper_ids(sections, papers)
+    if not cited_paper_ids:
+        cited_paper_ids = _select_default_cited_ids(papers, summaries, plan)
+
+    for s in sections:
+        s["content"] = rewrite_inline_citations(_clean_content(s.get("content", "")), id_map)
+
+    cited_ref_ids = set()
+    for pid in cited_paper_ids:
+        if pid in id_map:
+            cited_ref_ids.add(id_map[pid])
+    selected_refs = _select_references(references, cited_ref_ids, plan, papers, summaries)
+    dynamic_confidence = _compute_dynamic_confidence(
+        state, papers, summaries, sections, evidence_map, plan,
+    )
+    answer_text = _merge_sections(sections, plan)
     domain_caveat = state.get("domain_caveat")
+    if guardrails:
+        guardrail_text = " ".join(guardrails)
+        domain_caveat = f"{guardrail_text} {domain_caveat}".strip() if domain_caveat else guardrail_text
     if state.get("low_confidence_results"):
         low_conf_note = (
             "Few strongly relevant papers were found, so the relevance threshold was relaxed. "
             "Treat this answer as a starting point rather than a comprehensive review."
         )
         domain_caveat = f"{domain_caveat} {low_conf_note}" if domain_caveat else low_conf_note
-
+    answer_text = sanitize_for_web(answer_text)
     return {
-        **state,
         "summaries": summaries,
-        "final_answer": answer_text,
+        "final_answer": answer_text.strip(),
         "coverage_gaps": [],
         "domain_caveat": domain_caveat,
-        "references": frontend_references,
+        "references": selected_refs,
+        "section_outputs": sections,
+        "module_evidence_map": evidence_map,
+        "dynamic_confidence": dynamic_confidence,
+        "cited_paper_ids": cited_paper_ids,
+        "report_plan": plan,
     }

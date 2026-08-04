@@ -10,7 +10,7 @@ from app.services.embeddings import embed_texts, similarity
 from app.services.reference_builder import build_references, format_reference_block
 from app.services import cancellation
 from app.services.sse import sse_event, stream_text_chunks
-from app.utils.text_cleaning import normalize_dashes
+from app.utils.text_sanitizer import sanitize_for_web
 
 router = APIRouter()
 
@@ -52,7 +52,7 @@ def followup(req: FollowupRequest):
 
     references = build_references(history.get("papers", []))
 
-    answer_text = normalize_dashes(result.answer)
+    answer_text = sanitize_for_web(result.answer)
     if req.response_mode in ("researched", "graph_research") and references:
         answer_text = answer_text + "\n\n---\n\n**References**\n\n" + format_reference_block(references)
 
@@ -108,7 +108,7 @@ def followup_stream(req: FollowupRequest):
 
             references = build_references(history.get("papers", []))
 
-            answer_text = normalize_dashes(result.answer)
+            answer_text = sanitize_for_web(result.answer)
             if req.response_mode in ("researched", "graph_research") and references:
                 answer_text = answer_text + "\n\n---\n\n**References**\n\n" + format_reference_block(references)
 

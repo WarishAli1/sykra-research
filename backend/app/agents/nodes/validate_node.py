@@ -3,16 +3,19 @@ from datetime import datetime
 
 from app.agents.state import AgentState
 
+
 _SOFT_PENALTY = 0.85
 
 
 def _validate_arxiv_metadata(paper: dict) -> dict:
-    match = re.search(r'(\d{2})(\d{2})\.\d{4,5}', paper.get("link", ""))
+    match = re.search(r"(\d{2})(\d{2})\.\d{4,5}", paper.get("link", ""))
+
     if not match:
         paper["_validation"] = "no_arxiv_id_found"
         return paper
 
     id_year, id_month = int(match.group(1)) + 2000, int(match.group(2))
+
     try:
         pub_date = datetime.strptime(paper["published"], "%Y-%m-%d")
     except (ValueError, KeyError):
@@ -27,7 +30,10 @@ def _validate_arxiv_metadata(paper: dict) -> dict:
     diff = abs(id_ym - pub_ym)
 
     if diff > 1:
-        paper["_validation"] = f"MISMATCH: id implies {id_year}-{id_month:02d}, published={paper['published']} (diff={diff}mo)"
+        paper["_validation"] = (
+            f"MISMATCH: id implies {id_year}-{id_month:02d}, "
+            f"published={paper['published']} (diff={diff}mo)"
+        )
         paper["_validation_severity"] = "high" if diff > 24 else "low"
     else:
         paper["_validation"] = "ok"
@@ -41,7 +47,7 @@ def validate_node(state: AgentState) -> AgentState:
     flags = []
     dropped_count = 0
 
-    for p in state["raw_search_results"]:
+    for p in state.get("raw_search_results", []):
         p = _validate_arxiv_metadata(p)
         validation = p.get("_validation", "")
 
@@ -62,11 +68,12 @@ def validate_node(state: AgentState) -> AgentState:
         validated.append(p)
 
     if dropped_count:
-        print(f"[validate] dropped {dropped_count} paper(s) for unrecoverable metadata issues "
-              f"(kept {len(validated)}/{len(state['raw_search_results'])})")
+        print(
+            f"[validate] dropped {dropped_count} paper(s) for unrecoverable metadata issues "
+            f"(kept {len(validated)}/{len(state.get('raw_search_results', []))})"
+        )
 
     return {
-        **state,
         "raw_search_results": validated,
         "validation_results": flags,
     }

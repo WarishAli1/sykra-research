@@ -1,32 +1,36 @@
+import asyncio
 import time
 import uuid
-
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import SystemMessage, HumanMessage
-
 from app.models.schemas import (
-    ChatRequest, ChatResponse, PaperResult, ReferenceEntry, RegenerateRequest,
-    FollowupRequest, FollowupResponse,
+    ChatRequest,
+    ChatResponse,
+    PaperResult,
+    ReferenceEntry,
+    RegenerateRequest,
+    FollowupRequest,
+    FollowupResponse,
 )
-from app.agents.graph import research_graph
+from app.agents.graph import research_graph, run_enrichment
 from app.agents.state import AgentState
 from app.services.vector_store import vector_store
 from app.services.graph_store import graph_store
-from app.services.llm_client import get_llm
-from app.services.structured_answer import get_followup_answer
-from app.services.embeddings import embed_texts, similarity
-from app.services.reference_builder import build_references, format_reference_block
 from app.services import cancellation
-from app.services.sse import sse_event, progress_event, stream_text_chunks
-from app.utils.text_cleaning import normalize_dashes, normalize_math_fences
+from app.services.sse import (
+    sse_event,
+    progress_event,
+    stream_text_chunks_async,
+    bridge_register,
+    bridge_push,
+    bridge_get,
+    bridge_cleanup,
+    stream_section_words,
+)
+from app.utils.text_sanitizer import sanitize_for_web
 from app.services.filename_service import generate_filename
-from app.services.reference_builder import filter_cited_references
 
 router = APIRouter()
-
-GROUNDED_MAX_TOTAL_CHARS = 24000
-GROUNDED_MAX_CHUNK_CHARS = 2000
 
 
 def _build_initial_state(req: ChatRequest, session_id: str, turn_id: str) -> dict:
@@ -69,27 +73,35 @@ def _build_initial_state(req: ChatRequest, session_id: str, turn_id: str) -> dic
         "needs_revision": False,
         "revision_count": 0,
         "revision_instruction": None,
+        "report_plan": None,
+        "information_needs": [],
+        "complexity_score": 0,
+        "report_depth": "low",
+        "target_word_count": 0,
+        "module_plan": [],
+        "module_evidence_map": {},
+        "section_outputs": [],
+        "dynamic_confidence": None,
+        "cited_paper_ids": [],
+        "report_notice": None,
+        "query_embedding": None,
+        "target_paper_k": 0,
+        "preview_answer": "",
+        "preview_streamed": False,
+        "search_cache_hit": False,
+        "_request_id": "",
+        "_streaming_enabled": False,
+        "_cancel_check": None,
     }
 
 
-def _run_research_graph(req: ChatRequest, session_id: str, turn_id: str) -> ChatResponse:
-    initial_state = _build_initial_state(req, session_id, turn_id)
-    t0 = time.time()
-    final_state = research_graph.invoke(initial_state)
-    elapsed = round(time.time() - t0, 1)
-    print(f"[timing] {elapsed}s | mode={req.response_mode} | query='{req.query}'")
-    return _finalize_chat_response(req, session_id, turn_id, final_state)
-
-
-def _finalize_chat_response(req: ChatRequest, session_id: str, turn_id: str, final_state: dict) -> ChatResponse:
-    ranked_papers = final_state["ranked_papers"]
-
-    papers = [
+def _build_paper_results(ranked_papers: list[dict]) -> list[PaperResult]:
+    return [
         PaperResult(
-            title=p["title"],
-            authors=p["authors"],
+            title=p.get("title", "Untitled"),
+            authors=p.get("authors", []),
             summary=p.get("summary", ""),
-            link=p["link"],
+            link=p.get("link", ""),
             published=p.get("published"),
             relevance_score=p.get("final_score"),
             source=p.get("source", "unknown"),
@@ -99,24 +111,29 @@ def _finalize_chat_response(req: ChatRequest, session_id: str, turn_id: str, fin
         for p in ranked_papers
     ]
 
-    references = [ReferenceEntry(**r) for r in final_state.get("references", [])]
 
-    for p in ranked_papers:
-        try:
-            vector_store.upsert_paper(p, session_id)
-        except Exception as e:
-            print(f"[chat] vector_store persistence failed for '{p.get('title', '?')}': {e}")
-    filename = generate_filename(
-        turn_id,
-        final_state.get("final_answer", "")
-    )
+def _build_stream_response(
+    req: ChatRequest,
+    session_id: str,
+    turn_id: str,
+    final_state: dict,
+) -> ChatResponse:
+    ranked_papers = final_state.get("ranked_papers", [])
+    papers = _build_paper_results(ranked_papers)
+    references = [
+        ReferenceEntry(**r)
+        for r in final_state.get("references", [])
+    ]
+    answer = sanitize_for_web(final_state.get("final_answer", ""))
+    if not answer:
+        answer = sanitize_for_web(final_state.get("preview_answer", ""))
     return ChatResponse(
-        answer=normalize_math_fences(normalize_dashes(final_state.get("final_answer", ""))),
+        answer=answer,
         session_id=session_id,
         turn_id=turn_id,
         papers=papers,
-        filename=filename,
-        citations=final_state["citations"],
+        filename="",
+        citations=final_state.get("citations", []),
         coverage_gaps=final_state.get("coverage_gaps", []),
         domain_caveat=final_state.get("domain_caveat"),
         papers_below_threshold=final_state.get("papers_below_threshold", 0),
@@ -125,76 +142,257 @@ def _finalize_chat_response(req: ChatRequest, session_id: str, turn_id: str, fin
         response_mode=req.response_mode,
         references=references,
         chart_url=final_state.get("chart_url"),
+        report_plan=final_state.get("report_plan"),
+        sections=final_state.get("section_outputs", []),
+        dynamic_confidence=final_state.get("dynamic_confidence"),
+        information_needs=final_state.get("information_needs", []),
+        complexity_score=final_state.get("complexity_score", 0),
+        report_notice=final_state.get("report_notice"),
     )
 
 
+def _finalize_chat_response_blocking(
+    req: ChatRequest,
+    session_id: str,
+    turn_id: str,
+    final_state: dict,
+) -> ChatResponse:
+    ranked_papers = final_state.get("ranked_papers", [])
+    for p in ranked_papers:
+        try:
+            vector_store.upsert_paper(p, session_id)
+        except Exception as e:
+            print(f"[chat] vector_store persistence failed for '{p.get('title', '?')}': {type(e).__name__}: {e}")
+    filename = generate_filename(
+        turn_id,
+        final_state.get("final_answer", ""),
+    )
+    response = _build_stream_response(req, session_id, turn_id, final_state)
+    response.filename = filename
+    return response
+
+
+def _background_persist_and_filename(
+    req: ChatRequest,
+    session_id: str,
+    turn_id: str,
+    final_state: dict,
+) -> str:
+    ranked_papers = final_state.get("ranked_papers", [])
+    for p in ranked_papers:
+        try:
+            vector_store.upsert_paper(p, session_id)
+        except Exception as e:
+            print(f"[chat] background vector_store persistence failed for '{p.get('title', '?')}': {type(e).__name__}: {e}")
+    try:
+        filename = generate_filename(
+            turn_id,
+            final_state.get("final_answer", ""),
+        )
+    except Exception as e:
+        print(f"[chat] background filename generation failed: {type(e).__name__}: {e}")
+        filename = ""
+    return filename
+
+
 @router.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+async def chat(req: ChatRequest):
     session_id = req.session_id or str(uuid.uuid4())
     turn_id = req.turn_id or str(uuid.uuid4())
-
-    return _run_research_graph(req, session_id, turn_id)
+    initial_state = _build_initial_state(req, session_id, turn_id)
+    t0 = time.time()
+    final_state = await research_graph.ainvoke(initial_state)
+    final_state = await asyncio.to_thread(run_enrichment, final_state)
+    elapsed = round(time.time() - t0, 1)
+    print(f"[timing] {elapsed}s | mode={req.response_mode} | query='{req.query}'")
+    return await asyncio.to_thread(
+        _finalize_chat_response_blocking,
+        req,
+        session_id,
+        turn_id,
+        final_state,
+    )
 
 
 @router.post("/chat/stream")
-def chat_stream(req: ChatRequest):
+async def chat_stream(req: ChatRequest):
     if not req.request_id:
         raise HTTPException(status_code=400, detail="request_id is required for /chat/stream.")
-
     request_id = req.request_id
     session_id = req.session_id or str(uuid.uuid4())
     turn_id = req.turn_id or str(uuid.uuid4())
 
-    def event_stream():
+    async def event_stream():
         cancellation.register(request_id)
         try:
             if req.response_mode == "graph_research":
                 graph_store.clear_session(session_id)
 
+            if req.response_mode in ("researched", "graph_research"):
+                yield sse_event(
+                    "notice",
+                    message="Deep research mode can take around 25–35 seconds. Progress will appear as it runs.",
+                )
+
             state: AgentState = _build_initial_state(req, session_id, turn_id)
+            loop = asyncio.get_running_loop()
+            bridge_register(request_id, loop)
+
+            state["_request_id"] = request_id
+            state["_streaming_enabled"] = req.response_mode in ("researched", "graph_research")
+            state["_cancel_check"] = lambda: cancellation.is_cancelled(request_id)
 
             t0 = time.time()
-            try:
-                for update in research_graph.stream(state, stream_mode="updates"):
-                    if cancellation.is_cancelled(request_id):
-                        yield sse_event("cancelled")
-                        return
+            graph_error: list = []
 
-                    for node_name, delta in update.items():
-                        state.update(delta)
+            async def _run_graph():
+                try:
+                    async for update in research_graph.astream(state, stream_mode="updates"):
+                        if cancellation.is_cancelled(request_id):
+                            return
+                        for node_name, delta in update.items():
+                            state.update(delta)
+                            bridge_push(request_id, ("progress", node_name, delta))
+                    bridge_push(request_id, ("graph_done", None))
+                except Exception as e:
+                    print(f"[chat_stream] graph execution failed: {type(e).__name__}: {e}")
+                    graph_error.append(e)
+                    bridge_push(request_id, ("graph_done", None))
 
-                        detail = None
-                        items = None
-                        if node_name in ("plan_query", "search"):
-                            queries = delta.get("search_queries") or state.get("search_queries")
-                            if queries:
-                                detail = queries[0] if isinstance(queries, list) else str(queries)
-                        elif node_name in ("rank", "validate"):
-                            papers = delta.get("ranked_papers") or state.get("ranked_papers")
-                            if papers:
-                                items = [p.get("title", "") for p in papers[:5] if p.get("title")]
+            graph_task = asyncio.create_task(_run_graph())
+            sections_streamed = False
 
-                        yield progress_event(node_name, detail=detail, items=items)
-            except Exception as e:
-                print(f"[chat_stream] graph execution failed: {type(e).__name__}: {e}")
+            while True:
+                if cancellation.is_cancelled(request_id):
+                    yield sse_event("cancelled")
+                    return
+
+                event = await bridge_get(request_id, timeout=0.15)
+
+                if event is None:
+                    if graph_task.done():
+                        break
+                    continue
+
+                etype = event[0]
+
+                if etype == "progress":
+                    node_name, delta = event[1], event[2]
+
+                    if node_name == "quick_preview":
+                        preview = delta.get("preview_answer") or state.get("preview_answer", "")
+                        if preview:
+                            yield progress_event("quick_preview")
+                            preview_status = {}
+                            async for evt in stream_text_chunks_async(
+                                preview,
+                                cancel_check=lambda: cancellation.is_cancelled(request_id),
+                                kind="preview",
+                                status=preview_status,
+                            ):
+                                yield evt
+                            if preview_status.get("completed") is False:
+                                yield sse_event("cancelled")
+                                return
+                            state["preview_streamed"] = True
+                        continue
+
+                    detail = None
+                    items = None
+                    if node_name in ("plan_query", "search", "report_plan"):
+                        queries = delta.get("search_queries") or state.get("search_queries")
+                        if queries:
+                            detail = queries[0] if isinstance(queries, list) else str(queries)
+                    if node_name == "report_plan":
+                        notice = delta.get("report_notice") or state.get("report_notice")
+                        if notice:
+                            yield sse_event("notice", message=notice)
+                    elif node_name in ("rank", "validate"):
+                        papers = delta.get("ranked_papers") or state.get("ranked_papers")
+                        if papers:
+                            items = [p.get("title", "") for p in papers[:5] if p.get("title")]
+                    yield progress_event(node_name, detail=detail, items=items)
+
+                elif etype == "section":
+                    _mid, content = event[1], event[2]
+                    sections_streamed = True
+                    async for evt in stream_section_words(
+                        content,
+                        cancel_check=lambda: cancellation.is_cancelled(request_id),
+                        kind="final",
+                    ):
+                        yield evt
+
+                elif etype == "graph_done":
+                    break
+
+            await graph_task
+
+            if graph_error:
                 yield sse_event("error", message="Something went wrong while generating this answer.")
                 return
 
             elapsed = round(time.time() - t0, 1)
             print(f"[timing] {elapsed}s | mode={req.response_mode} | query='{req.query}' | streamed")
 
-            response = _finalize_chat_response(req, session_id, turn_id, state)
+            if not sections_streamed:
+                final_answer = sanitize_for_web(state.get("final_answer", ""))
+                if not final_answer:
+                    final_answer = sanitize_for_web(state.get("preview_answer", ""))
+                final_status = {}
+                async for evt in stream_text_chunks_async(
+                    final_answer,
+                    cancel_check=lambda: cancellation.is_cancelled(request_id),
+                    kind="final",
+                    status=final_status,
+                ):
+                    yield evt
+                if final_status.get("completed") is False:
+                    yield sse_event("cancelled")
+                    return
 
-            completed = yield from stream_text_chunks(
-                response.answer,
-                cancel_check=lambda: cancellation.is_cancelled(request_id),
-            )
-            if not completed:
-                yield sse_event("cancelled")
-                return
-
+            response = _build_stream_response(req, session_id, turn_id, state)
             yield sse_event("result", payload=response.model_dump())
+
+            if not cancellation.is_cancelled(request_id):
+                enriched_state = await asyncio.to_thread(run_enrichment, dict(state))
+                state.update(enriched_state)
+                if state.get("chart_url"):
+                    yield sse_event(
+                        "artifact",
+                        artifact_type="chart",
+                        url=state.get("chart_url"),
+                        raw_spec=state.get("chart_spec_raw"),
+                    )
+                if state.get("comparison_table_markdown"):
+                    yield sse_event(
+                        "artifact",
+                        artifact_type="comparison_table",
+                        markdown=state.get("comparison_table_markdown"),
+                        caption=state.get("comparison_table_caption"),
+                    )
+                if state.get("graph_entities"):
+                    yield sse_event(
+                        "artifact",
+                        artifact_type="graph_entities",
+                        entities=state.get("graph_entities"),
+                    )
+
+            if not cancellation.is_cancelled(request_id):
+                filename = await asyncio.to_thread(
+                    _background_persist_and_filename,
+                    req,
+                    session_id,
+                    turn_id,
+                    state,
+                )
+                if filename:
+                    yield sse_event("filename", filename=filename)
+
+            yield sse_event("done")
+
         finally:
+            bridge_cleanup(request_id)
             cancellation.cleanup(request_id)
 
     return StreamingResponse(
@@ -216,9 +414,8 @@ def chat_cancel(request_id: str):
 
 
 @router.post("/chat/regenerate", response_model=ChatResponse)
-def regenerate(req: RegenerateRequest):
+async def regenerate(req: RegenerateRequest):
     turn_id = req.turn_id or str(uuid.uuid4())
-
     if req.is_followup:
         followup_req = FollowupRequest(
             session_id=req.session_id,
@@ -227,7 +424,7 @@ def regenerate(req: RegenerateRequest):
             response_mode=req.response_mode,
         )
         from app.api.routes.followup import followup as run_followup
-        result: FollowupResponse = run_followup(followup_req)
+        result: FollowupResponse = await asyncio.to_thread(run_followup, followup_req)
         return ChatResponse(
             answer=result.answer,
             session_id=req.session_id,
@@ -238,12 +435,20 @@ def regenerate(req: RegenerateRequest):
             references=result.references,
             chart_url=result.chart_url,
         )
-
     chat_req = ChatRequest(
         query=req.query,
         session_id=req.session_id,
         turn_id=turn_id,
-        evidence_mode=getattr(req, "evidence_mode", "literature"),
+        evidence_mode=req.evidence_mode,
         response_mode=req.response_mode,
     )
-    return _run_research_graph(chat_req, req.session_id, turn_id)
+    initial_state = _build_initial_state(chat_req, req.session_id, turn_id)
+    final_state = await research_graph.ainvoke(initial_state)
+    final_state = await asyncio.to_thread(run_enrichment, final_state)
+    return await asyncio.to_thread(
+        _finalize_chat_response_blocking,
+        chat_req,
+        req.session_id,
+        turn_id,
+        final_state,
+    )

@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -21,8 +22,14 @@ import {
   FileDown,
   GraduationCap,
   OctagonX,
+  Clock,
+  Gauge,
+  Zap,
+  ChevronDown,
+  Network,
+  Table2,
 } from "lucide-react";
-import type { ChatTurn } from "@/lib/types";
+import type { ChatTurn, DynamicConfidence } from "@/lib/types";
 import { api, ApiError, resolveAssetUrl } from "@/lib/api";
 
 function stripReferencesBlock(text: string): string {
@@ -40,7 +47,7 @@ function stripMarkdown(text: string): string {
   s = s.replace(/\$(.+?)\$/g, "$1");
   s = s.replace(/\*\*(.+?)\*\*/g, "$1");
   s = s.replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, "$1");
-  s = s.replace(/`([^`]+?)`/g, "$1");
+  s = s.replace(/`([^`\n]+?)`/g, "$1");
   s = s.replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1");
   s = s.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
   s = s.replace(/^#{1,6}\s+/gm, "");
@@ -50,25 +57,13 @@ function stripMarkdown(text: string): string {
   return s.trim();
 }
 
-function formatRefPlain(ref: {
-  id: number;
-  title: string;
-  authors?: string[];
-  link?: string;
-  published?: string | null;
-}): string {
+function formatRefPlain(ref: { id: number; title: string; authors?: string[]; link?: string; published?: string | null }): string {
   const authors = ref.authors?.length ? ref.authors.slice(0, 3).join(", ") + ". " : "";
   const year = ref.published ? `(${ref.published})` : "";
   return `[${ref.id}] ${authors}${ref.title}${year}. ${ref.link ?? ""}`;
 }
 
-function formatRefMarkdown(ref: {
-  id: number;
-  title: string;
-  authors?: string[];
-  link?: string;
-  published?: string | null;
-}): string {
+function formatRefMarkdown(ref: { id: number; title: string; authors?: string[]; link?: string; published?: string | null }): string {
   const authors = ref.authors?.length ? `— ${ref.authors.slice(0, 3).join(", ")}` : "";
   const year = ref.published ? `(${ref.published})` : "";
   return `${ref.id}. [${ref.title}](${ref.link ?? ""})${authors}${year}`;
@@ -89,24 +84,30 @@ function downloadTextFile(filename: string, content: string, mime: string) {
 function isMathFenceLine(line: string): boolean {
   return /^[ \t]*\$\$[ \t]*$/.test(line);
 }
+
 function isMathProseBoundary(line: string): boolean {
   return /^[ \t]*$/.test(line) || /^[ \t]*#{1,6}\s/.test(line);
 }
+
 function normalizeMathFences(md: string): string {
   let s = md;
+  s = s.replace(/\$(\d)/g, "USD $1");
+  s = s.replace(/【/g, "[").replace(/】/g, "]")
+    .replace(/（/g, "(").replace(/）/g, ")")
+    .replace(/：/g, ":").replace(/；/g, ";");
+  s = s.replace(/[[【]\s*paper_id\s*[=＝]\s*\d+\s*[]】]/gi, "");
+  s = s.replace(/[\u200b\ufeff]/g, "").replace(/\u00a0/g, " ");
   for (let pass = 0; pass < 2; pass++) {
     s = s.replace(/([^\n])\$\$/g, "$1\n$$");
     s = s.replace(/\$\$([^\n])/g, "$$\n$1");
   }
   s = s.replace(/\n{3,}/g, "\n\n");
-
   const lines = s.split("\n");
   const out: string[] = [];
   let inMath = false;
   const ensureBlank = () => {
     if (out.length && out[out.length - 1].trim() !== "") out.push("");
   };
-
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (isMathFenceLine(line)) {
@@ -133,17 +134,12 @@ function normalizeMathFences(md: string): string {
     }
   }
   if (inMath) out.push("$$");
-
   return out.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
 const markdownComponents = {
   ul({ children, ...props }: any) {
-    return (
-      <ul {...props} className="my-2 space-y-1 pl-1">
-        {children}
-      </ul>
-    );
+    return <ul {...props} className="my-2 space-y-1 pl-1">{children}</ul>;
   },
   ol({ children, ...props }: any) {
     return (
@@ -162,9 +158,7 @@ const markdownComponents = {
     }
     return (
       <li {...props} className="flex gap-2 text-[13.5px] leading-relaxed">
-        <span aria-hidden="true" className="shrink-0 text-ink-soft select-none">
-          •
-        </span>
+        <span aria-hidden="true" className="shrink-0 text-ink-soft select-none">•</span>
         <span className="flex-1">{children}</span>
       </li>
     );
@@ -215,14 +209,139 @@ const markdownComponents = {
   },
 };
 
+function ConfidenceBadge({
+  label,
+  value,
+  invert = false,
+}: {
+  label: string;
+  value?: string | null;
+  invert?: boolean;
+}) {
+  if (!value) return null;
+  let tone: string;
+  if (!invert) {
+    tone =
+      value === "high"
+        ? "text-emerald-700 bg-emerald-50 border-emerald-200"
+        : value === "medium"
+        ? "text-amber-700 bg-amber-50 border-amber-200"
+        : "text-danger bg-danger/5 border-danger/30";
+  } else {
+    tone =
+      value === "low"
+        ? "text-emerald-700 bg-emerald-50 border-emerald-200"
+        : value === "moderate"
+        ? "text-amber-700 bg-amber-50 border-amber-200"
+        : "text-danger bg-danger/5 border-danger/30";
+  }
+  return (
+    <div className="flex flex-col gap-1 rounded-md border border-line bg-paper px-2 py-1.5">
+      <span className="text-[9.5px] font-semibold uppercase tracking-wide text-ink-soft">{label}</span>
+      <span className={`inline-flex w-fit items-center rounded-full border px-1.5 py-0.5 text-[10.5px] font-semibold capitalize ${tone}`}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function DynamicConfidencePanel({ confidence }: { confidence: DynamicConfidence }) {
+  return (
+    <div className="mt-3 rounded-lg border border-line bg-paper-dim/40 px-3 py-2.5 animate-fade-up">
+      <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-soft">
+        <Gauge className="h-3.5 w-3.5 text-indigo" />
+        Confidence & Uncertainty
+      </div>
+      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+        <ConfidenceBadge label="Evidence quality" value={confidence.evidence_quality} />
+        <ConfidenceBadge label="Answer" value={confidence.answer_confidence} />
+        {confidence.prediction_confidence && (
+          <ConfidenceBadge label="Prediction" value={confidence.prediction_confidence} />
+        )}
+        {confidence.recommendation_confidence && (
+          <ConfidenceBadge label="Recommendation" value={confidence.recommendation_confidence} />
+        )}
+        <ConfidenceBadge label="Data completeness" value={confidence.data_completeness} />
+        <ConfidenceBadge label="Uncertainty" value={confidence.uncertainty} invert />
+      </div>
+      {confidence.explanation && (
+        <p className="mt-2 text-[11.5px] leading-relaxed text-ink-soft">{confidence.explanation}</p>
+      )}
+    </div>
+  );
+}
+
+function PreviewAnswer({ preview, hasFinal, streaming }: { preview: string; hasFinal: boolean; streaming: boolean }) {
+  const [open, setOpen] = useState(true);
+  useEffect(() => {
+    if (hasFinal) setOpen(false);
+  }, [hasFinal]);
+
+  const generating = streaming && !hasFinal;
+
+  return (
+    <div className="mb-3 animate-fade-up overflow-hidden rounded-lg border border-gold/35 bg-gold-tint/40">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-gold-tint/70"
+      >
+        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-gold/40 bg-gold/15">
+          <Zap className={`h-3 w-3 text-gold ${generating ? "animate-pulse" : ""}`} />
+        </span>
+        <span className="shrink-0 text-[11px] font-semibold uppercase tracking-[0.08em] text-ink">
+          Quick answer
+        </span>
+        <span className="hidden truncate text-[10.5px] text-ink-soft sm:inline">
+          {generating ? "summarizing…" : hasFinal ? "at a glance · full answer below" : "at a glance"}
+        </span>
+        {generating && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-ink-soft" />}
+        <motion.span
+          animate={{ rotate: open ? 180 : 0 }}
+          transition={{ duration: 0.2 }}
+          className="ml-auto shrink-0"
+        >
+          <ChevronDown className="h-3.5 w-3.5 text-ink-soft" />
+        </motion.span>
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            key="preview-body"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.25, ease: "easeInOut" }}
+            className="overflow-hidden"
+          >
+            <div className="border-t border-gold/25 px-3.5 py-2.5">
+              <div className="prose-chat border-l-2 border-gold/50 pl-3 text-[13px] leading-relaxed text-ink">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm, remarkMath]}
+                  rehypePlugins={[[rehypeKatex, { throwOnError: false, errorColor: "#8a9099" }]]}
+                  components={markdownComponents}
+                >
+                  {normalizeMathFences(preview)}
+                </ReactMarkdown>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 export function ChatMessage({
   turn,
   sessionId,
   onRegenerate,
+  onOpenGraph,
 }: {
   turn: ChatTurn;
   sessionId: string;
   onRegenerate?: () => void | Promise<void>;
+  onOpenGraph?: () => void;
 }) {
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -234,13 +353,18 @@ export function ChatMessage({
 
   useEffect(() => {
     function onClickOutside(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
     }
     document.addEventListener("mousedown", onClickOutside);
     return () => document.removeEventListener("mousedown", onClickOutside);
   }, []);
+
+  const isAssistant = turn.role === "assistant";
+  const rawAnswer = useMemo(
+    () => (isAssistant ? stripReferencesBlock(turn.text) : ""),
+    [turn.text, isAssistant]
+  );
+  const displayAnswer = useMemo(() => normalizeMathFences(rawAnswer), [rawAnswer]);
 
   if (turn.role === "user") {
     return (
@@ -257,7 +381,9 @@ export function ChatMessage({
   const isStreaming = !!turn.streaming;
   const isStopped = !!turn.stopped;
   const hasText = turn.text.trim().length > 0;
+  const hasPreview = !!turn.previewText;
   const showMetadata = !isStreaming;
+  const artifacts = turn.artifacts;
 
   async function handleExport(format: "standard" | "latex") {
     setExporting(true);
@@ -270,7 +396,7 @@ export function ChatMessage({
         answer: turn.text,
         references: turn.references ?? [],
         title: "Research Assistant Answer",
-        chart_path: turn.chartUrl ?? undefined,
+        chart_path: artifacts?.chartUrl ?? turn.chartUrl ?? undefined,
       });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -293,9 +419,7 @@ export function ChatMessage({
     let content = body;
     if (turn.references?.length) {
       content += "\n\n---\n\n## References\n";
-      for (const r of turn.references) {
-        content += "\n" + formatRefMarkdown(r);
-      }
+      for (const r of turn.references) content += "\n" + formatRefMarkdown(r);
     }
     downloadTextFile(`${turn.filename ?? "research-answer"}.md`, content, "text/markdown");
     setMenuOpen(false);
@@ -307,9 +431,7 @@ export function ChatMessage({
     let content = body;
     if (turn.references?.length) {
       content += "\n\nReferences\n";
-      for (const r of turn.references) {
-        content += "\n" + formatRefPlain(r);
-      }
+      for (const r of turn.references) content += "\n" + formatRefPlain(r);
     }
     downloadTextFile(`${turn.filename ?? "research-answer"}.txt`, content, "text/plain");
     setMenuOpen(false);
@@ -331,9 +453,7 @@ export function ChatMessage({
       await navigator.clipboard.writeText(stripReferencesBlock(turn.text));
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard unavailable */
-    }
+    } catch {}
   }
 
   async function handleShare() {
@@ -342,79 +462,129 @@ export function ChatMessage({
       try {
         await navigator.share({ text: shareText });
         return;
-      } catch {
-        /* user dismissed the share sheet */
-      }
+      } catch {}
     }
     await handleCopy();
   }
 
   const hasSteps = !!turn.statusSteps?.length;
-  const showStatusFallback = isStreaming && !!turn.statusLabel && !hasText && !hasSteps;
+  const showStatusFallback = isStreaming && !!turn.statusLabel && !hasText && !hasPreview && !hasSteps;
   const hasBody = hasText || isStopped || regenerating || showMetadata;
 
   return (
     <div className="animate-fade-up space-y-3">
       <div className="rounded-2xl rounded-bl-sm border border-line bg-paper/85 px-4 py-3 shadow-sm shadow-black/5">
-        {hasSteps && (
-          <ResearchSteps embedded steps={turn.statusSteps!} streaming={isStreaming} />
+        {turn.reportNotice && isStreaming && (
+          <div className="mb-2.5 flex items-start gap-2 rounded-md border border-indigo/30 bg-indigo/5 px-2.5 py-2 text-[12px] leading-relaxed text-indigo animate-fade-up">
+            <Clock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{turn.reportNotice}</span>
+          </div>
         )}
+
+        {hasSteps && <ResearchSteps embedded steps={turn.statusSteps!} streaming={isStreaming} />}
+
         {showStatusFallback && (
           <div className="flex items-center gap-2 text-[12.5px] text-ink-soft">
             <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
             <span>{turn.statusLabel}</span>
           </div>
         )}
+
+        {hasPreview && <PreviewAnswer preview={turn.previewText!} hasFinal={hasText} streaming={isStreaming} />}
+
         {hasBody && (
-          <div className={hasSteps ? "border-t border-line pt-3" : ""}>
+          <div className={hasSteps || hasPreview ? "border-t border-line pt-3" : ""}>
             {hasText && (
-              <div className="prose-chat text-[13.5px] leading-relaxed text-ink">
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm, remarkMath]}
-                  rehypePlugins={[[rehypeKatex, { throwOnError: false, errorColor: "#8a9099" }]]}
-                  components={markdownComponents}
-                >
-                  {normalizeMathFences(stripReferencesBlock(turn.text))}
-                </ReactMarkdown>
-                {isStreaming && (
-                  <span
-                    aria-hidden="true"
-                    className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-indigo/70"
-                  />
+              <>
+                {hasPreview && (
+                  <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-soft">
+                    <FileText className="h-3.5 w-3.5" />
+                    Full answer
+                  </div>
                 )}
+                <div className="prose-chat text-[13.5px] leading-relaxed text-ink">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm, remarkMath]}
+                    rehypePlugins={[[rehypeKatex, { throwOnError: false, errorColor: "#8a9099" }]]}
+                    components={markdownComponents}
+                  >
+                    {displayAnswer}
+                  </ReactMarkdown>
+                  {isStreaming && (
+                    <span
+                      aria-hidden="true"
+                      className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-indigo/70"
+                    />
+                  )}
+                </div>
+              </>
+            )}
+
+            {artifacts?.chartUrl && (
+              <figure className="mt-3 animate-fade-up">
+                <img
+                  src={resolveAssetUrl(artifacts.chartUrl) ?? artifacts.chartUrl}
+                  alt="Generated chart"
+                  className="max-w-full max-h-[360px] w-auto h-auto rounded-md border border-line shadow-sm shadow-black/5 object-contain"
+                />
+                <figcaption className="mt-1 text-center text-[11px] text-ink-soft">Generated chart</figcaption>
+              </figure>
+            )}
+
+            {artifacts?.comparisonTableMarkdown && (
+              <div className="mt-3 animate-fade-up">
+                <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-soft">
+                  <Table2 className="h-3.5 w-3.5 text-indigo" />
+                  {artifacts.comparisonTableCaption || "Comparison"}
+                </div>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                  {artifacts.comparisonTableMarkdown}
+                </ReactMarkdown>
               </div>
             )}
+
+            {!!artifacts?.graphEntities?.length && onOpenGraph && (
+              <button
+                onClick={onOpenGraph}
+                className="mt-3 flex items-center gap-1.5 rounded-md border border-indigo/30 bg-indigo/5 px-2.5 py-1.5 text-[11.5px] font-medium text-indigo transition-colors hover:bg-indigo/10 animate-fade-up"
+              >
+                <Network className="h-3.5 w-3.5" />
+                Knowledge graph updated — Explore
+              </button>
+            )}
+
             {isStopped && (
               <div className="mt-2 flex items-center gap-1.5 text-[11.5px] text-ink-soft">
                 <OctagonX className="h-3 w-3 shrink-0" />
                 <span>Generation stopped.</span>
               </div>
             )}
+
             {showMetadata && turn.domainCaveat && (
               <div className="mt-3 flex items-start gap-2 rounded-md bg-gold-tint px-2.5 py-2 text-[12px] text-ink-soft">
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gold" />
                 <span>{turn.domainCaveat}</span>
               </div>
             )}
+
             {showMetadata && !!turn.coverageGaps?.length && (
               <div className="mt-2 text-[12px] text-ink-soft">
                 <span className="font-medium text-ink">Coverage gaps: </span>
                 {turn.coverageGaps.join("; ")}
               </div>
             )}
+
             {showMetadata && !!turn.sources?.length && (
               <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-line pt-2.5">
                 <BookMarked className="h-3.5 w-3.5 text-ink-soft" />
                 {turn.sources.map((s, i) => (
-                  <span
-                    key={i}
-                    className="rounded-full bg-paper-dim px-2 py-0.5 text-[11px] text-ink-soft"
-                  >
+                  <span key={i} className="rounded-full bg-paper-dim px-2 py-0.5 text-[11px] text-ink-soft">
                     {s}
                   </span>
                 ))}
               </div>
             )}
+
             {showMetadata && showReferencesInline && (
               <div className="mt-3 border-t border-line pt-2.5">
                 <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-soft">
@@ -425,12 +595,7 @@ export function ChatMessage({
                   <ol className="space-y-1 text-[12px] text-ink-soft list-decimal list-inside">
                     {turn.references!.map((r) => (
                       <li key={r.id} value={r.id}>
-                        <a
-                          href={r.link}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-indigo hover:underline"
-                        >
+                        <a href={r.link} target="_blank" rel="noopener noreferrer" className="text-indigo hover:underline">
                           {r.title}
                         </a>
                         {r.authors?.length ? ` — ${r.authors.slice(0, 3).join(", ")}` : ""}
@@ -442,12 +607,8 @@ export function ChatMessage({
                   <ul className="space-y-1.5 text-[12.5px]">
                     {turn.references!.map((r) => (
                       <li key={r.id} className="flex items-baseline gap-2">
-                        <a
-                          href={r.link}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-indigo hover:underline font-medium"
-                        >
+                        <span className="shrink-0 text-ink-soft tabular-nums">[{r.id}]</span>
+                        <a href={r.link} target="_blank" rel="noopener noreferrer" className="text-indigo hover:underline font-medium">
                           {r.title}
                         </a>
                         {r.published && <span className="text-ink-soft shrink-0">({r.published})</span>}
@@ -457,24 +618,27 @@ export function ChatMessage({
                 )}
               </div>
             )}
+
             {showMetadata && !showReferencesInline && !!turn.references?.length && (
               <div className="mt-2 text-[11.5px] text-ink-soft">
-                {turn.references.length} reference{turn.references.length === 1 ? "" : "s"} added to
-                Library.
+                {turn.references.length} reference{turn.references.length === 1 ? "" : "s"} added to Library.
               </div>
             )}
+
             {showMetadata && !!turn.papers?.length && (
               <div className="mt-3 flex items-center gap-1.5 border-t border-line pt-2.5 text-[11.5px] text-ink-soft">
                 <BookMarked className="h-3.5 w-3.5 shrink-0" />
                 {turn.papers.length} paper{turn.papers.length === 1 ? "" : "s"} added to Library
               </div>
             )}
+
             {regenerating && (
               <div className="mt-3 flex items-center gap-2 border-t border-line pt-2.5 text-[11.5px] text-ink-soft">
                 <Loader2 className="h-3 w-3 animate-spin" />
                 Regenerating this answer…
               </div>
             )}
+
             {showMetadata && !regenerating && (
               <div className="mt-3 flex items-center gap-1 border-t border-line pt-2.5">
                 <button
@@ -508,9 +672,7 @@ export function ChatMessage({
                   aria-label="Good response"
                   aria-pressed={feedback === "up"}
                   title="Good response"
-                  className={`flex h-6 w-6 items-center justify-center rounded-md hover:bg-paper-dim ${
-                    feedback === "up" ? "text-indigo" : "text-ink-soft hover:text-indigo"
-                  }`}
+                  className={`flex h-6 w-6 items-center justify-center rounded-md hover:bg-paper-dim ${feedback === "up" ? "text-indigo" : "text-ink-soft hover:text-indigo"}`}
                 >
                   <ThumbsUp className="h-3.5 w-3.5" />
                 </button>
@@ -519,9 +681,7 @@ export function ChatMessage({
                   aria-label="Bad response"
                   aria-pressed={feedback === "down"}
                   title="Bad response"
-                  className={`flex h-6 w-6 items-center justify-center rounded-md hover:bg-paper-dim ${
-                    feedback === "down" ? "text-danger" : "text-ink-soft hover:text-danger"
-                  }`}
+                  className={`flex h-6 w-6 items-center justify-center rounded-md hover:bg-paper-dim ${feedback === "down" ? "text-danger" : "text-ink-soft hover:text-danger"}`}
                 >
                   <ThumbsDown className="h-3.5 w-3.5" />
                 </button>
@@ -582,6 +742,7 @@ export function ChatMessage({
                 </div>
               </div>
             )}
+
             {exportError && <div className="mt-1.5 text-[11px] text-danger">{exportError}</div>}
           </div>
         )}
