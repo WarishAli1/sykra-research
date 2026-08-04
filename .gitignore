@@ -13,6 +13,10 @@ backend/app/db/pdf_cache/
 backend/exports/
 backend/node_modules/
 backend/uploads/
+backend/app/db/graph_cache/
+
+package-lock.json
+
 
 .DS_Store
 

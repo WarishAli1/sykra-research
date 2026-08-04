@@ -22,10 +22,62 @@ export type Paper = {
   file_url?: string | null;
 };
 
+export type ConfidenceLevel = "high" | "medium" | "low";
+export type UncertaintyLevel = "low" | "moderate" | "high";
+
+export type DynamicConfidence = {
+  evidence_quality: ConfidenceLevel;
+  answer_confidence: ConfidenceLevel;
+  prediction_confidence?: ConfidenceLevel | null;
+  recommendation_confidence?: ConfidenceLevel | null;
+  data_completeness: ConfidenceLevel;
+  uncertainty: UncertaintyLevel;
+  explanation: string;
+};
+
+export type ReportSection = {
+  module_id: string;
+  title: string;
+  content: string;
+  cited_paper_ids: string[];
+  evidence_status: "strong" | "mixed" | "weak" | "none" | "not_applicable";
+  confidence: ConfidenceLevel;
+};
+
+export type ReportModulePlan = {
+  module_id: string;
+  title: string;
+  importance: number;
+  order?: number;
+  target_words?: number;
+};
+
+export type ReportPlan = {
+  primary_intent: string;
+  secondary_intents?: string[];
+  information_needs: string[];
+  complexity_score: number;
+  depth: "low" | "medium" | "high";
+  target_words: number;
+  reference_policy?: string;
+  reasoning_policy?: string;
+  domain_guardrails?: string[];
+  modules: ReportModulePlan[];
+  latency_notice?: string | null;
+};
+
+export type TurnArtifacts = {
+  chartUrl?: string | null;
+  chartSpecRaw?: string | null;
+  comparisonTableMarkdown?: string | null;
+  comparisonTableCaption?: string | null;
+  graphEntities?: Array<Record<string, unknown>>;
+};
+
 export type ChatTurn = {
   role: "user" | "assistant";
   id: string;
-  turnId?: string; // backend turn_id, used to scope message-level KG queries
+  turnId?: string;
   text: string;
   papers?: Paper[];
   sources?: string[];
@@ -44,7 +96,18 @@ export type ChatTurn = {
   filename?: string;
   sourceQuery?: string;
   sourceEvidenceMode?: EvidenceMode;
-  chartUrl?: string | null; // seaborn chart image path, if one was generated
+  chartUrl?: string | null;
+  /* Quick preview answer streamed before the full report */
+  previewText?: string;
+  /* Late artifacts (chart, comparison table, graph entities) */
+  artifacts?: TurnArtifacts;
+  /* Dynamic report */
+  reportNotice?: string | null;
+  reportPlan?: ReportPlan | null;
+  sections?: ReportSection[];
+  dynamicConfidence?: DynamicConfidence | null;
+  informationNeeds?: string[];
+  complexityScore?: number;
 };
 
 export type ChatRequest = {
@@ -72,6 +135,13 @@ export type ChatResponse = {
   references: ReferenceEntry[];
   chart_url?: string | null;
   filename?: string | null;
+  /* Dynamic report */
+  report_plan?: ReportPlan | null;
+  sections?: ReportSection[];
+  dynamic_confidence?: DynamicConfidence | null;
+  information_needs?: string[];
+  complexity_score?: number;
+  report_notice?: string | null;
 };
 
 export type FollowupRequest = {
@@ -100,8 +170,14 @@ export type RegenerateRequest = {
 
 export type StreamEvent =
   | { type: "progress"; label: string; stage?: string; detail?: string; items?: string[] }
-  | { type: "token"; text: string }
+  | { type: "token"; text: string; kind?: "preview" | "final" }
   | { type: "result"; payload: ChatResponse }
+  | { type: "notice"; message: string }
+  | { type: "artifact"; artifact_type: "chart"; url: string; raw_spec?: string | null }
+  | { type: "artifact"; artifact_type: "comparison_table"; markdown: string; caption?: string | null }
+  | { type: "artifact"; artifact_type: "graph_entities"; entities: Array<Record<string, unknown>> }
+  | { type: "filename"; filename: string }
+  | { type: "done" }
   | { type: "cancelled" }
   | { type: "error"; message: string };
 
@@ -113,22 +189,10 @@ export type StatusStep = {
 };
 
 export type UploadStreamEvent =
-  | {
-      type: "progress";
-      label: string;
-      stage?: string;
-    }
-  | {
-      type: "result";
-      payload: UploadResponse;
-    }
-  | {
-      type: "error";
-      message: string;
-    }
-  | {
-      type: "cancelled";
-    };
+  | { type: "progress"; label: string; stage?: string }
+  | { type: "result"; payload: UploadResponse }
+  | { type: "error"; message: string }
+  | { type: "cancelled" };
 
 export type UploadResponse = {
   filename: string;
@@ -137,7 +201,6 @@ export type UploadResponse = {
   file_url: string;
   link: string;
 };
-
 
 export type ResearchRequest = {
   query: string;
@@ -190,10 +253,14 @@ export type ContradictionsResponse = {
 export type SessionPapersResponse = {
   papers: GraphPaperNode[];
 };
-export type GraphNode = { id: string; name: string; type: string; val: number };
-export type GraphLink = { source: string; target: string; type: string };
-export type FullGraphData = { nodes: GraphNode[]; links: GraphLink[] };
 
+export type GraphNode = {
+  id: string; name: string; type: string; val: number;
+  source?: string; published?: string; authors?: string[];
+  citation_count?: number; excerpt?: string;
+};
+export type GraphLink = { source: string; target: string; type: string; weight?: number };
+export type FullGraphData = { nodes: GraphNode[]; links: GraphLink[] };
 export type GraphScope = "message" | "conversation";
 
 export interface PdfExportRequest {

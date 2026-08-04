@@ -1,5 +1,6 @@
 import numpy as np
 from chromadb.utils import embedding_functions
+
 from app.config import settings
 
 _ef = embedding_functions.SentenceTransformerEmbeddingFunction(
@@ -10,12 +11,13 @@ _ef = embedding_functions.SentenceTransformerEmbeddingFunction(
 def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
-    return _ef(texts)
+    vectors = _ef(texts)
+    return [v.tolist() if hasattr(v, "tolist") else list(v) for v in vectors]
 
 
 def similarity(vec_a: list[float], vec_b: list[float]) -> float:
-    a = np.array(vec_a)
-    b = np.array(vec_b)
+    a = np.asarray(vec_a, dtype=np.float32)
+    b = np.asarray(vec_b, dtype=np.float32)
     norm = np.linalg.norm(a) * np.linalg.norm(b)
     if norm == 0:
         return 0.0

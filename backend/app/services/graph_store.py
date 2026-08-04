@@ -1,3 +1,4 @@
+import time
 from neo4j import GraphDatabase
 from neo4j.exceptions import ServiceUnavailable, SessionExpired
 from app.config import settings
@@ -6,6 +7,7 @@ from app.config import settings
 class GraphStore:
     def __init__(self):
         self.available = True
+        self._unavailable_until = 0.0
         self.driver = GraphDatabase.driver(
             settings.NEO4J_URI, auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
         )
@@ -14,13 +16,17 @@ class GraphStore:
         self.driver.close()
 
     def _safe_run(self, query: str, **params):
+        if not self.available and time.time() < self._unavailable_until:
+            return None
         try:
             with self.driver.session() as session:
                 result = session.run(query, **params)
                 self.available = True
+                self._unavailable_until = 0.0
                 return result
         except (ServiceUnavailable, SessionExpired) as exc:
             self.available = False
+            self._unavailable_until = time.time() + 60.0
             print(f"[graph_store] neo4j unavailable: {type(exc).__name__}: {exc}")
             return None
 
@@ -268,6 +274,17 @@ class GraphStore:
                     src, tgt = r["p.link"], f"method_{r['m.name']}"
                     if src in known_ids and tgt in known_ids:
                         edges.append({"source": src, "target": tgt, "type": "uses"})
+                
+                def link_similar(self, link_a: str, link_b: str, weight: float) -> None:
+                    self._safe_run(
+                        """
+                        MERGE (a:Paper {link: $a})
+                        MERGE (b:Paper {link: $b})
+                        MERGE (a)-[r:SIMILAR]-(b)
+                        SET r.weight = $weight
+                        """,
+                        a=link_a, b=link_b, weight=weight,
+                    )
 
                 return {"nodes": nodes, "links": edges}
         except Exception as e:

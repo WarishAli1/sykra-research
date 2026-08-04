@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useRef, useState, useMemo } from "react";
 import {
   ChevronsLeft,
   ChevronsRight,
@@ -48,6 +48,7 @@ function mergePapers(existing: Paper[], incoming: Paper[]): Paper[] {
 const RAIL_WIDTH = 340;
 const STRIP_WIDTH = 44;
 const SIDEBAR_WIDTH = 224;
+const SIDEBAR_COLLAPSED_WIDTH = 48;
 const PDF_WIDTH_DEFAULT = 50;
 const PDF_WIDTH_MIN = 30;
 const PDF_WIDTH_MAX = 70;
@@ -128,7 +129,10 @@ export function AppShell() {
     setSessionId(crypto.randomUUID());
     setShowGraphView(false);
   };
-
+  const messagePaperLinks = useMemo(() => {
+    const t = [...turns].reverse().find((x) => x.role === "assistant" && x.turnId === lastAssistantTurnId);
+    return t?.papers?.map((p) => p.link).filter(Boolean) ?? [];
+  }, [turns, lastAssistantTurnId]);
   const handleDeletePaper = async (paper: Paper) => {
     setPapers((prev) => prev.filter((p) => p.link !== paper.link));
     const wasActiveUpload =
@@ -210,90 +214,177 @@ export function AppShell() {
   return (
     <div className="flex h-screen bg-paper overflow-hidden">
       <div
-        className="shrink-0 h-full overflow-hidden transition-[width] duration-200 ease-out border-r border-line bg-paper-dim"
-        style={{ width: sidebarOpen ? SIDEBAR_WIDTH : 0 }}
+        className="relative z-30 shrink-0 h-full overflow-hidden transition-[width] duration-200 ease-out border-r border-line bg-paper-dim"
+        style={{ width: sidebarOpen ? SIDEBAR_WIDTH : SIDEBAR_COLLAPSED_WIDTH }}
       >
-        <div className="flex h-full flex-col" style={{ width: SIDEBAR_WIDTH }}>
-          <div className="flex items-center gap-2.5 px-4 py-4 shrink-0">
-            <Image
-              src="/sykra-icon.png"
-              alt="Sykra Research"
-              width={789}
-              height={146}
-              className="w-[150px] h-auto shrink-0 -mt-3"
-              priority
-            />
-            <button
-              onClick={() => setSidebarOpen(false)}
-              aria-label="Collapse sidebar"
-              className="ml-auto flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-ink-soft hover:bg-paper hover:text-ink transition-colors"
-            >
-              <ChevronsLeft className="h-3.5 w-3.5" />
-            </button>
-          </div>
+        {sidebarOpen ? (
+          <div className="flex h-full flex-col" style={{ width: SIDEBAR_WIDTH }}>
+            <div className="flex items-center gap-2.5 px-4 py-4 shrink-0">
+              <Image
+                src="/sykra-icon.png"
+                alt="Sykra Research"
+                width={789}
+                height={146}
+                className="w-[150px] h-auto shrink-0 -mt-3"
+                priority
+              />
+              <button
+                onClick={() => setSidebarOpen(false)}
+                aria-label="Collapse sidebar"
+                className="ml-auto flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-ink-soft hover:bg-paper hover:text-ink transition-colors"
+              >
+                <ChevronsLeft className="h-3.5 w-3.5" />
+              </button>
+            </div>
 
-          <div className="px-3">
+            <div className="px-3">
+              <button
+                onClick={handleNewChat}
+                className="flex w-full items-center gap-2 rounded-lg bg-gold-tint border border-gold/40 px-3 py-2 text-[12.5px] font-medium text-ink hover:bg-gold-tint/70 hover:border-gold/60 transition-colors"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                New Chat
+              </button>
+            </div>
+
+            <div className="mt-5 px-3">
+              <p className="px-1.5 pb-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-ink-soft/70">
+                Workspace
+              </p>
+
+              <button
+                onClick={() => {
+                  setShowGraphView(false);
+                  setTab("library");
+                  setRailOpen(true);
+                }}
+                className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+                  !showGraphView && tab === "library" && railOpen
+                    ? "bg-gold-tint text-ink font-medium"
+                    : "text-ink-soft hover:bg-paper hover:text-ink"
+                }`}
+              >
+                <Library className="h-3.5 w-3.5 shrink-0" />
+                Library
+                {papers.length > 0 && (
+                  <span className="ml-auto rounded-full bg-paper px-1.5 py-0 text-[10px] text-ink-soft">
+                    {papers.length}
+                  </span>
+                )}
+              </button>
+
+              <button
+                onClick={handleOpenGraph}
+                className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+                  showGraphView
+                    ? "bg-gold-tint text-ink font-medium"
+                    : "text-ink-soft hover:bg-paper hover:text-ink"
+                }`}
+              >
+                <Network className="h-3.5 w-3.5 shrink-0" />
+                Explore Graph
+              </button>
+            </div>
+
+            <div className="mt-auto px-4 py-3 text-[10.5px] text-ink-soft/50 shrink-0">
+              AI Research Assistant
+            </div>
+          </div>
+        ) : (
+          <div
+            className="flex h-full flex-col items-center gap-2 py-3"
+            style={{ width: SIDEBAR_COLLAPSED_WIDTH }}
+          >
+            <button
+              onClick={() => setSidebarOpen(true)}
+              aria-label="Expand sidebar"
+              title="Expand sidebar"
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-soft hover:bg-paper hover:text-ink transition-colors"
+            >
+              <PanelLeftOpen className="h-4 w-4" />
+            </button>
+
+            <div className="my-1 h-px w-6 bg-line" aria-hidden="true" />
+
+            {/* New Chat */}
             <button
               onClick={handleNewChat}
-              className="flex w-full items-center gap-2 rounded-lg bg-gold-tint border border-gold/40 px-3 py-2 text-[12.5px] font-medium text-ink hover:bg-gold-tint/70 hover:border-gold/60 transition-colors"
+              aria-label="New chat"
+              title="New chat"
+              className="relative flex h-9 w-9 items-center justify-center rounded-lg text-ink-soft hover:bg-paper hover:text-ink transition-colors"
             >
-              <Plus className="h-3.5 w-3.5" />
-              New Chat
+              <Plus className="h-4 w-4" />
+              <span
+                className="absolute bottom-1.5 h-[2px] w-3.5 rounded-full bg-line/80"
+                aria-hidden="true"
+              />
             </button>
-          </div>
 
-          <div className="mt-5 px-3">
-            <p className="px-1.5 pb-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-ink-soft/70">
-              Workspace
-            </p>
+            {/* Library */}
             <button
               onClick={() => {
                 setShowGraphView(false);
                 setTab("library");
                 setRailOpen(true);
               }}
-              className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+              aria-label="Open library"
+              title="Library"
+              className={`relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
                 !showGraphView && tab === "library" && railOpen
-                  ? "bg-gold-tint text-ink font-medium"
+                  ? "bg-gold-tint text-ink"
                   : "text-ink-soft hover:bg-paper hover:text-ink"
               }`}
             >
-              <Library className="h-3.5 w-3.5 shrink-0" />
-              Library
-              {papers.length > 0 && (
-                <span className="ml-auto rounded-full bg-paper px-1.5 py-0 text-[10px] text-ink-soft">
-                  {papers.length}
-                </span>
+              {!showGraphView && tab === "library" && railOpen && (
+                <span
+                  className="absolute -left-1.5 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-gold"
+                  aria-hidden="true"
+                />
               )}
+
+              <Library className="h-4 w-4" />
+
+              {papers.length > 0 && (
+                <span
+                  className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-gold"
+                  aria-hidden="true"
+                />
+              )}
+
+              <span
+                className="absolute bottom-1.5 h-[2px] w-3.5 rounded-full bg-line/80"
+                aria-hidden="true"
+              />
             </button>
+
+            {/* Explore Graph */}
             <button
               onClick={handleOpenGraph}
-              className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+              aria-label="Open explore graph"
+              title="Explore Graph"
+              className={`relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
                 showGraphView
-                  ? "bg-gold-tint text-ink font-medium"
+                  ? "bg-gold-tint text-ink"
                   : "text-ink-soft hover:bg-paper hover:text-ink"
               }`}
             >
-              <Network className="h-3.5 w-3.5 shrink-0" />
-              Explore Graph
+              {showGraphView && (
+                <span
+                  className="absolute -left-1.5 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-gold"
+                  aria-hidden="true"
+                />
+              )}
+
+              <Network className="h-4 w-4" />
+
+              <span
+                className="absolute bottom-1.5 h-[2px] w-3.5 rounded-full bg-line/80"
+                aria-hidden="true"
+              />
             </button>
           </div>
-
-          <div className="mt-auto px-4 py-3 text-[10.5px] text-ink-soft/50 shrink-0">
-            AI Research Assistant
-          </div>
-        </div>
+        )}
       </div>
-
-      {!sidebarOpen && (
-        <button
-          onClick={() => setSidebarOpen(true)}
-          aria-label="Expand sidebar"
-          className="absolute left-2 top-4 z-10 flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink"
-        >
-          <PanelLeftOpen className="h-4 w-4" />
-        </button>
-      )}
 
       <div ref={containerRef} className="flex flex-1 min-h-0 min-w-0">
         <main className="flex-1 min-w-0">
@@ -310,7 +401,7 @@ export function AppShell() {
                 <span className="w-[90px]" />
               </div>
               <div className="flex-1 min-h-0">
-                <GraphView sessionId={sessionId} activeTurnId={lastAssistantTurnId} />
+                <GraphView sessionId={sessionId} activeTurnId={lastAssistantTurnId} messagePaperLinks={messagePaperLinks} />
               </div>
             </div>
           ) : (
