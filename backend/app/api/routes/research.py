@@ -120,6 +120,34 @@ async def research(req: ResearchRequest):
 class GraphQueryRequest(BaseModel):
     q: str
 
+class GraphViewRequest(BaseModel):
+    scope: str = "conversation"          # "conversation" | "message"
+    paper_links: list[str] | None = None
+    max_year: int | None = None
+
+class GraphPathRequest(GraphViewRequest):
+    a: str
+    b: str
+
+@router.post("/graph/{session_id}/view")
+def graph_view(session_id: str, req: GraphViewRequest):
+    enriched = graph_builder.get_enriched(session_id)
+    links = req.paper_links if (req.scope == "message" and req.paper_links) else None
+    view = graph_builder.filter_view(enriched, links, req.max_year)
+    return {**view, "legend": enriched["legend"], "rel": enriched["rel"],
+            "global_stats": enriched["stats"]}
+
+@router.post("/graph/{session_id}/path")
+def graph_path(session_id: str, req: GraphPathRequest):
+    enriched = graph_builder.get_enriched(session_id)
+    links = req.paper_links if (req.scope == "message" and req.paper_links) else None
+    return {"path": graph_builder.shortest_path(enriched, req.a, req.b, links, req.max_year)}
+
+@router.get("/graph/{session_id}/suggest")
+def graph_suggest(session_id: str, q: str = ""):
+    return {"matches": graph_builder.suggest_nodes(graph_builder.get_enriched(session_id), q)}
+    
+
 @router.post("/graph/{session_id}/query")
 def graph_query(session_id: str, req: GraphQueryRequest):
     return {"matches": graph_builder.semantic_query(session_id, req.q)}

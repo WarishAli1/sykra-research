@@ -35,6 +35,25 @@ export type DynamicConfidence = {
   explanation: string;
 };
 
+export type GraphStats = {
+  nodes: number; links: number; papers: number; concepts: number;
+  methods: number; datasets: number; density: number; avg_degree: number;
+  top_concept: string | null;
+  top_paper: { id: string; name: string; citation_count: number } | null;
+  min_year: number | null; max_year: number | null;
+};
+export type LegendEntry = { name: string; cluster?: number; kind?: "method" | "dataset" | "paper" };
+export type NodeRel = { concepts: string[]; methods: string[]; datasets: string[]; papers: { id: string; name: string }[] };
+export type GraphViewRequest = { scope: GraphScope; paper_links?: string[]; max_year?: number | null };
+export type GraphViewResponse = {
+  nodes: GraphNode[]; links: GraphLink[]; stats: GraphStats;
+  global_stats: GraphStats; legend: LegendEntry[]; rel: Record<string, NodeRel>;
+};
+export type GraphPathRequest = GraphViewRequest & { a: string; b: string };
+export type GraphPathResponse = { path: { nodes: string[]; links: [string, string][]; hops: number } | null };
+export type SuggestMatch = { id: string; name: string; type: string; score: number };
+
+
 export type ReportSection = {
   module_id: string;
   title: string;
@@ -258,6 +277,7 @@ export type GraphNode = {
   id: string; name: string; type: string; val: number;
   source?: string; published?: string; authors?: string[];
   citation_count?: number; excerpt?: string;
+  degree?: number; cluster?: number | null; year?: number | null;
 };
 export type GraphLink = { source: string; target: string; type: string; weight?: number };
 export type FullGraphData = { nodes: GraphNode[]; links: GraphLink[] };

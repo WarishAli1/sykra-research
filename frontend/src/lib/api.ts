@@ -13,6 +13,11 @@ import type {
   StreamEvent,
   UploadResponse,
   UploadStreamEvent,
+  GraphViewRequest,
+  GraphPathResponse,
+  GraphViewResponse,
+  GraphPathRequest,
+  SuggestMatch,
 } from "./types";
 
 export class ApiError extends Error {
@@ -283,6 +288,24 @@ export const api = {
       `/graph/${encodeURIComponent(sessionId)}/turn/${encodeURIComponent(turnId)}/full`,
       { method: "GET" }
     );
+  },
+
+  graphView(sessionId: string, payload: GraphViewRequest): Promise<GraphViewResponse> {
+    return request<GraphViewResponse>(`/graph/${encodeURIComponent(sessionId)}/view`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  },
+  graphPath(sessionId: string, payload: GraphPathRequest): Promise<GraphPathResponse> {
+    return request<GraphPathResponse>(`/graph/${encodeURIComponent(sessionId)}/path`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  },
+  suggestGraph(sessionId: string, q: string): Promise<{ matches: SuggestMatch[] }> {
+    return request(`/graph/${encodeURIComponent(sessionId)}/suggest${queryString({ q })}`, { method: "GET" });
   },
 
   exportPdf(payload: PdfExportRequest): Promise<Blob> {

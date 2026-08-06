@@ -5,6 +5,7 @@ import os
 import re
 import threading
 import time
+from collections import deque
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from pydantic import BaseModel, Field
@@ -15,7 +16,165 @@ from app.services.vector_store import vector_store
 from app.services.embeddings import embed_texts, similarity
 from app.services.graph_store import graph_store
 
-CACHE_SCHEMA = 2
+CACHE_SCHEMA = 3
+
+def _compute_stats(nodes: list[dict], links: list[dict]) -> dict:
+    papers = [n for n in nodes if n["type"] == "paper"]
+    concepts = [n for n in nodes if n["type"] == "concept"]
+    methods = [n for n in nodes if n["type"] == "method"]
+    datasets = [n for n in nodes if n["type"] == "dataset"]
+    n, m = len(nodes), len(links)
+    years = [p["year"] for p in papers if p.get("year") is not None]
+    top_concept = max(concepts, key=lambda x: x.get("degree", 0)) if concepts else None
+    top_paper = max(papers, key=lambda x: x.get("citation_count", 0) or 0) if papers else None
+    return {
+        "nodes": n, "links": m,
+        "papers": len(papers), "concepts": len(concepts),
+        "methods": len(methods), "datasets": len(datasets),
+        "density": (2 * m) / (n * (n - 1)) if n > 1 else 0.0,
+        "avg_degree": (2 * m) / n if n else 0.0,
+        "top_concept": top_concept["name"] if top_concept else None,
+        "top_paper": ({"id": top_paper["id"], "name": top_paper["name"],
+                       "citation_count": top_paper.get("citation_count", 0)} if top_paper else None),
+        "min_year": min(years) if years else None,
+        "max_year": max(years) if years else None,
+    }
+
+def _enrich(graph: dict) -> dict:
+    """Precompute everything the frontend used to compute: degrees, cluster
+    ids, years, legend, rel map, stats. Cached with the graph."""
+    nodes = [dict(n) for n in graph.get("nodes", [])]
+    by_id = {n["id"]: n for n in nodes}
+    links = [dict(l) for l in graph.get("links", [])
+             if l["source"] in by_id and l["target"] in by_id]
+    degree: dict[str, int] = {}
+    for l in links:
+        degree[l["source"]] = degree.get(l["source"], 0) + 1
+        degree[l["target"]] = degree.get(l["target"], 0) + 1
+    for n in nodes:
+        n["degree"] = degree.get(n["id"], 0)
+        y = str(n.get("published") or "")[:4]
+        n["year"] = int(y) if y.isdigit() else None
+    concepts = sorted((n for n in nodes if n["type"] == "concept"),
+                      key=lambda x: -x.get("degree", 0))
+    cluster_idx = {c["id"]: i for i, c in enumerate(concepts)}
+    paper_cluster: dict[str, int] = {}
+    for l in links:
+        if l["type"] == "discusses" and l["source"] not in paper_cluster and l["target"] in cluster_idx:
+            paper_cluster[l["source"]] = cluster_idx[l["target"]]
+    for n in nodes:
+        if n["type"] == "concept":
+            n["cluster"] = cluster_idx[n["id"]]
+        elif n["type"] == "paper":
+            n["cluster"] = paper_cluster.get(n["id"])
+    rel: dict[str, dict] = {}
+    def rel_of(i: str) -> dict:
+        return rel.setdefault(i, {"concepts": [], "methods": [], "datasets": [], "papers": []})
+    for l in links:
+        s, t = by_id[l["source"]], by_id[l["target"]]
+        if l["type"] == "discusses": rel_of(l["source"])["concepts"].append(t["name"])
+        elif l["type"] == "uses": rel_of(l["source"])["methods"].append(t["name"])
+        elif l["type"] == "evaluates": rel_of(l["source"])["datasets"].append(t["name"])
+        elif l["type"] in ("cites", "similar"):
+            rel_of(l["source"])["papers"].append({"id": t["id"], "name": t["name"]})
+            rel_of(l["target"])["papers"].append({"id": s["id"], "name": s["name"]})
+    methods = [n for n in nodes if n["type"] == "method"]
+    datasets = [n for n in nodes if n["type"] == "dataset"]
+    legend: list[dict] = [{"name": c["name"], "cluster": cluster_idx[c["id"]]} for c in concepts[:5]]
+    if methods: legend.append({"name": "methods", "kind": "method"})
+    if datasets: legend.append({"name": "datasets", "kind": "dataset"})
+    legend.append({"name": "unclustered papers", "kind": "paper"})
+    return {"nodes": nodes, "links": links, "stats": _compute_stats(nodes, links),
+            "legend": legend, "rel": rel}
+
+def get_enriched(session_id: str, force: bool = False) -> dict:
+    if not settings.GRAPH_ENABLED:
+        return {"nodes": [], "links": [], "stats": _compute_stats([], []), "legend": [], "rel": {}}
+    cache = _load_cache(session_id)
+    if force or cache.get("schema") != CACHE_SCHEMA or not cache.get("enriched"):
+        build_session_graph(session_id, force=force)
+        cache = _load_cache(session_id)
+    return cache.get("enriched") or _enrich(cache.get("graph") or {"nodes": [], "links": []})
+
+def filter_view(enriched: dict, paper_links: list[str] | None = None,
+                max_year: int | None = None) -> dict:
+    """Server-side scope + year filtering (was O(n·m) in the browser)."""
+    nodes, links = enriched["nodes"], enriched["links"]
+    if paper_links is not None:
+        wanted = set(paper_links)
+        keep = {n["id"] for n in nodes if n["type"] == "paper" and n["id"] in wanted}
+        for l in links:
+            if l["source"] in keep or l["target"] in keep:
+                keep.add(l["source"]); keep.add(l["target"])
+        nodes = [n for n in nodes if n["id"] in keep]
+        links = [l for l in links if l["source"] in keep and l["target"] in keep]
+    if max_year is not None:
+        by_id = {n["id"]: n for n in nodes}
+        keep = {n["id"] for n in nodes
+                if n["type"] == "paper" and (n.get("year") is None or n["year"] <= max_year)}
+        for l in links:
+            s, t = by_id[l["source"]], by_id[l["target"]]
+            if (l["source"] in keep and (t["type"] != "paper" or l["target"] in keep)) or \
+               (l["target"] in keep and (s["type"] != "paper" or l["source"] in keep)):
+                keep.add(l["source"]); keep.add(l["target"])
+        nodes = [n for n in nodes if n["id"] in keep]
+        links = [l for l in links if l["source"] in keep and l["target"] in keep]
+    return {"nodes": nodes, "links": links, "stats": _compute_stats(nodes, links)}
+
+def suggest_nodes(enriched: dict, q: str, top_k: int = 8) -> list[dict]:
+    """Fast lexical typeahead: exact > prefix > token-prefix > substring > subsequence."""
+    query = (q or "").strip().lower()
+    if len(query) < 2:
+        return []
+    out = []
+    for n in enriched["nodes"]:
+        name = (n.get("name") or "").lower()
+        if not name:
+            continue
+        if name == query: score = 1.0
+        elif name.startswith(query): score = 0.9
+        elif any(tok.startswith(query) for tok in name.split()): score = 0.8
+        elif query in name: score = 0.7
+        else:
+            it = iter(name)
+            score = 0.5 if all(ch in it for ch in query) else 0.0
+        if score <= 0:
+            continue
+        if n["type"] == "paper":
+            score += 0.05
+        out.append({"id": n["id"], "name": n["name"], "type": n["type"], "score": round(score, 3)})
+    out.sort(key=lambda x: -x["score"])
+    return out[:top_k]
+
+def shortest_path(enriched: dict, a: str, b: str,
+                  paper_links: list[str] | None = None,
+                  max_year: int | None = None) -> dict | None:
+    """BFS over the *same filtered view* the user is looking at."""
+    view = filter_view(enriched, paper_links, max_year)
+    adj: dict[str, list[str]] = {}
+    for l in view["links"]:
+        adj.setdefault(l["source"], []).append(l["target"])
+        adj.setdefault(l["target"], []).append(l["source"])
+    prev: dict[str, str] = {}
+    seen = {a}
+    dq = deque([a])
+    while dq:
+        cur = dq.popleft()
+        if cur == b:
+            break
+        for nxt in adj.get(cur, []):
+            if nxt in seen:
+                continue
+            seen.add(nxt); prev[nxt] = cur; dq.append(nxt)
+    if b not in seen:
+        return None
+    chain = [b]
+    while chain[-1] != a:
+        chain.append(prev[chain[-1]])
+    chain.reverse()
+    return {"nodes": chain,
+            "links": [[chain[i], chain[i + 1]] for i in range(len(chain) - 1)],
+            "hops": len(chain) - 1}
 
 
 class PaperEntities(BaseModel):
@@ -44,14 +203,14 @@ Return one PaperEntities entry per paper, in the same order.
 Return a BatchPaperEntities JSON object.
 """
 
-_locks: dict[str, threading.Lock] = {}
+_locks: dict[str, threading.RLock] = {}
 _locks_guard = threading.Lock()
 
 
-def _session_lock(session_id: str) -> threading.Lock:
+def _session_lock(session_id: str) -> threading.RLock:
     with _locks_guard:
         if session_id not in _locks:
-            _locks[session_id] = threading.Lock()
+            _locks[session_id] = threading.RLock()
         return _locks[session_id]
 
 
@@ -339,6 +498,7 @@ def build_session_graph(session_id: str, force: bool = False) -> dict:
             "cites_map": cites_map,
             "cites": cites_edges,
             "graph": graph,
+            "enriched": _enrich(graph),
         })
         _mirror_neo4j(session_id, papers_meta, entities, graph)
         return graph
