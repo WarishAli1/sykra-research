@@ -254,19 +254,18 @@ def get_cached_paper_embedding(paper_fingerprint: str) -> list[float] | None:
 def batch_get_paper_embeddings(
     fingerprints: list[str],
 ) -> dict[str, list[float]]:
+    if not fingerprints:
+        return {}
+    unique_ids = list(dict.fromkeys(fingerprints))
     col = _get_paper_embed_collection()
-
     result = col.get(
-        ids=fingerprints,
+        ids=unique_ids,
         include=["embeddings"],
     )
-
     out = {}
-
     for fp, emb in zip(result["ids"], result["embeddings"]):
         if emb is not None:
             out[fp] = emb
-
     return out
 
 

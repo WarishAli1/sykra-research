@@ -93,7 +93,7 @@ export function GraphView({
   const [sugOpen, setSugOpen] = useState(false);
   const [hoverLink, setHoverLink] = useState<RichLink | null>(null);
   const [theme, setTheme] = useState<Theme>(() => {
-    try { return (localStorage.getItem("graph-theme") as Theme) || "dark"; } catch { return "dark"; }
+    try { return (localStorage.getItem("graph-theme") as Theme) || "light"; } catch { return "light"; }
   });
   const [nonce, setNonce] = useState(0);
 
@@ -184,7 +184,6 @@ export function GraphView({
     return () => ro.disconnect();
   }, []);
 
-  /* ---------- presentation mapping (colors/radii) ---------- */
   const colored = useMemo(() => {
     if (!view) return null;
     const nodes: RichNode[] = view.nodes.map((n) => {
@@ -219,7 +218,6 @@ export function GraphView({
     return { nodes, links, nodeById };
   }, [view]);
 
-  /* ---------- LOCAL year filter ---------- */
   const visible = useMemo(() => {
     if (!colored) return null;
     let nodes = colored.nodes;
@@ -250,8 +248,6 @@ export function GraphView({
     return { nodes, links, stats };
   }, [colored, yearCut]);
 
-  // Memoize graphData so hover state updates don't accidentally recreate the wrapper object 
-  // and cause react-force-graph to re-ingest data and restart the physics simulation
   const graphDataObj = useMemo(
     () => (visible && visible.nodes.length
       ? { nodes: visible.nodes as any, links: visible.links as any }
@@ -273,7 +269,6 @@ export function GraphView({
       setSelectedNode(n); setTrail([n]);
       spotlightMany([id]);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [colored]);
 
   const focusNode = trail.length ? trail[trail.length - 1] : null;
@@ -291,7 +286,6 @@ export function GraphView({
     fxRef.current = { focus: focusSet, focusId: focusNode?.id ?? null, hl: highlightSet, path: pathResult };
   }, [focusSet, focusNode, highlightSet, pathResult]);
 
-  /* ---------- physics: compact clusters + slow, smooth settling ---------- */
   useEffect(() => {
     const fg = fgRef.current;
     if (!fg || !colored?.nodes.length || typeof fg.d3Force !== "function") return;
@@ -305,7 +299,6 @@ export function GraphView({
       link.distance((l: any) =>
         (({ similar: 30, cites: 26, discusses: 18, uses: 15, evaluates: 15 } as Record<string, number>)[l.type] ?? 24) * scale);
     }
-    // Stronger gravity keeps disconnected clusters neighbors instead of flying apart
     const g = n <= 30 ? 0.18 : n <= 60 ? 0.12 : 0.08;
     fg.d3Force("x", forceX(0).strength(g) as any);
     fg.d3Force("y", forceY(0).strength(g) as any);
@@ -419,7 +412,6 @@ export function GraphView({
     ctx.font = `${node._weight} ${fontSize}px ui-sans-serif, system-ui`;
     ctx.textAlign = "center"; ctx.textBaseline = "top";
     ctx.fillText(node._label, node.x, node.y + r + 2 + padY);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [labelsAuto, selectedNode, theme]);
 
   const paintLink = useCallback((link: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
@@ -446,7 +438,6 @@ export function GraphView({
     ctx.fillStyle = T.linkText[link.type] ?? T.linkText.default;
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.fillText(label, midX, midY);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [theme]);
 
   const paintPointer = useCallback((node: any, color: string, ctx: CanvasRenderingContext2D) => {
@@ -519,7 +510,6 @@ export function GraphView({
     setTrail((prev) => [...prev.filter((p) => p.id !== n.id), n]);
   };
   
-  // Full "Galaxy" reset: breadcrumb, selection, highlights, path, trace mode
   const onBackgroundClick = () => {
     setSelectedNode(null); setHighlightSet(null); setPathResult(null); 
     setPathA(null); setPathMode(false); setTrail([]);
@@ -725,7 +715,7 @@ export function GraphView({
           )}
 
           {/* controls */}
-          <div className={`absolute top-3 right-3 flex flex-col gap-0.5 rounded-lg border p-1 ${ui.panel}`}>
+          <div className={`absolute top-3 right-3 z-20 flex flex-col gap-0.5 rounded-lg border p-1 ${ui.panel}`}>
             <button className={ctrlBtn} title="Zoom in" onClick={() => zoomBy(1.5)}><ZoomIn className="h-3.5 w-3.5" /></button>
             <button className={ctrlBtn} title="Zoom out" onClick={() => zoomBy(1 / 1.5)}><ZoomOut className="h-3.5 w-3.5" /></button>
             <button className={ctrlBtn} title="Fit to view" onClick={fit}><Maximize2 className="h-3.5 w-3.5" /></button>
@@ -882,20 +872,20 @@ export function GraphView({
           )}
 
           {loading && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/30">
+            <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/30">
               <Loader2 className="h-5 w-5 animate-spin text-indigo-400" />
               <p className={`text-[12px] ${theme === "dark" ? "text-white/60" : "text-slate-500"}`}>Mapping your research galaxy…</p>
             </div>
           )}
           {!loading && error && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+            <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3">
               <AlertTriangle className="h-5 w-5 text-red-400" />
               <p className={`text-[12px] ${theme === "dark" ? "text-white/60" : "text-slate-500"}`}>{error}</p>
-              <button onClick={() => setNonce(n => n + 1)} className="rounded-md bg-indigo-500 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-indigo-400">Retry</button>
+              <button onClick={() => setNonce(n => n + 1)} className="pointer-events-auto rounded-md bg-indigo-500 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-indigo-400">Retry</button>
             </div>
           )}
           {!loading && !error && (!visible || visible.nodes.length === 0) && (
-            <div className="absolute inset-0 flex items-center justify-center">
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
               <p className={`text-[12.5px] ${theme === "dark" ? "text-white/50" : "text-slate-500"}`}>
                 {scope === "message" ? "No papers were surfaced in this message. Switch to Whole Conversation."
                   : yearCut != null ? "Nothing published this early yet — drag the year slider right."

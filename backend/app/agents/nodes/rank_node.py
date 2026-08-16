@@ -1,263 +1,757 @@
 import math
+import re as _re
 from datetime import datetime
-
+from pydantic import BaseModel, Field
+from langchain_core.messages import SystemMessage, HumanMessage
+from app.agents.research_engine import (
+    assess_coverage,
+    derive_research_needs,
+    merge_duplicate_papers,
+    need_overlap_score,
+)
+from app.agents.schemas import PaperJudgment
 from app.agents.state import AgentState
 from app.services.embeddings import embed_texts, similarity
 from app.services.paper_search import fetch_openalex_citation_graph
+from app.services.llm_client import get_llm, is_llm_rate_limited
 from app.config import settings
 
-
 CURRENT_YEAR = datetime.now().year
+MIN_ABSTRACT_LENGTH = 40
+PRE_FILTER_N = 48
+SOURCE_ROLE_PRIMARY = "primary"
+SOURCE_ROLE_SECONDARY = "secondary"
+SOURCE_ROLE_SURVEY = "survey"
+SOURCE_ROLE_BACKGROUND = "background"
+SOURCE_ROLE_APPLICATION = "application"
 
-PRE_FILTER_N = 30
-MMR_LAMBDA = 0.85
-MIN_ABSTRACT_LENGTH = 50
+def _coerce_float01(value, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return 1.0 if value else 0.0
+        v = float(value)
+    except Exception:
+        return default
+    return max(0.0, min(1.0, v))
 
-_RELAXATION_TIERS = [1.0, 0.7, 0.45, 0.25]
-_ABSOLUTE_FLOOR = 0.08
+def _normalize_str_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [str(x) for x in value if x is not None and str(x).strip()]
+    return []
 
-_FOUNDATION_SOURCE_BONUS = {
-    "citation_backtrack": 0.20,
-    "precision": 0.10,
-    "generic": 0.0,
-}
+def _normalize_judgments(raw, candidate_count: int) -> dict[int, dict]:
+    items = []
+    if isinstance(raw, dict):
+        if isinstance(raw.get("judgments"), list):
+            items = raw["judgments"]
+        elif isinstance(raw.get("papers"), list):
+            items = raw["papers"]
+        elif isinstance(raw.get("results"), list):
+            items = raw["results"]
+        elif isinstance(raw.get("items"), list):
+            items = raw["items"]
+        else:
+            for k, v in raw.items():
+                if isinstance(v, dict):
+                    v = dict(v)
+                    v.setdefault("paper_id", k)
+                    items.append(v)
+    elif isinstance(raw, list):
+        items = raw
 
+    out: dict[int, dict] = {}
+    allowed_roles = {
+        "primary", "secondary", "survey", "application", "background", "irrelevant",
+    }
 
-def _paper_key(p: dict) -> str:
-    return p.get("link") or p.get("title", "").strip().lower()
+    for idx, item in enumerate(items[:candidate_count]):
+        if not isinstance(item, dict):
+            continue
+        pid = item.get("paper_id", item.get("id", item.get("index", idx)))
+        try:
+            pid = int(pid)
+        except Exception:
+            pid = idx
+        if pid < 0 or pid >= candidate_count:
+            pid = idx
 
+        answers_raw = next(
+            (
+                item[k]
+                for k in (
+                    "answers_question", "answer_relevance", "relevance",
+                    "relevance_score", "question_relevance", "support_score",
+                    "overall_score", "score", "fit",
+                )
+                if item.get(k) is not None
+            ),
+            None,
+        )
+        primary_raw = next(
+            (
+                item[k]
+                for k in (
+                    "primary_source_fit", "primary_fit", "primary_score",
+                    "primary_source_score", "canonical_fit", "origin_fit",
+                )
+                if item.get(k) is not None
+            ),
+            None,
+        )
+        role = str(
+            item.get("source_role") or item.get("role")
+            or item.get("source_type") or "background"
+        ).lower().strip()
+        if role not in allowed_roles:
+            role = "background"
+
+        coverage = item.get(
+            "requirement_coverage",
+            item.get("requirements", item.get("requirement_ids", item.get("coverage", []))),
+        )
+        out[pid] = {
+            "answers_question": _coerce_float01(answers_raw, 0.0),
+            "primary_source_fit": _coerce_float01(primary_raw, 0.0),
+            "source_role": role,
+            "reason": str(item.get("reason") or "")[:500],
+            "requirement_coverage": _normalize_str_list(coverage),
+        }
+    return out
+
+class PaperJudgmentBatch(BaseModel):
+    judgments: list[PaperJudgment] = Field(default_factory=list)
 
 def _has_valid_abstract(paper: dict) -> bool:
-    return len(paper.get("summary", "").strip()) >= MIN_ABSTRACT_LENGTH
+    return len((paper.get("summary") or "").strip()) >= MIN_ABSTRACT_LENGTH
 
-
-def _citation_score(citations) -> float:
-    return math.log(1 + (citations or 0)) / math.log(1 + 100_000)
-
+def _citation_score(citations: int) -> float:
+    return math.log(1 + max(citations or 0, 0)) / math.log(1 + 100_000)
 
 def _recency_score(published: str) -> float:
     try:
         year = int(str(published)[:4])
-    except (ValueError, TypeError):
-        return 0.3
+    except Exception:
+        return 0.35
+    age = max(CURRENT_YEAR - year, 0)
+    return max(0.0, 1 - age / 15)
 
-    return max(0.0, 1 - max(CURRENT_YEAR - year, 0) / 15)
+def _is_review(title: str) -> bool:
+    t = (title or "").lower()
+    return any(k in t for k in ("survey", "review", "systematic review", "meta-analysis", "overview"))
 
+def _paper_type_bonus(paper: dict, needs: list) -> float:
+    wants_overview = any("overview" in n.text.lower() or "background" in n.text.lower() for n in needs)
+    is_review = _is_review(paper.get("title", ""))
+    if is_review and wants_overview:
+        return 0.08
+    if is_review and not wants_overview:
+        return -0.06
+    return 0.04
 
-def _infer_paper_type(title: str, citations: int, published: str) -> str:
-    t = title.lower()
+def _source_authority_score(paper: dict) -> float:
+    source = (paper.get("source") or "").lower()
+    cites = paper.get("citation_count", 0) or 0
+    base = _citation_score(cites)
+    if "openalex" in source:
+        return min(1.0, base + 0.08)
+    if "arxiv" in source:
+        return min(1.0, base + 0.04)
+    if "web" in source:
+        return min(1.0, base + 0.02)
+    return base
 
-    if any(k in t for k in ("survey", "review", "overview", "systematic review", "meta-analysis")):
-        return "survey"
+def _query_alignment_score(paper: dict, query: str, needs: list) -> float:
+    text = " ".join(
+        [
+            paper.get("title", ""),
+            (paper.get("summary") or "")[:1600],
+            " ".join(paper.get("keywords") or []),
+        ]
+    )
+    base = need_overlap_score(query, text)
+    if not needs:
+        return base
+    need_scores = [need_overlap_score(n.text, text) * n.priority for n in needs]
+    if not need_scores:
+        return base
+    return 0.55 * base + 0.45 * (sum(need_scores) / max(sum(n.priority for n in needs), 1e-6))
 
-    if any(k in t for k in ("benchmark", "evaluation", "comparison", "randomized controlled trial", "clinical trial")):
-        return "evaluation"
+def _primary_source_score(paper: dict, answer_spec: dict) -> float:
+    if not answer_spec.get("primary_source_required"):
+        return 0.0
+    score = 0.0
+    title = (paper.get("title") or "").lower()
+    for entity in answer_spec.get("canonical_entities", []):
+        expected = (entity.get("expected_primary_source") or "").lower()
+        if expected and expected in title:
+            score = max(score, 1.0)
+        for alias in entity.get("aliases", []):
+            if alias.lower() in title:
+                score = max(score, 0.7)
+    if paper.get("_primary_candidate"):
+        score = max(score, 0.8)
+    citations = paper.get("citation_count", 0) or 0
+    if citations >= 10000:
+        score += 0.15
+    elif citations >= 2000:
+        score += 0.10
+    elif citations >= 500:
+        score += 0.05
+    return min(score, 1.0)
 
-    if any(k in t for k in ("efficient", "accelerat", "compress", "optimiz")):
-        return "optimization"
+def _canonical_entity_score(paper: dict, answer_spec: dict) -> float:
+    title = (paper.get("title") or "").lower()
+    score = 0.0
+    for entity in answer_spec.get("canonical_entities", []):
+        names = [entity.get("name") or ""]
+        names.extend(entity.get("aliases") or [])
+        for name in names:
+            name = name.strip().lower()
+            if name and name in title:
+                score = max(score, 0.8)
+    return score
 
+def _origin_year_score(paper: dict, answer_spec: dict) -> float:
     try:
-        year = int(str(published)[:4])
-        if (citations or 0) > 3000 and (CURRENT_YEAR - year) > 3:
-            return "foundational"
-    except (ValueError, TypeError):
-        pass
+        year = int(str(paper.get("published") or "")[:4])
+    except (TypeError, ValueError):
+        return 0.0
+    score = 0.0
+    for entity in answer_spec.get("canonical_entities", []):
+        expected = entity.get("expected_year")
+        if expected:
+            diff = abs(year - expected)
+            score = max(score, max(0.0, 1.0 - diff / 10))
+    return score
 
-    return "application"
+def _survey_penalty(paper: dict, answer_spec: dict) -> float:
+    title = (paper.get("title") or "").lower()
+    is_survey = any(
+        word in title
+        for word in ("survey", "review", "overview", "comprehensive review")
+    )
+    if not is_survey:
+        return 0.0
+    question_types = answer_spec.get("question_types", [])
+    if (
+        answer_spec.get("primary_source_required")
+        or "mathematical_derivation" in question_types
+        or "technical_explanation" in question_types
+    ):
+        return 0.25
+    return 0.0
 
+def _requirement_match_score(
+    paper: dict,
+    requirement_texts: list[str],
+    requirement_vecs: list[list[float]],
+) -> float:
+    paper_vec = paper.get("abstract_vec")
+    if paper_vec is None or not requirement_vecs:
+        return 0.0
+    sims = [similarity(paper_vec, rv) for rv in requirement_vecs]
+    return max(sims) if sims else 0.0
 
-def _foundation_eligible(paper: dict) -> bool:
-    rel = float(paper.get("_relevance_orig", 0.0) or 0.0)
-    cites = int(paper.get("citation_count", 0) or 0)
-    src = paper.get("_foundational_source")
+def _classify_source_role(paper: dict, answer_spec: dict) -> str:
+    title = (paper.get("title") or "").lower()
+    if answer_spec.get("primary_source_required"):
+        if _primary_source_score(paper, answer_spec) >= 0.8:
+            return SOURCE_ROLE_PRIMARY
+        if paper.get("_primary_candidate"):
+            return SOURCE_ROLE_PRIMARY
+    if any(
+        word in title
+        for word in ("survey", "review", "overview", "comprehensive review")
+    ):
+        return SOURCE_ROLE_SURVEY
+    rel = float(
+        paper.get("_relevance_orig")
+        or paper.get("_initial_sim")
+        or paper.get("final_score")
+        or 0.0
+    )
+    if rel < 0.30:
+        return SOURCE_ROLE_BACKGROUND
+    if not paper.get("_foundational_candidate") and not paper.get("_primary_candidate"):
+        for entity in answer_spec.get("canonical_entities", []):
+            name = (entity.get("name") or "").lower()
+            if name and name in title:
+                return SOURCE_ROLE_APPLICATION
+    return SOURCE_ROLE_SECONDARY
 
-    if src == "citation_backtrack":
-        return rel >= 0.12 or cites >= 500
-
-    if src == "precision":
-        return rel >= 0.18 or (cites >= 1000 and rel >= 0.10)
-
-    return rel >= 0.20 or (cites >= 500 and rel >= 0.15)
-
-
-def _foundation_priority(paper: dict) -> float:
-    rel = float(paper.get("_relevance_orig", 0.0) or 0.0)
-    cite = _citation_score(paper.get("citation_count", 0))
-    bonus = _FOUNDATION_SOURCE_BONUS.get(paper.get("_foundational_source"), 0.0)
-
-    return bonus + (0.55 * rel) + (0.45 * cite)
-
-
-def _weighted_score(paper: dict, orig_vec: list[float], other_vecs: list[list[float]]) -> float:
+def _answer_spec_weighted_score(
+    paper: dict,
+    orig_vec: list[float],
+    other_vecs: list[list[float]],
+    query: str,
+    needs: list,
+    answer_spec: dict,
+    requirement_texts: list[str],
+    requirement_vecs: list[list[float]],
+    is_canonical: bool,
+) -> float:
     vec = paper.get("abstract_vec")
+    if vec is None:
+        return 0.0
 
+    rel_orig = similarity(orig_vec, vec)
+    rel_other = max((similarity(v, vec) for v in other_vecs), default=0.0)
+    semantic = 0.65 * rel_orig + 0.35 * rel_other
+    alignment = _query_alignment_score(paper, query, needs)
+    authority = _source_authority_score(paper)
+    recency = _recency_score(paper.get("published", ""))
+    primary_score = _primary_source_score(paper, answer_spec)
+    entity_score = _canonical_entity_score(paper, answer_spec)
+    year_score = _origin_year_score(paper, answer_spec)
+    survey_penalty = _survey_penalty(paper, answer_spec)
+    req_match = _requirement_match_score(paper, requirement_texts, requirement_vecs)
+    primary_fit = 0.8 * primary_score + 0.2 * max(entity_score, year_score)
+
+    lexical_signal = max(alignment, req_match)
+    collision_penalty = _phrase_collision_penalty(paper, semantic, lexical_signal)
+
+    if is_canonical:
+        score = (
+            0.34 * req_match
+            + 0.26 * primary_fit
+            + 0.18 * semantic
+            + 0.10 * authority
+            + 0.06 * recency
+            + 0.06 * alignment
+            - survey_penalty
+            - collision_penalty
+        )
+    else:
+        score = (
+            0.34 * req_match
+            + 0.22 * semantic
+            + 0.16 * authority
+            + 0.14 * recency
+            + 0.08 * alignment
+            + 0.06 * primary_fit
+            - collision_penalty
+        )
+
+    if paper.get("_validation_penalty"):
+        score *= paper["_validation_penalty"]
+
+    paper["_relevance_orig"] = round(rel_orig, 3)
+    paper["_relevance_combined"] = round(semantic, 3)
+    paper["_alignment"] = round(alignment, 3)
+    paper["_primary_source_score"] = round(primary_score, 3)
+    paper["_canonical_entity_score"] = round(entity_score, 3)
+    paper["_origin_year_score"] = round(year_score, 3)
+    paper["_survey_penalty"] = round(survey_penalty, 3)
+    paper["_requirement_match_score"] = round(req_match, 3)
+    paper["_collision_penalty"] = round(collision_penalty, 3)
+    paper["_source_role"] = _classify_source_role(paper, answer_spec)
+
+    return max(0.0, score)
+
+def _llm_rerank_top_k(top_k: list[dict], state: AgentState, answer_spec: dict) -> list[dict]:
+    if not top_k:
+        return top_k
+    if not getattr(settings, "LLM_RERANK_ENABLED", True):
+        return top_k
+    if is_llm_rate_limited():
+        print("[rank] LLM rerank skipped: rate-limit cooldown")
+        return top_k
+    if not (answer_spec.get("requirements") or answer_spec.get("canonical_entities")):
+        return top_k
+
+    mode = state.get("response_mode", "normal")
+    if mode == "normal" and not answer_spec.get("primary_source_required"):
+        return top_k
+
+    limit = (
+        getattr(settings, "RERANK_MAX_CANDIDATES_NORMAL", 6)
+        if mode == "normal"
+        else getattr(settings, "RERANK_MAX_CANDIDATES_RESEARCH", 10)
+    )
+    candidates = top_k[: max(1, int(limit))]
+
+    requirements = "\n".join(
+        f"- {r.get('text') or ''}"
+        for r in (answer_spec.get("requirements") or [])[:10]
+    )
+    canonical = "\n".join(
+        f"- {e.get('name') or ''} (expected primary source: {e.get('expected_primary_source') or 'unknown'})"
+        for e in (answer_spec.get("canonical_entities") or [])[:6]
+    )
+    papers_block = "\n\n".join(
+        f"[paper_id={i}]\n"
+        f"Title: {p.get('title', '')}\n"
+        f"Year: {p.get('published', '')}\n"
+        f"Source: {p.get('source', '')}\n"
+        f"Citations: {p.get('citation_count', 0)}\n"
+        f"Abstract: {(p.get('summary') or p.get('text') or '')[:350]}"
+        for i, p in enumerate(candidates)
+    )
+
+    prompt = f"""You are a research source evaluator.
+USER QUESTION:
+{state.get('query', '')}
+ANSWER REQUIREMENTS:
+{requirements or 'none'}
+CANONICAL ENTITIES:
+{canonical or 'none'}
+PAPERS:
+{papers_block}
+
+Score how well each paper is suited to answering the user's exact question.
+Do not reward general topical relatedness.
+Reward whether each paper can support specific required claims.
+If the question asks for an original architecture, derivation, theory, or historical origin, give high primary_source_fit only to original/canonical sources.
+
+For each paper, return one object with:
+paper_id
+answers_question
+primary_source_fit
+requirement_coverage
+source_role
+reason
+
+Use the [paper_id=N] markers above.
+Return ONLY a JSON object with a single key "judgments".
+"""
+    try:
+        llm = get_llm(temperature=0, task="fast")
+        raw = llm.invoke_json_mode(
+            [
+                SystemMessage(content="You are a research source evaluator. Return only JSON."),
+                HumanMessage(content=prompt),
+            ],
+            schema=None,
+            config={"timeout": 10 if mode == "normal" else 14},
+        )
+    except Exception as e:
+        print(f"[rank] LLM rerank failed, keeping retrieval scores: {type(e).__name__}: {e}")
+        return top_k
+
+    judgment_map = _normalize_judgments(raw, len(candidates))
+    if not judgment_map:
+        print("[rank] LLM rerank produced no usable judgments, keeping retrieval scores")
+        return top_k
+
+    for i, p in enumerate(candidates):
+        j = judgment_map.get(i)
+        if not j:
+            continue
+        retrieval_score = float(p.get("final_score") or 0.0)
+        llm_score = float(j["answers_question"])
+        if answer_spec.get("primary_source_required"):
+            llm_score = (
+                0.7 * float(j["answers_question"])
+                + 0.3 * float(j["primary_source_fit"])
+            )
+        p["final_score"] = round(0.55 * retrieval_score + 0.45 * llm_score, 3)
+        p["_llm_answers_question"] = round(float(j["answers_question"]), 3)
+        p["_llm_primary_source_fit"] = round(float(j["primary_source_fit"]), 3)
+        p["_llm_reason"] = j["reason"]
+        p["_llm_requirement_coverage"] = j["requirement_coverage"]
+        if j["source_role"] and j["source_role"] != "background":
+            p["_source_role"] = j["source_role"]
+
+    candidates.sort(key=lambda p: float(p.get("final_score") or 0.0), reverse=True)
+    return candidates + top_k[len(candidates):]
+
+def _phrase_collision_penalty(paper: dict, semantic: float, alignment: float) -> float:
+    if alignment <= 0:
+        return 0.0
+    gap = alignment - semantic
+    if gap <= 0.12:
+        return 0.0
+    return min(0.90, (gap - 0.12) * 2.5)
+
+def _weighted_score(paper: dict, orig_vec: list[float], other_vecs: list[list[float]], query: str, needs: list) -> float:
+    vec = paper.get("abstract_vec")
     if vec is None:
         paper["_relevance_orig"] = 0.0
         paper["_relevance_combined"] = 0.0
         return 0.0
 
-    relevance_orig = similarity(orig_vec, vec)
-    relevance_others = max((similarity(v, vec) for v in other_vecs), default=0.0)
-    relevance = 0.6 * relevance_orig + 0.4 * relevance_others
-
-    citation = _citation_score(paper.get("citation_count", 0))
+    rel_orig = similarity(orig_vec, vec)
+    rel_other = max((similarity(v, vec) for v in other_vecs), default=0.0)
+    semantic = 0.65 * rel_orig + 0.35 * rel_other
+    alignment = _query_alignment_score(paper, query, needs)
+    authority = _source_authority_score(paper)
     recency = _recency_score(paper.get("published", ""))
+    type_bonus = _paper_type_bonus(paper, needs)
+    collision_penalty = _phrase_collision_penalty(paper, semantic, alignment)
 
-    if paper.get("_foundational_candidate"):
-        score = 0.70 * relevance + 0.25 * citation + 0.05 * recency
-    else:
-        score = 0.70 * relevance + 0.05 * citation + 0.25 * recency
-
+    score = (
+        0.46 * semantic
+        + 0.28 * alignment
+        + 0.17 * authority
+        + 0.09 * recency
+        + type_bonus
+        - collision_penalty
+    )
     if paper.get("_validation_penalty"):
         score *= paper["_validation_penalty"]
 
-    paper["_relevance_orig"] = round(relevance_orig, 3)
-    paper["_relevance_combined"] = round(relevance, 3)
+    paper["_relevance_orig"] = round(rel_orig, 3)
+    paper["_relevance_combined"] = round(semantic, 3)
+    paper["_alignment"] = round(alignment, 3)
+    paper["_collision_penalty"] = round(collision_penalty, 3)
+    return max(0.0, score)
+
+def _ensure_vectors(papers: list[dict]) -> None:
+    missing = [p for p in papers if p.get("abstract_vec") is None]
+    if not missing:
+        return
+    vecs = embed_texts([(p.get("summary") or p.get("title") or "")[:1000] for p in missing])
+    for p, vec in zip(missing, vecs):
+        p["abstract_vec"] = vec
+
+def _marginal_gain_select(prefiltered: list[dict], needs: list, target_k: int) -> list[dict]:
+    selected: list[dict] = []
+    remaining = list(prefiltered)
+    covered_need_ids: set[str] = set()
+
+    while remaining and len(selected) < target_k:
+        best = None
+        best_score = -1e9
+        for p in remaining:
+            novelty = 0.0
+            p_text = " ".join([p.get("title", ""), p.get("summary", "")[:1200]])
+            for n in needs:
+                ov = need_overlap_score(n.text, p_text)
+                if ov >= 0.30 and n.need_id not in covered_need_ids:
+                    novelty += 0.18 * n.priority
+
+            redundancy_penalty = 0.0
+            if selected and p.get("abstract_vec") is not None:
+                similarities = [
+                    similarity(p["abstract_vec"], s["abstract_vec"])
+                    for s in selected
+                    if s.get("abstract_vec") is not None
+                ]
+                if similarities:
+                    redundancy_penalty = 0.12 * max(similarities)
+
+            candidate_score = p.get("final_score", 0.0) + novelty - redundancy_penalty
+            if candidate_score > best_score:
+                best_score = candidate_score
+                best = p
+
+        if best is None:
+            break
+        selected.append(best)
+        remaining.remove(best)
+
+        b_text = " ".join([best.get("title", ""), best.get("summary", "")[:1200]])
+        for n in needs:
+            if n.need_id in covered_need_ids:
+                continue
+            if need_overlap_score(n.text, b_text) >= 0.30:
+                covered_need_ids.add(n.need_id)
+    return selected
+
+def _source_tier(paper: dict) -> int:
+    source = (paper.get("source") or "").lower()
+    cites = paper.get("citation_count", 0) or 0
+    title = (paper.get("title") or "").lower()
+    link = (paper.get("link") or "").lower()
+
+    if paper.get("_primary_candidate") or paper.get("_foundational_candidate"):
+        return 1
+    if source == "web":
+        authoritative = (
+            ".gov", "who.int", "iea.org", "irena.org", "imf.org",
+            "worldbank.org", "un.org", "ipcc.ch", "nih.gov", "cdc.gov",
+            "nist.gov", "iso.org", "oecd.org", "federalreserve.gov",
+        )
+        return 1 if any(d in link for d in authoritative) else 4
+
+    is_synthesis = any(k in title for k in (
+        "systematic review", "meta-analysis", "assessment report",
+        "review", "overview",
+    ))
+    if is_synthesis and cites >= 200:
+        return 2
+    if cites >= 1000:
+        return 2
+    if source in ("openalex", "arxiv", "semantic_scholar", "semanticscholar"):
+        return 3
+    return 4
+
+
+def _foundational_selection_score(paper: dict, min_year: int | None) -> float:
+    """
+    Rank foundational candidates by ORIGIN-likelihood, not fame.
+
+    Raw citation count can be dominated by surveys or famous-but-not-
+    origin papers, so combine independent signals:
+      1. explicit title match  – hardcoded known origin (guaranteed)
+      2. convergence hits      – cited by several independent anchors
+      3. influential ratio     – later work BUILDS ON it (Semantic Scholar)
+      4. earliness             – origins predate the candidate set
+      5. survey penalty        – surveys are cited, not built upon
+    """
+    score = 0.5 * float(paper.get("final_score") or 0.0)
+
+    if paper.get("_foundational_source") == "explicit":
+        score += 1.0
+
+    hits = min(int(paper.get("_convergence_hits") or 0), 3)
+    score += 0.30 * hits
+
+    cites = paper.get("citation_count", 0) or 0
+    infl = paper.get("influential_citation_count", 0) or 0
+    if cites >= 50 and infl > 0:
+        score += 0.35 * min(1.0, (infl / cites) * 3.0)
+
+    year = _paper_year(paper)
+    if year and min_year and year <= min_year + 3:
+        score += 0.20
+
+    title = (paper.get("title") or "").lower()
+    if any(w in title for w in ("survey", "review", "overview", "comprehensive")):
+        score -= 0.50
 
     return score
 
 
-def _embed_missing_abstracts(papers: list[dict], text_fn) -> None:
-    need = [p for p in papers if p.get("abstract_vec") is None]
+def _paper_year(paper: dict) -> int | None:
+    """Centralized year extraction from any paper metadata format."""
+    for key in ("published", "publication_year", "year"):
+        value = paper.get(key)
+        if value is None:
+            continue
+        match = _re.search(r"\b(19|20)\d{2}\b", str(value))
+        if match:
+            return int(match.group(0))
+    return None
 
-    if not need:
-        return
+def _study_type_matches(paper: dict, required_type: str) -> bool:
+    """
+    Normalized study-type detection using regex patterns.
+    Handles abbreviations, alternate spellings, and descriptive phrasing.
+    """
+    blob = " ".join([
+        str(paper.get("title") or ""),
+        str(paper.get("summary") or ""),
+        str(paper.get("study_type") or ""),
+        str(paper.get("type") or ""),
+        str(paper.get("venue") or ""),
+    ]).lower()
 
-    texts = [text_fn(p) for p in need]
-    vecs = embed_texts(texts)
+    rt = required_type.lower().strip()
 
-    for p, vec in zip(need, vecs):
-        p["abstract_vec"] = vec
+    if rt in ("rct", "randomized controlled trial", "randomised controlled trial"):
+        patterns = [
+            r"\brandomized\b",
+            r"\brandomised\b",
+            r"\brandomized\s+controlled\b",
+            r"\brandomised\s+controlled\b",
+            r"\brct\b",
+            r"\brcts\b",
+            r"\bplacebo[- ]?controlled\b",
+            r"\bdouble[- ]?blind\b",
+        ]
+        return any(_re.search(p, blob) for p in patterns)
 
-
-def _mmr_select(papers: list[dict], vecs_by_title: dict, k: int, lam: float = MMR_LAMBDA) -> list[dict]:
-    selected, remaining, missing = [], [], []
-
-    for p in papers:
-        if p["title"] in vecs_by_title:
-            remaining.append(p)
-        else:
-            missing.append(p)
-
-    while remaining and len(selected) < k:
-        if not selected:
-            best = max(remaining, key=lambda p: p["final_score"])
-        else:
-            def mmr(p):
-                return (
-                    lam * p["final_score"]
-                    - (1 - lam) * max(
-                        similarity(vecs_by_title[p["title"]], vecs_by_title[s["title"]])
-                        for s in selected
-                    )
-                )
-
-            best = max(remaining, key=mmr)
-
-        selected.append(best)
-        remaining.remove(best)
-
-    if len(selected) < k and missing:
-        selected.extend(
-            sorted(missing, key=lambda p: p.get("final_score", 0), reverse=True)[: k - len(selected)]
+    if rt in ("meta-analysis", "meta analysis", "systematic review"):
+        return (
+            "meta-analysis" in blob
+            or "meta analysis" in blob
+            or "metaanalysis" in blob
+            or "systematic review" in blob
+            or "systematic-review" in blob
         )
 
-    return selected
+    if rt in ("cohort", "cohort study"):
+        return "cohort" in blob
 
+    if rt in ("case-control", "case control"):
+        return "case-control" in blob or "case control" in blob
 
-def _deduplicate_papers(papers: list[dict]) -> list[dict]:
-    seen_ids, seen_titles, deduped = set(), set(), []
+    if rt in ("guideline", "consensus statement"):
+        return "guideline" in blob or "consensus statement" in blob
 
-    for p in sorted(papers, key=lambda p: p.get("final_score", 0), reverse=True):
-        arxiv_id = p.get("arxiv_id")
-        openalex_id = p.get("openalex_id")
-        norm = p["title"].strip().lower()
+    return rt in blob
 
-        if arxiv_id and arxiv_id in seen_ids:
-            continue
+def _check_paper_eligibility(
+    paper: dict,
+    evidence_contract: dict,
+) -> tuple[str, str]:
+    """
+    Check if a paper satisfies the hard constraints of the evidence contract.
+    Returns (eligibility_status, reason).
+    """
+    if not evidence_contract:
+        return "eligible", ""
 
-        if openalex_id and openalex_id in seen_ids:
-            continue
+    constraints = evidence_contract.get("constraints", [])
+    hard_constraints = [c for c in constraints if c.get("strength") == "hard"]
 
-        if norm in seen_titles:
-            continue
+    if not hard_constraints:
+        return "eligible", ""
 
-        if arxiv_id:
-            seen_ids.add(arxiv_id)
+    for constraint in hard_constraints:
+        field = constraint.get("field", "")
+        operator = constraint.get("operator", "")
+        value = constraint.get("value")
 
-        if openalex_id:
-            seen_ids.add(openalex_id)
+        if field == "publication_year":
+            year = _paper_year(paper)
+            if year is None:
+                continue
+            try:
+                required_year = int(value)
+            except (ValueError, TypeError):
+                continue
+            if operator == "gte" and year < required_year:
+                return "ineligible", f"Year {year} < required {required_year}"
+            if operator == "lte" and year > required_year:
+                return "ineligible", f"Year {year} > required {required_year}"
 
-        seen_titles.add(norm)
-        deduped.append(p)
+        elif field == "study_type":
+            required_type = str(value)
+            if not _study_type_matches(paper, required_type):
+                return (
+                    "ineligible",
+                    f"Study type '{required_type}' not detected",
+                )
 
-    return deduped
+    return "eligible", ""
 
+def _evidence_contract_score(paper: dict, evidence_contract: dict) -> float:
+    """Score how well a paper satisfies preferred constraints (0-1)."""
+    if not evidence_contract:
+        return 0.5
 
-def _add_foundational_to_prefiltered(prefiltered: list[dict], pool: list[dict], limit: int = 2) -> list[dict]:
-    existing = {_paper_key(p) for p in prefiltered}
-    extra = []
+    constraints = evidence_contract.get("constraints", [])
+    preferred = [c for c in constraints if c.get("strength") == "preferred"]
+    if not preferred:
+        return 0.5
 
-    candidates = [
-        p for p in pool
-        if p.get("_foundational_candidate") and _foundation_eligible(p)
-    ]
+    score = 0.0
+    for constraint in preferred:
+        field = constraint.get("field", "")
+        value = str(constraint.get("value", "")).lower()
+        title = (paper.get("title") or "").lower()
+        summary = (paper.get("summary") or "").lower()
+        blob = title + " " + summary
 
-    candidates.sort(key=_foundation_priority, reverse=True)
+        if field in (
+            "comparator", "intervention", "outcome",
+            "population", "study_type",
+        ):
+            if value in blob:
+                score += 1.0
+        elif field == "geography":
+            if value in blob:
+                score += 1.0
 
-    for p in candidates:
-        key = _paper_key(p)
-
-        if key in existing:
-            continue
-
-        extra.append(p)
-        existing.add(key)
-
-        if len(extra) >= limit:
-            break
-
-    return prefiltered + extra
-
-
-def _ensure_foundational(top_k: list[dict], pool: list[dict], target_k: int) -> list[dict]:
-    if not top_k:
-        return top_k
-
-    max_found = 2 if target_k >= 8 else 1
-
-    current = sum(1 for p in top_k if p.get("_foundational_candidate"))
-    if current >= max_found:
-        return top_k
-
-    selected_keys = {_paper_key(p) for p in top_k}
-
-    candidates = [
-        p for p in pool
-        if p.get("_foundational_candidate")
-        and _paper_key(p) not in selected_keys
-        and _foundation_eligible(p)
-    ]
-
-    candidates.sort(key=_foundation_priority, reverse=True)
-
-    need = max_found - current
-
-    for p in candidates[:need]:
-        if len(top_k) < max(target_k, 1):
-            top_k.append(p)
-        else:
-            non_found = [i for i, x in enumerate(top_k) if not x.get("_foundational_candidate")]
-
-            if not non_found:
-                break
-
-            worst = min(non_found, key=lambda i: top_k[i].get("final_score", 0))
-            top_k[worst] = p
-
-        selected_keys.add(_paper_key(p))
-
-    return top_k
+    return score / len(preferred) if preferred else 0.5
 
 
 def rank_node(state: AgentState) -> AgentState:
@@ -270,141 +764,230 @@ def rank_node(state: AgentState) -> AgentState:
             "needs_retry": False if is_uploaded_only else True,
             "papers_below_threshold": 0,
             "low_confidence_results": False,
+            "coverage_gaps": ["No sources retrieved"],
+            "term_coverage": {},
+            "eligible_papers": [],
+            "background_papers": [],
+            "ineligible_papers": [],
         }
 
-    original_query = state["query"]
+    papers = merge_duplicate_papers(papers)
+    _ensure_vectors(papers)
+
+    original_query = state.get("query", "")
     search_queries = state.get("search_queries", [original_query])
-
-    orig_vec = state.get("query_embedding")
-    if orig_vec is None:
-        orig_vec = embed_texts([original_query])[0]
-
+    needs = derive_research_needs(
+        original_query,
+        state.get("query_understanding") or {},
+        state.get("report_plan") or {},
+    )
+    orig_vec = state.get("query_embedding") or embed_texts([original_query])[0]
     other_queries = [q for q in search_queries if q != original_query]
     other_vecs = embed_texts(other_queries) if other_queries else []
 
-    valid_papers = [p for p in papers if _has_valid_abstract(p)]
-    invalid_papers = [p for p in papers if not _has_valid_abstract(p)]
+    answer_spec = state.get("answer_spec") or {}
+    requirement_texts: list[str] = []
+    requirement_vecs: list[list[float]] = []
+    if answer_spec:
+        for r in (answer_spec.get("requirements") or []):
+            text = str(r.get("text") or "").strip()
+            if text and text not in requirement_texts:
+                requirement_texts.append(text)
+        requirement_texts = requirement_texts[:8]
+        if requirement_texts:
+            requirement_vecs = embed_texts(requirement_texts)
 
-    for p in invalid_papers:
-        if p.get("_foundational_candidate") and p.get("title", "").strip():
-            p["_title_embed"] = True
+    question_types = answer_spec.get("question_types", [])
+    is_canonical = bool(
+        answer_spec.get("primary_source_required")
+        or "mathematical_derivation" in question_types
+        or "technical_explanation" in question_types
+    )
 
-    title_embed_papers = [p for p in invalid_papers if p.get("_title_embed")]
-    no_vec_papers = [p for p in invalid_papers if not p.get("_title_embed")]
+    all_papers = []
+    for p in papers:
+        if answer_spec and requirement_vecs:
+            p["final_score"] = round(
+                _answer_spec_weighted_score(
+                    p, orig_vec, other_vecs, original_query, needs,
+                    answer_spec, requirement_texts, requirement_vecs, is_canonical,
+                ),
+                3,
+            )
+        else:
+            p["final_score"] = round(_weighted_score(p, orig_vec, other_vecs, original_query, needs), 3)
+        all_papers.append(p)
 
-    _embed_missing_abstracts(valid_papers, lambda p: p["summary"][:500])
-    _embed_missing_abstracts(title_embed_papers, lambda p: p["title"])
+    all_papers.sort(key=lambda p: p.get("final_score", 0.0), reverse=True)
 
-    for p in no_vec_papers:
-        p["abstract_vec"] = None
-        p["_no_abstract"] = True
+    ABSOLUTE_MIN_SCORE_FLOOR = 0.22
+    HARD_SEMANTIC_FLOOR = 0.30
 
-    all_papers = valid_papers + title_embed_papers + no_vec_papers
+    prefiltered = [
+        p for p in all_papers[:PRE_FILTER_N]
+        if p.get("final_score", 0.0) >= max(settings.MIN_FINAL_SCORE * 0.65, ABSOLUTE_MIN_SCORE_FLOOR)
+        and p.get("_relevance_combined", 0.0) >= HARD_SEMANTIC_FLOOR
+    ]
 
-    for p in all_papers:
-        p["paper_type"] = _infer_paper_type(
-            p["title"],
-            p.get("citation_count", 0),
-            p.get("published", ""),
-        )
-
-        p["final_score"] = round(_weighted_score(p, orig_vec, other_vecs), 3)
-
-        if p.get("_no_abstract"):
-            p["final_score"] = min(max(p["final_score"], 0.2), 0.25)
-
-    deduped = _deduplicate_papers(all_papers)
-
-    prefiltered_before_threshold = deduped[:PRE_FILTER_N]
-    prefiltered, tier_used = [], None
-
-    for tier in _RELAXATION_TIERS:
-        effective_threshold = max(settings.MIN_FINAL_SCORE * tier, _ABSOLUTE_FLOOR)
-
-        candidates = [
-            p for p in prefiltered_before_threshold
-            if p["final_score"] >= effective_threshold
-        ]
-
-        if candidates:
-            prefiltered = candidates
-            tier_used = tier
-            break
-
-    prefiltered = _add_foundational_to_prefiltered(prefiltered, deduped, limit=2)
-
-    low_confidence_results = tier_used is not None and tier_used < 1.0
-
+    low_confidence_results = False
     if len(prefiltered) < settings.TOP_K_PAPERS_MIN and not is_uploaded_only:
-        top_ids = [p.get("openalex_id") for p in deduped[:3] if p.get("openalex_id")]
-
+        low_confidence_results = True
+        top_ids = [p.get("openalex_id") for p in all_papers[:3] if p.get("openalex_id")]
         if top_ids:
-            extra_papers = fetch_openalex_citation_graph(top_ids, limit_per_paper=3)
-
-            if extra_papers:
-                extra_valid = [p for p in extra_papers if _has_valid_abstract(p)]
-                extra_invalid = [p for p in extra_papers if not _has_valid_abstract(p)]
-
-                _embed_missing_abstracts(extra_valid, lambda p: p["summary"][:500])
-
-                for p in extra_invalid:
-                    p["abstract_vec"] = None
-                    p["_no_abstract"] = True
-
-                for p in extra_valid + extra_invalid:
-                    p["final_score"] = round(_weighted_score(p, orig_vec, other_vecs), 3)
-
-                    if p.get("_no_abstract"):
-                        p["final_score"] = min(max(p["final_score"], 0.2), 0.25)
-
-                    p["paper_type"] = _infer_paper_type(
-                        p["title"],
-                        p.get("citation_count", 0),
-                        p.get("published", ""),
+            extra = fetch_openalex_citation_graph(top_ids, limit_per_paper=3)
+            extra = merge_duplicate_papers(extra)
+            _ensure_vectors(extra)
+            for p in extra:
+                p["_from_citation_graph"] = True
+                if answer_spec and requirement_vecs:
+                    p["final_score"] = round(
+                        _answer_spec_weighted_score(
+                            p, orig_vec, other_vecs, original_query, needs,
+                            answer_spec, requirement_texts, requirement_vecs, is_canonical,
+                        ),
+                        3,
                     )
-
-                    p["_from_citation_graph"] = True
-
-                all_papers.extend(extra_valid + extra_invalid)
-
-                deduped = _deduplicate_papers(all_papers)
-
-                prefiltered = [
-                    p for p in deduped
-                    if p["final_score"] >= max(settings.MIN_FINAL_SCORE * 0.45, _ABSOLUTE_FLOOR)
-                ]
-
-                prefiltered = _add_foundational_to_prefiltered(prefiltered, deduped, limit=2)
-
-                low_confidence_results = True
+                else:
+                    p["final_score"] = round(_weighted_score(p, orig_vec, other_vecs, original_query, needs), 3)
+            all_papers = merge_duplicate_papers(all_papers + extra)
+            all_papers.sort(key=lambda p: p.get("final_score", 0.0), reverse=True)
+            prefiltered = [
+                p for p in all_papers[:PRE_FILTER_N]
+                if p.get("final_score", 0.0) >= max(settings.MIN_FINAL_SCORE * 0.65, ABSOLUTE_MIN_SCORE_FLOOR)
+            ]
 
     target_k_setting = int(state.get("target_paper_k") or settings.TOP_K_PAPERS_MAX)
     target_k_setting = max(settings.TOP_K_PAPERS_MIN, target_k_setting)
     target_k_setting = min(settings.TOP_K_PAPERS_MAX, target_k_setting)
-
     target_k = min(len(prefiltered), target_k_setting)
 
-    vecs_by_title = {
-        p["title"]: p["abstract_vec"]
-        for p in prefiltered
-        if p.get("abstract_vec") is not None
-    }
+    top_k = _marginal_gain_select(prefiltered, needs, target_k) if prefiltered else []
 
-    top_k = _mmr_select(prefiltered, vecs_by_title, target_k) if prefiltered else []
-    top_k = _ensure_foundational(top_k, deduped, target_k)
+    if answer_spec:
+        primary_candidates = [
+            p for p in all_papers
+            if p.get("_primary_candidate")
+            or (p.get("_primary_source_score") or 0) >= 0.8
+        ]
+        for p in primary_candidates[:3]:
+            if p not in top_k:
+                top_k.append(p)
+        if len(top_k) > 1:
+            top_k = sorted(top_k, key=lambda p: p.get("final_score", 0.0), reverse=True)
 
-    forced = [p["title"] for p in top_k if p.get("_foundational_candidate")]
-    print(f"[rank:foundation] final top_k foundational={forced}")
+    foundational_in_topk = [
+        p for p in top_k if p.get("_foundational_candidate")
+    ]
+    if not foundational_in_topk:
+        foundational_candidates = [
+            p for p in all_papers if p.get("_foundational_candidate")
+        ]
+        if foundational_candidates:
+            candidate_years = [
+                y
+                for y in (_paper_year(p) for p in foundational_candidates)
+                if y
+            ]
+            min_year = min(candidate_years) if candidate_years else None
+            best_foundational = max(
+                foundational_candidates,
+                key=lambda p: _foundational_selection_score(p, min_year),
+            )
+            top_k.append(best_foundational)
+            top_k.sort(key=lambda p: p.get("final_score", 0), reverse=True)
+
+    if answer_spec:
+        top_k = _llm_rerank_top_k(top_k, state, answer_spec)
+
+    for p in top_k:
+        p["_source_tier"] = _source_tier(p)
+
+    for p in top_k:
+        p["_is_origin_paper"] = bool(
+            p.get("_primary_candidate")
+            or (
+                p.get("_source_role") == "primary"
+                and (p.get("_primary_source_score") or 0) >= 0.8
+            )
+        )
+
+    coverage = assess_coverage(needs, top_k)
+    coverage_gaps = [
+        c.get("need", "")
+        for c in coverage.values()
+        if c.get("status") == "unsupported"
+    ]
+
+    avg_semantic = sum(p.get("_relevance_combined", 0.0) for p in prefiltered[:settings.TOP_K_PAPERS_MIN]) / max(1, min(len(prefiltered), settings.TOP_K_PAPERS_MIN))
+    if avg_semantic < 0.38:
+        low_confidence_results = True
+        if "Retrieved sources lack direct domain relevance." not in coverage_gaps:
+            coverage_gaps.append("Retrieved sources lack direct domain relevance.")
+
+    primary_source_present = False
+    if answer_spec.get("primary_source_required"):
+        primary_source_present = any(
+            p.get("_primary_candidate")
+            or (p.get("_primary_source_score") or 0) > 0.8
+            for p in top_k
+        )
+        if not primary_source_present:
+            coverage_gaps.append("Primary source could not be confidently retrieved. Confidence reduced.")
 
     needs_retry = (
         not is_uploaded_only
-        and len(top_k) < settings.TOP_K_PAPERS_MIN
+        and (
+            len(top_k) < settings.TOP_K_PAPERS_MIN
+            or len(coverage_gaps) > max(2, len(coverage) // 3)
+        )
         and state.get("search_attempts", 0) < state.get("max_search_attempts", 2)
+    )
+
+    evidence_contract = state.get("evidence_contract") or {}
+    eligible_papers = []
+    ineligible_papers = []
+    background_papers = []
+
+    for p in top_k:
+        eligibility, reason = _check_paper_eligibility(p, evidence_contract)
+        p["_eligibility"] = eligibility
+        p["_eligibility_reason"] = reason
+        if eligibility == "eligible":
+            eligible_papers.append(p)
+        else:
+            ineligible_papers.append(p)
+
+    if len(eligible_papers) < 3 and ineligible_papers:
+        for p in ineligible_papers[:3]:
+            p["_source_role"] = "background"
+            background_papers.append(p)
+
+    eligible_papers.sort(
+        key=lambda p: p.get("final_score", 0),
+        reverse=True,
+    )
+
+    for p in eligible_papers:
+        contract_score = _evidence_contract_score(p, evidence_contract)
+        p["final_score"] = round(
+            p.get("final_score", 0) * 0.8 + contract_score * 0.2,
+            3,
+        )
+
+    eligible_papers.sort(
+        key=lambda p: p.get("final_score", 0),
+        reverse=True,
     )
 
     return {
         "ranked_papers": top_k,
         "needs_retry": state.get("needs_retry", False) or needs_retry,
-        "papers_below_threshold": len(deduped) - len(prefiltered),
+        "papers_below_threshold": max(0, len(all_papers) - len(prefiltered)),
         "low_confidence_results": low_confidence_results,
+        "coverage_gaps": coverage_gaps,
+        "term_coverage": coverage,
+        "primary_source_present": primary_source_present,
+        "eligible_papers": eligible_papers,
+        "background_papers": background_papers,
+        "ineligible_papers": ineligible_papers,
     }

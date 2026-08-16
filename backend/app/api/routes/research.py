@@ -42,6 +42,13 @@ async def research(req: ResearchRequest):
         "query_understanding": None,
         "query_plan": None,
 
+        "answer_spec": None,
+        "source_plan": None,
+        "evidence_matrix": {},
+        "citation_audit": [],
+        "math_verification": None,
+        "primary_source_present": False,
+
         "is_definitional": False,
         "likely_cs_relevant": True,
 

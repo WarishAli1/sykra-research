@@ -8,6 +8,9 @@ export interface ReferenceEntry {
   link: string;
   published?: string | null;
   source: string;
+  source_role?: string | null;
+  why_cited?: string | null;
+  support_level?: string | null;
 }
 
 export type Paper = {
@@ -23,17 +26,7 @@ export type Paper = {
 };
 
 export type ConfidenceLevel = "high" | "medium" | "low";
-export type UncertaintyLevel = "low" | "moderate" | "high";
 
-export type DynamicConfidence = {
-  evidence_quality: ConfidenceLevel;
-  answer_confidence: ConfidenceLevel;
-  prediction_confidence?: ConfidenceLevel | null;
-  recommendation_confidence?: ConfidenceLevel | null;
-  data_completeness: ConfidenceLevel;
-  uncertainty: UncertaintyLevel;
-  explanation: string;
-};
 
 export type GraphStats = {
   nodes: number; links: number; papers: number; concepts: number;
@@ -101,8 +94,6 @@ export type ChatTurn = {
   papers?: Paper[];
   sources?: string[];
   citations?: string[];
-  coverageGaps?: string[];
-  domainCaveat?: string | null;
   papersBelowThreshold?: number;
   kind?: "chat" | "followup";
   references?: ReferenceEntry[];
@@ -116,17 +107,14 @@ export type ChatTurn = {
   sourceQuery?: string;
   sourceEvidenceMode?: EvidenceMode;
   chartUrl?: string | null;
-  /* Quick preview answer streamed before the full report */
   previewText?: string;
-  /* Late artifacts (chart, comparison table, graph entities) */
   artifacts?: TurnArtifacts;
-  /* Dynamic report */
   reportNotice?: string | null;
   reportPlan?: ReportPlan | null;
   sections?: ReportSection[];
-  dynamicConfidence?: DynamicConfidence | null;
   informationNeeds?: string[];
   complexityScore?: number;
+  disclaimer?: string | null;
 };
 
 export type ChatRequest = {
@@ -145,8 +133,7 @@ export type ChatResponse = {
   turn_id: string;
   papers: Paper[];
   citations: string[];
-  coverage_gaps: string[];
-  domain_caveat?: string | null;
+  disclaimer?: string | null;              
   papers_below_threshold: number;
   graph_contradictions?: Array<Record<string, unknown>>;
   graph_entities?: Array<Record<string, unknown>>;
@@ -154,10 +141,11 @@ export type ChatResponse = {
   references: ReferenceEntry[];
   chart_url?: string | null;
   filename?: string | null;
-  /* Dynamic report */
+  citation_audit?: Array<Record<string, unknown>>;     
+  math_verification?: Record<string, unknown> | null;  
+  primary_source_present?: boolean | null;            
   report_plan?: ReportPlan | null;
   sections?: ReportSection[];
-  dynamic_confidence?: DynamicConfidence | null;
   information_needs?: string[];
   complexity_score?: number;
   report_notice?: string | null;

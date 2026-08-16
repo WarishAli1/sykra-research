@@ -53,7 +53,7 @@ window.MathJax = {
 _CSS = """
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   body { font-family: __FONT__; color: #1C2624; background: #FBFDFC;
-         font-size: 11pt; line-height: 1.6; }
+         font-size: 11pt; line-height: 1.6; orphans: 3; widows: 3; }
 
   /* faint watermark repeated on every printed page */
   .watermark { position: fixed; top: 42%; left: 50%;
@@ -74,7 +74,7 @@ _CSS = """
 
   /* ── typography ────────────────────────────────────────────────── */
   h1, h2, h3, h4 { font-family: __FONT__; color: #0B2B26; line-height: 1.25;
-                   break-after: avoid; }
+                   break-inside: avoid; break-after: avoid-page; }
   h1 { font-size: 18pt; margin: 16pt 0 8pt; }
   h2 { font-size: 14pt; margin: 16pt 0 8pt; padding-bottom: 4pt;
        border-bottom: 1pt solid #D9E8DF; }
@@ -88,8 +88,9 @@ _CSS = """
   hr { border: 0; border-top: 1pt solid #8EB69B; margin: 14pt 0; }
 
   /* ── tables ────────────────────────────────────────────────────── */
-  table { border-collapse: collapse; width: 100%; margin: 10pt 0; font-size: 10pt;
-          break-inside: avoid; }
+  table { border-collapse: collapse; width: 100%; margin: 10pt 0; font-size: 10pt; }
+  thead { display: table-header-group; }
+  tr { break-inside: avoid; }
   th, td { border: 1px solid #D9E8DF; padding: 5pt 8pt; text-align: left;
            vertical-align: top; }
   th { background: #0B2B26; color: #EAF5EE; font-weight: 600; border-color: #0B2B26; }

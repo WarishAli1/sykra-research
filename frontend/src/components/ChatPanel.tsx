@@ -93,7 +93,6 @@ export function ChatPanel({
   const turnsRef = useRef<ChatTurn[]>(turns);
   const menuRef = useRef<HTMLDivElement>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const MAX_FILES_PER_MESSAGE = 3;
   const MAX_CONCURRENT_UPLOADS = 1;
 
@@ -112,7 +111,8 @@ export function ChatPanel({
   const uploadControllersRef = useRef<Map<string, AbortController>>(new Map());
   const uploadQueueRef = useRef<{ id: string; file: File }[]>([]);
   const activeUploadCountRef = useRef(0);
-
+  const isAnyStreaming = turns.some(t => t.streaming);
+  const isGenerating = loading || isAnyStreaming;
   function patchUpload(id: string, patch: Partial<UploadItem> | ((prev: UploadItem) => Partial<UploadItem>)) {
     setUploads((prev) =>
       prev.map((u) => (u.id !== id ? u : { ...u, ...(typeof patch === "function" ? patch(u) : patch) }))
@@ -190,9 +190,7 @@ export function ChatPanel({
         await navigator.share({ title: "Sykra Research", text: body });
         return;
       }
-    } catch {
-      return;
-    }
+    } catch {}
     try {
       await navigator.clipboard.writeText(body);
       flashToast("Conversation copied to clipboard");
@@ -290,25 +288,31 @@ export function ChatPanel({
         if (opts.isChat) {
           const res = event.payload as ChatResponse;
           onNewPapers(res.papers ?? []);
-          updateTurn(turnId, {
-            papers: res.papers,
-            citations: res.citations,
-            coverageGaps: res.coverage_gaps,
-            domainCaveat: res.domain_caveat,
-            papersBelowThreshold: res.papers_below_threshold,
-            references: res.references,
-            responseMode: res.response_mode,
-            streaming: false,
-            statusLabel: undefined,
-            turnId: res.turn_id,
-            chartUrl: res.chart_url ?? null,
-            filename: res.filename || undefined,
-            reportPlan: res.report_plan ?? null,
-            sections: res.sections ?? [],
-            dynamicConfidence: res.dynamic_confidence ?? null,
-            informationNeeds: res.information_needs ?? [],
-            complexityScore: res.complexity_score ?? 0,
-            reportNotice: res.report_notice ?? undefined,
+          updateTurn(turnId, (prev) => {
+            const finalAnswer = (res.answer ?? "").trim();
+            const nextText =
+              finalAnswer && finalAnswer !== (prev.text ?? "").trim()
+                ? res.answer
+                : prev.text;
+            return {
+              text: nextText,
+              papers: res.papers,
+              citations: res.citations,
+              papersBelowThreshold: res.papers_below_threshold,
+              references: res.references,
+              responseMode: res.response_mode,
+              streaming: false,
+              statusLabel: undefined,
+              turnId: res.turn_id,
+              chartUrl: res.chart_url ?? null,
+              filename: res.filename || undefined,
+              reportPlan: res.report_plan ?? null,
+              sections: res.sections ?? [],
+              informationNeeds: res.information_needs ?? [],
+              complexityScore: res.complexity_score ?? 0,
+              reportNotice: res.report_notice ?? undefined,
+              disclaimer: res.disclaimer ?? null,
+            };
           });
         }
         break;
@@ -354,24 +358,31 @@ export function ChatPanel({
       turnId: kgTurnId,
     });
 
-    await api.chatStream(
-      {
-        query,
-        session_id: sessionId,
-        turn_id: kgTurnId,
-        evidence_mode: evMode,
-        response_mode: mode,
-        request_id: requestId,
-        conversation_history: history,
-      },
-      (event) => applyStreamEvent(assistantId, event, { isChat: true }),
-      controller.signal
-    );
+    try {
+      await api.chatStream(
+        {
+          query,
+          session_id: sessionId,
+          turn_id: kgTurnId,
+          evidence_mode: evMode,
+          response_mode: mode,
+          request_id: requestId,
+          conversation_history: history,
+        },
+        (event) => applyStreamEvent(assistantId, event, { isChat: true }),
+        controller.signal
+      );
+    } finally {
+      const current = turnsRef.current.find((t) => t.id === assistantId);
+      if (current && current.streaming) {
+        updateTurn(assistantId, { streaming: false, statusLabel: undefined });
+      }
+    }
   }
 
   async function handleSend() {
     const query = input.trim();
-    if (!query || loading) return;
+    if (!query || isGenerating) return;
 
     setError(null);
     setInput("");
@@ -596,6 +607,7 @@ export function ChatPanel({
               handleSend();
             }
           }}
+          disabled={isGenerating}
           rows={1}
           placeholder="Ask a question, or drop a PDF to ground it"
           className="min-h-[24px] max-h-28 flex-1 resize-none overflow-y-auto bg-transparent py-1.5 text-[13.5px] leading-6 text-ink placeholder:text-ink-soft/60 focus:outline-none"
@@ -621,7 +633,7 @@ export function ChatPanel({
           ]}
         />
 
-        {loading ? (
+        {isGenerating ? (
           <button
             onClick={handlePause}
             aria-label="Pause generation"
@@ -760,7 +772,7 @@ export function ChatPanel({
               sessionId={sessionId}
               onOpenGraph={onOpenGraph}
               onRegenerate={async () => {
-                if (loading) return;
+                if (isGenerating) return;
                 setError(null);
                 setLoading(true);
                 try {
@@ -791,10 +803,9 @@ export function ChatPanel({
                             turnId: res.turn_id,
                             chartUrl: res.chart_url ?? null,
                             filename: res.filename || turn.filename,
-                            /* Dynamic report */
                             reportPlan: res.report_plan ?? null,
                             sections: res.sections ?? [],
-                            dynamicConfidence: res.dynamic_confidence ?? null,
+                            disclaimer: res.disclaimer ?? null,
                             informationNeeds: res.information_needs ?? [],
                             complexityScore: res.complexity_score ?? 0,
                           }

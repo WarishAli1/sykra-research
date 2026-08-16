@@ -1,5 +1,4 @@
 from langchain_core.messages import SystemMessage, HumanMessage
-
 from app.agents.state import AgentState
 from app.agents.schemas import ReportPlanLLM
 from app.agents.report_modules import (
@@ -10,35 +9,28 @@ from app.agents.report_modules import (
 from app.services.llm_client import get_llm
 from app.config import settings
 
-
 _REPORT_PLAN_SYSTEM = """
-You are a research report planner for a flagship domain-agnostic research assistant.
-
+You are a research report planner.
 Your job is NOT to answer the question.
-Your job is to decide what kind of report should be generated.
-
+Your job is to decide what kind of report should be generated, sized to the ACTUAL
+complexity of the query — not to the response mode.
 Choose modules from the module library only.
+Always include direct_answer, limitations, references.
+Add a module only if it would materially change or deepen the answer.
+Never add a module just to fill out the report.
 
-Prefer fewer, high-value modules for simple questions.
-Use deeper modules for complex research, design, strategy, forecasting, medical, legal, or decision questions.
-
-Important:
-- Do not force a literature-review style for simple explanations.
-- Do not force implementation/cost/timeline modules unless the question needs them.
-- Always include direct_answer, independent_analysis, limitations, confidence_uncertainty, references.
-- For high-stakes domains, add guardrails.
-
-Set depth=low for simple factual/explanatory questions.
-Set depth=medium for moderately complex questions.
-Set depth=high for genuine research surveys, comparisons, design, strategy, forecasting, or high-stakes decisions.
+If the query asks to derive, prove, or mathematically explain a mechanism (not just
+"what is X"), select the derivation module instead of methodology/research_findings,
+and do NOT select independent_analysis or comparative_analysis unless the query
+explicitly asks to compare things. A derivation question needs ONE authoritative
+primary source, not a literature survey.
 """
-
 
 _REPORT_PLAN_PROMPT = """
 USER QUERY:
 {query}
 
-RESPONSE MODE REQUESTED BY USER:
+RESPONSE MODE:
 {response_mode}
 
 EVIDENCE MODE:
@@ -50,55 +42,131 @@ QUERY UNDERSTANDING:
 MODULE LIBRARY:
 {catalog}
 
-Return a ReportPlanLLM object.
+DEPTH RULES (apply regardless of response mode):
+- depth=low: the query asks for a single fact, definition, or "what is X" — one clear
+  answer exists, no real trade-offs to weigh. 3-4 modules max.
+- depth=medium: the query has 2-3 distinct facets, asks "how/why" with some nuance,
+  or involves a light comparison. 5-6 modules.
+- depth=high: the query is genuinely multi-part, explicitly comparative, asks for
+  trade-offs/risk/forecast, has constraints that require weighing evidence against
+  each other, or explicitly asks for depth ("comprehensive", "in detail", "analyze").
 
-Rules:
-- module_id values MUST come from the module library.
-- importance is 0-100.
-- complexity_score is 0-100.
-- depth must be one of: low, medium, high.
-- reference_policy should be minimal for simple explanations, standard for normal, research for deep research.
-- reasoning_policy should be:
-  - evidence_only for strict medical/legal/scientific factual questions,
-  - evidence_plus_analysis for most research questions,
-  - first_principles_allowed for design/strategy/troubleshooting,
-  - speculative_allowed only for forecasting/speculative questions.
-- Add domain_guardrails for medical, legal, financial, or safety-critical queries.
-- If response_mode is normal, prefer low or medium depth.
-- If response_mode is researched or graph_research, prefer high depth.
+Response mode controls how MANY sources get retrieved and how well-evidenced each
+module is — it does NOT mean every researched-mode query deserves a high-depth report.
+A simple definitional query in researched mode should still come back as depth=low or
+medium, just backed by stronger citations than normal mode would use.
+
+Return a ReportPlanLLM object.
 """
 
 
 def _adaptive_target_paper_k(plan: dict, state: AgentState) -> int:
+    """
+    Normal mode  → 4–7 papers
+    Researched   → 8–15 papers
+    Both scale with depth, complexity, and information-needs.
+    """
+    response_mode = state.get("response_mode", "normal")
     depth = plan.get("depth", "low")
+    is_normal = response_mode == "normal"
 
-    if depth == "low":
-        target = settings.TOP_K_PAPERS_LOW
-    elif depth == "medium":
-        target = settings.TOP_K_PAPERS_MEDIUM
+
+    if is_normal:
+        base = {"low": 4, "medium": 5, "high": 7}.get(depth, 5)
+        lo, hi = settings.TOP_K_PAPERS_NORMAL_MIN, settings.TOP_K_PAPERS_NORMAL_MAX
     else:
-        target = settings.TOP_K_PAPERS_HIGH
+        base = {"low": 8, "medium": 11, "high": 15}.get(depth, 11)
+        lo, hi = settings.TOP_K_PAPERS_RESEARCH_MIN, settings.TOP_K_PAPERS_RESEARCH_MAX
 
-    information_needs = [str(x).lower() for x in plan.get("information_needs", [])]
 
-    if any(x in information_needs for x in ("comparison", "compare", "tradeoffs", "trade-off")):
-        target += 2
-
-    if any(x in information_needs for x in ("forecast", "future", "prediction", "outlook")):
+    target = base
+    information_needs = [
+        str(x).lower() for x in plan.get("information_needs", [])
+    ]
+    if any(
+        x in information_needs
+        for x in ("comparison", "compare", "tradeoffs", "trade-off")
+    ):
         target += 1
+    if any(
+        x in information_needs
+        for x in ("forecast", "future", "prediction", "outlook")
+    ):
+        target += 1
+
+
+    complexity = int(plan.get("complexity_score", 50) or 50)
+    if complexity >= 75:
+        target += 1
+    if len(information_needs) >= 6:
+        target += 1
+
 
     if state.get("evidence_mode") in ("uploaded", "blended"):
         target = max(target, settings.TOP_K_PAPERS_MEDIUM)
 
-    target = max(settings.TOP_K_PAPERS_MIN, target)
-    target = min(settings.TOP_K_PAPERS_MAX, target)
 
+    target = max(lo, min(hi, target))
     return int(target)
 
 
 def report_plan_node(state: AgentState) -> AgentState:
-    query = state.get("query", "")
     response_mode = state.get("response_mode", "normal")
+
+    if response_mode == "normal":
+        raw_plan = default_report_plan(state)
+        plan = normalize_report_plan(raw_plan, state)
+
+        plan["depth"] = "low"
+        plan["target_words"] = 650
+        plan["reference_policy"] = "standard"
+        plan["reasoning_policy"] = "evidence_plus_analysis"
+
+        allowed_ids = {
+            "direct_answer",
+            "research_findings",
+            "comparative_analysis",
+            "limitations",
+            "references",
+        }
+
+        plan["modules"] = [
+            m for m in plan.get("modules", [])
+            if m.get("module_id") in allowed_ids
+        ][:5]
+
+        total_importance = sum(
+            m.get("importance", 80)
+            for m in plan["modules"]
+            if m.get("module_id") != "references"
+        ) or 1
+
+        for m in plan["modules"]:
+            if m.get("module_id") == "references":
+                m["target_words"] = 0
+            else:
+                m["target_words"] = max(
+                    90,
+                    int(
+                        plan["target_words"]
+                        * 0.92
+                        * m.get("importance", 80)
+                        / total_importance
+                    ),
+                )
+
+        return {
+            "report_plan": plan,
+            "information_needs": plan.get("information_needs", []),
+            "complexity_score": plan.get("complexity_score", 30),
+            "report_depth": "low",
+            "target_word_count": plan.get("target_words", 650),
+            "module_plan": plan.get("modules", []),
+            "report_notice": None,
+            "target_paper_k": _adaptive_target_paper_k(plan, state),
+        }
+
+    query = state.get("query", "")
     evidence_mode = state.get("evidence_mode", "literature")
     understanding = state.get("query_understanding") or {}
 
@@ -113,7 +181,7 @@ def report_plan_node(state: AgentState) -> AgentState:
                         query=query,
                         response_mode=response_mode,
                         evidence_mode=evidence_mode,
-                        understanding=str(understanding)[:4000],
+                        understanding=str(understanding)[:3000],
                         catalog=module_catalog_text(),
                     )
                 ),
@@ -127,10 +195,22 @@ def report_plan_node(state: AgentState) -> AgentState:
             raw_plan = plan_llm.model_dump()
 
     except Exception as e:
-        print(f"[report_plan_node] planner failed, using deterministic fallback: {type(e).__name__}: {e}")
+        print(
+            f"[report_plan_node] planner failed, using deterministic fallback: "
+            f"{type(e).__name__}: {e}"
+        )
         raw_plan = default_report_plan(state)
 
     plan = normalize_report_plan(raw_plan, state)
+
+    answer_spec = state.get("answer_spec") or {}
+    if answer_spec:
+        plan["answer_outline"] = answer_spec.get("answer_outline") or []
+        if (
+            "mathematical_derivation" in answer_spec.get("question_types", [])
+            and plan.get("epistemic_mode") != "textbook_derivation"
+        ):
+            plan["epistemic_mode"] = "textbook_derivation"
 
     target_paper_k = _adaptive_target_paper_k(plan, state)
 
@@ -138,8 +218,11 @@ def report_plan_node(state: AgentState) -> AgentState:
         "report_plan": plan,
         "information_needs": plan.get("information_needs", []),
         "complexity_score": plan.get("complexity_score", 50),
-        "report_depth": plan.get("depth", "low"),
-        "target_word_count": plan.get("target_words", settings.REPORT_TARGET_WORDS_LOW),
+        "report_depth": plan.get("depth", "medium"),
+        "target_word_count": plan.get(
+            "target_words",
+            settings.REPORT_TARGET_WORDS_MEDIUM,
+        ),
         "module_plan": plan.get("modules", []),
         "report_notice": plan.get("latency_notice"),
         "target_paper_k": target_paper_k,

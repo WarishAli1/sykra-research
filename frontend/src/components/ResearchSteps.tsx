@@ -43,6 +43,8 @@ const PHASES: PhaseDef[] = [
       plan_report: "label",
       search: "label",
       retrieve_uploaded: "label",
+      answer_spec_node: "label",
+      build_retrieval_plan: "label",
     },
   },
   {
@@ -60,6 +62,7 @@ const PHASES: PhaseDef[] = [
     stages: {
       quick_preview: "label",
       preview_answer: "label",
+      build_ledger: "label",
       summarize: "silent",
     },
   },
@@ -68,7 +71,7 @@ const PHASES: PhaseDef[] = [
     title: "Checking answer quality",
     icon: ShieldCheck,
     placeholder: "Cross-checking the draft against your question",
-    stages: { critique: "label", revise: "label", after_critique: "silent" },
+    stages: { critique: "label", revise: "label", after_critique: "silent", verify_claims: "label", },
   },
   {
     id: "finalize",

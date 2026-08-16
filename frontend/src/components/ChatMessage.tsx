@@ -7,7 +7,6 @@ import rehypeKatex from "rehype-katex";
 import { ResearchSteps } from "./ResearchSteps";
 import "katex/dist/katex.min.css";
 import {
-  AlertTriangle,
   BookMarked,
   Download,
   Loader2,
@@ -23,22 +22,35 @@ import {
   GraduationCap,
   OctagonX,
   Clock,
-  Gauge,
   Zap,
   ChevronDown,
   Network,
   Table2,
+  AlertTriangle,
 } from "lucide-react";
-import type { ChatTurn, DynamicConfidence } from "@/lib/types";
+import type { ChatTurn } from "@/lib/types";
 import { api, ApiError, resolveAssetUrl } from "@/lib/api";
 
 function stripReferencesBlock(text: string): string {
-  const rule = "\n\n---\n\n";
-  const i = text.indexOf(rule);
-  if (i === -1) return text;
-  const tail = text.slice(i + rule.length).replace(/^#+\s*/, "").trimStart();
-  if (/^references\b/i.test(tail)) return text.slice(0, i).trim();
-  return text;
+  let s = text;
+  const refPatterns = [
+    /\n\n---\n\n\*\*References\*\*[\s\S]*$/i,  
+    /\n\n---\n\n#{1,6}\s*References\b[\s\S]*$/i,
+    /\n\n#{1,6}\s*References\b[\s\S]*$/i,      
+  ];
+  for (const p of refPatterns) {
+    if (p.test(s)) {
+      s = s.replace(p, "");
+      break;
+    }
+  }
+  return s.trim();
+}
+
+const DISCLAIMER_PATTERN = /(?:^|\n+)\s*\*?_?Sykra can make mistakes\.[^\n]*?starting baseline\.?_?\*?\s*$/i;
+
+function stripDisclaimerLine(text: string): string {
+  return text.replace(DISCLAIMER_PATTERN, "").trim();
 }
 
 function stripMarkdown(text: string): string {
@@ -91,12 +103,27 @@ function isMathProseBoundary(line: string): boolean {
 
 function normalizeMathFences(md: string): string {
   let s = md;
-  s = s.replace(/\$(\d)/g, "USD $1");
   s = s.replace(/【/g, "[").replace(/】/g, "]")
     .replace(/（/g, "(").replace(/）/g, ")")
     .replace(/：/g, ":").replace(/；/g, ";");
   s = s.replace(/[[【]\s*paper_id\s*[=＝]\s*\d+\s*[]】]/gi, "");
   s = s.replace(/[\u200b\ufeff]/g, "").replace(/\u00a0/g, " ");
+
+  const mathSpans: string[] = [];
+  const MATH_PLACEHOLDER = (i: number) => `\u0000MATH${i}\u0000`;
+  s = s.replace(/\$\$[^]*?\$\$/g, (m) => {
+    mathSpans.push(m);
+    return MATH_PLACEHOLDER(mathSpans.length - 1);
+  });
+  s = s.replace(/\$([^$\n]+?)\$(?!\$|\d)/g, (m) => {
+    mathSpans.push(m);
+    return MATH_PLACEHOLDER(mathSpans.length - 1);
+  });
+  s = s.replace(/\$(\d)/g, "USD $1");
+  mathSpans.forEach((span, i) => {
+    s = s.replace(MATH_PLACEHOLDER(i), () => span);
+  });
+
   for (let pass = 0; pass < 2; pass++) {
     s = s.replace(/([^\n])\$\$/g, "$1\n$$");
     s = s.replace(/\$\$([^\n])/g, "$$\n$1");
@@ -209,68 +236,6 @@ const markdownComponents = {
   },
 };
 
-function ConfidenceBadge({
-  label,
-  value,
-  invert = false,
-}: {
-  label: string;
-  value?: string | null;
-  invert?: boolean;
-}) {
-  if (!value) return null;
-  let tone: string;
-  if (!invert) {
-    tone =
-      value === "high"
-        ? "text-emerald-700 bg-emerald-50 border-emerald-200"
-        : value === "medium"
-        ? "text-amber-700 bg-amber-50 border-amber-200"
-        : "text-danger bg-danger/5 border-danger/30";
-  } else {
-    tone =
-      value === "low"
-        ? "text-emerald-700 bg-emerald-50 border-emerald-200"
-        : value === "moderate"
-        ? "text-amber-700 bg-amber-50 border-amber-200"
-        : "text-danger bg-danger/5 border-danger/30";
-  }
-  return (
-    <div className="flex flex-col gap-1 rounded-md border border-line bg-paper px-2 py-1.5">
-      <span className="text-[9.5px] font-semibold uppercase tracking-wide text-ink-soft">{label}</span>
-      <span className={`inline-flex w-fit items-center rounded-full border px-1.5 py-0.5 text-[10.5px] font-semibold capitalize ${tone}`}>
-        {value}
-      </span>
-    </div>
-  );
-}
-
-function DynamicConfidencePanel({ confidence }: { confidence: DynamicConfidence }) {
-  return (
-    <div className="mt-3 rounded-lg border border-line bg-paper-dim/40 px-3 py-2.5 animate-fade-up">
-      <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-soft">
-        <Gauge className="h-3.5 w-3.5 text-indigo" />
-        Confidence & Uncertainty
-      </div>
-      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
-        <ConfidenceBadge label="Evidence quality" value={confidence.evidence_quality} />
-        <ConfidenceBadge label="Answer" value={confidence.answer_confidence} />
-        {confidence.prediction_confidence && (
-          <ConfidenceBadge label="Prediction" value={confidence.prediction_confidence} />
-        )}
-        {confidence.recommendation_confidence && (
-          <ConfidenceBadge label="Recommendation" value={confidence.recommendation_confidence} />
-        )}
-        <ConfidenceBadge label="Data completeness" value={confidence.data_completeness} />
-        <ConfidenceBadge label="Uncertainty" value={confidence.uncertainty} invert />
-      </div>
-      {confidence.explanation && (
-        <p className="mt-2 text-[11.5px] leading-relaxed text-ink-soft">{confidence.explanation}</p>
-      )}
-    </div>
-  );
-}
-
 function PreviewAnswer({ preview, hasFinal, streaming }: { preview: string; hasFinal: boolean; streaming: boolean }) {
   const [open, setOpen] = useState(true);
   useEffect(() => {
@@ -361,7 +326,7 @@ export function ChatMessage({
 
   const isAssistant = turn.role === "assistant";
   const rawAnswer = useMemo(
-    () => (isAssistant ? stripReferencesBlock(turn.text) : ""),
+    () => (isAssistant ? stripDisclaimerLine(stripReferencesBlock(turn.text)) : ""),
     [turn.text, isAssistant]
   );
   const displayAnswer = useMemo(() => normalizeMathFences(rawAnswer), [rawAnswer]);
@@ -384,6 +349,7 @@ export function ChatMessage({
   const hasPreview = !!turn.previewText;
   const showMetadata = !isStreaming;
   const artifacts = turn.artifacts;
+  const showDisclaimer = showMetadata && hasText;
 
   async function handleExport(format: "standard" | "latex") {
     setExporting(true);
@@ -560,20 +526,6 @@ export function ChatMessage({
               </div>
             )}
 
-            {showMetadata && turn.domainCaveat && (
-              <div className="mt-3 flex items-start gap-2 rounded-md bg-gold-tint px-2.5 py-2 text-[12px] text-ink-soft">
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gold" />
-                <span>{turn.domainCaveat}</span>
-              </div>
-            )}
-
-            {showMetadata && !!turn.coverageGaps?.length && (
-              <div className="mt-2 text-[12px] text-ink-soft">
-                <span className="font-medium text-ink">Coverage gaps: </span>
-                {turn.coverageGaps.join("; ")}
-              </div>
-            )}
-
             {showMetadata && !!turn.sources?.length && (
               <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-line pt-2.5">
                 <BookMarked className="h-3.5 w-3.5 text-ink-soft" />
@@ -600,6 +552,21 @@ export function ChatMessage({
                         </a>
                         {r.authors?.length ? ` — ${r.authors.slice(0, 3).join(", ")}` : ""}
                         {r.published ? ` (${r.published})` : ""}
+                        {["arxiv", "openalex", "user_upload", "semanticscholar", "web"].includes(r.source) && (
+                          <span className="ml-1.5 inline-block rounded-full bg-paper-dim px-1.5 py-0.5 align-middle text-[10px] capitalize text-ink-soft">
+                            {r.source === "user_upload" ? "uploaded" : r.source === "semanticscholar" ? "semantic scholar" : r.source}
+                          </span>
+                        )}
+                        {r.source_role && (
+                          <span className="ml-1.5 inline-block rounded-full bg-paper-dim px-1.5 py-0.5 align-middle text-[10px] capitalize text-ink-soft">
+                            {r.source_role}
+                          </span>
+                        )}
+                        {r.why_cited && (
+                          <div className="mt-1 text-[11px] text-ink-soft">
+                            {r.why_cited}
+                          </div>
+                        )}
                       </li>
                     ))}
                   </ol>
@@ -629,6 +596,16 @@ export function ChatMessage({
               <div className="mt-3 flex items-center gap-1.5 border-t border-line pt-2.5 text-[11.5px] text-ink-soft">
                 <BookMarked className="h-3.5 w-3.5 shrink-0" />
                 {turn.papers.length} paper{turn.papers.length === 1 ? "" : "s"} added to Library
+              </div>
+            )}
+
+            {showDisclaimer && (
+              <div className="mt-3 flex items-start gap-2 rounded-md border border-gold/30 bg-gold-tint px-3 py-2 text-[11.5px] leading-relaxed text-indigo-dark animate-fade-up">
+                <AlertTriangle className="mt-[1px] h-3.5 w-3.5 shrink-0 text-gold" />
+                <span>
+                  <strong className="font-semibold">Sykra can make mistakes.</strong>{" "}
+                  Verify important claims independently and treat this research as a starting baseline.
+                </span>
               </div>
             )}
 

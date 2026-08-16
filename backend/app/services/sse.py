@@ -12,6 +12,7 @@ NODE_LABELS = {
     "retrieve_uploaded": "Checking uploaded documents...",
     "validate": "Validating paper metadata...",
     "rank": "Ranking and deduplicating results...",
+    "build_ledger": "Extracting verified figures and scenarios...",
     "quick_preview": "Drafting quick answer...",
     "summarize": "Synthesizing full answer...",
     "critique": "Checking answer coverage...",
@@ -19,6 +20,9 @@ NODE_LABELS = {
     "after_critique": "Preparing final answer...",
     "cite": "Formatting citations...",
     "answer_ready": "Answer ready.",
+    "answer_spec_node": "Understanding the question...",
+    "build_retrieval_plan": "Planning retrieval...",
+    "verify_claims": "Verifying claims and citations...",
 }
 
 _CHUNK_PATTERN = re.compile(r"\S+\s*")

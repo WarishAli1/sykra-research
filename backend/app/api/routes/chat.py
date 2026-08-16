@@ -1,8 +1,10 @@
 import asyncio
 import time
 import uuid
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+
 from app.models.schemas import (
     ChatRequest,
     ChatResponse,
@@ -13,6 +15,7 @@ from app.models.schemas import (
     FollowupResponse,
 )
 from app.agents.graph import research_graph, run_enrichment
+from app.agents.report_modules import get_disclaimer
 from app.agents.state import AgentState
 from app.services.vector_store import vector_store
 from app.services.graph_store import graph_store
@@ -27,8 +30,13 @@ from app.services.sse import (
     bridge_cleanup,
     stream_section_words,
 )
-from app.utils.text_sanitizer import sanitize_for_web
+from app.utils.text_sanitizer import sanitize_for_web_preserving_math
 from app.services.filename_service import generate_filename
+from app.services.reference_builder import (
+    paper_id_to_ref_id_map,
+    rewrite_inline_citations,
+)
+
 
 router = APIRouter()
 
@@ -40,39 +48,68 @@ def _build_initial_state(req: ChatRequest, session_id: str, turn_id: str) -> dic
         "turn_id": turn_id,
         "evidence_mode": req.evidence_mode,
         "response_mode": req.response_mode,
+        "conversation_history": req.conversation_history,
+
         "refined_query": None,
         "search_terms": [],
         "search_queries": [],
         "query_understanding": None,
         "query_plan": None,
+
+        "answer_spec": None,
+        "source_plan": None,
+        "retrieval_plan": None,
+        "evidence_contract": None,
+
+        "evidence_matrix": {},
+        "citation_audit": [],
+        "math_verification": None,
+        "primary_source_present": False,
+        "verification_status": "not_run",
+
         "is_definitional": False,
         "likely_cs_relevant": True,
         "domain_full": None,
         "domain_keywords": [],
         "mandatory_domain_keywords": None,
+
         "search_attempts": 0,
         "max_search_attempts": 2,
+
         "raw_search_results": [],
         "extracted_papers": [],
         "ranked_papers": [],
         "summaries": {},
+        "uploaded_context": [],
+        "term_coverage": {},
+        "papers_below_threshold": 0,
+
         "final_answer": "",
-        "citations": [],
+
         "coverage_gaps": [],
         "domain_caveat": None,
-        "papers_below_threshold": 0,
+
+        "citations": [],
+        "references": [],
+        "needs_retry": False,
+        "error": None,
+        "validation_results": [],
+
         "graph_contradictions": [],
         "graph_entities": [],
-        "conversation_history": req.conversation_history,
+
         "low_confidence_results": False,
-        "references": [],
+
         "chart_spec_raw": None,
         "chart_url": None,
         "comparison_table_markdown": None,
         "comparison_table_caption": None,
+
         "needs_revision": False,
         "revision_count": 0,
         "revision_instruction": None,
+        "revision_section_ids": [],
+
         "report_plan": None,
         "information_needs": [],
         "complexity_score": 0,
@@ -84,11 +121,24 @@ def _build_initial_state(req: ChatRequest, session_id: str, turn_id: str) -> dic
         "dynamic_confidence": None,
         "cited_paper_ids": [],
         "report_notice": None,
+
         "query_embedding": None,
         "target_paper_k": 0,
+
         "preview_answer": "",
         "preview_streamed": False,
         "search_cache_hit": False,
+
+        "reasoning_ledger": None,
+        "epistemic_report": None,
+
+        "eligible_papers": [],
+        "background_papers": [],
+        "ineligible_papers": [],
+        "evidence_sufficiency": None,
+        "research_subquestions": [],
+        "evidence_coverage_matrix": [],
+
         "_request_id": "",
         "_streaming_enabled": False,
         "_cancel_check": None,
@@ -112,39 +162,88 @@ def _build_paper_results(ranked_papers: list[dict]) -> list[PaperResult]:
     ]
 
 
+def _safe_reference_entries(raw_refs: list) -> list[ReferenceEntry]:
+    references: list[ReferenceEntry] = []
+
+    for r in raw_refs or []:
+        try:
+            if isinstance(r, dict):
+                data = r
+            elif hasattr(r, "model_dump"):
+                data = r.model_dump()
+            else:
+                continue
+
+            references.append(ReferenceEntry(**data))
+        except Exception:
+            try:
+                references.append(
+                    ReferenceEntry(
+                        id=int(r.get("id", 0) if isinstance(r, dict) else 0),
+                        title=str(r.get("title", "") if isinstance(r, dict) else ""),
+                        link=str(r.get("link", "") if isinstance(r, dict) else ""),
+                        authors=list(r.get("authors", []) if isinstance(r, dict) else []),
+                    )
+                )
+            except Exception:
+                continue
+
+    return references
+
+
 def _build_stream_response(
     req: ChatRequest,
     session_id: str,
     turn_id: str,
     final_state: dict,
 ) -> ChatResponse:
-    ranked_papers = final_state.get("ranked_papers", [])
+    ranked_papers = final_state.get("ranked_papers", []) or []
     papers = _build_paper_results(ranked_papers)
-    references = [
-        ReferenceEntry(**r)
-        for r in final_state.get("references", [])
-    ]
-    answer = sanitize_for_web(final_state.get("final_answer", ""))
-    if not answer:
-        answer = sanitize_for_web(final_state.get("preview_answer", ""))
+
+    raw_refs = final_state.get("references", []) or []
+    id_map = paper_id_to_ref_id_map(ranked_papers, raw_refs)
+    references = _safe_reference_entries(raw_refs)
+
+    final_answer = final_state.get("final_answer", "") or final_state.get(
+        "preview_answer", ""
+    )
+
+    if final_answer:
+        answer = sanitize_for_web_preserving_math(
+            rewrite_inline_citations(final_answer, id_map)
+        )
+    else:
+        answer = ""
+
+    sections = []
+    for s in final_state.get("section_outputs", []) or []:
+        section = dict(s)
+        section["content"] = rewrite_inline_citations(
+            section.get("content", ""),
+            id_map,
+        )
+        sections.append(section)
+
     return ChatResponse(
         answer=answer,
         session_id=session_id,
         turn_id=turn_id,
         papers=papers,
-        filename="",
-        citations=final_state.get("citations", []),
-        coverage_gaps=final_state.get("coverage_gaps", []),
-        domain_caveat=final_state.get("domain_caveat"),
+        citations=final_state.get("citations", []) or [],
+
+        disclaimer=get_disclaimer(),
+
         papers_below_threshold=final_state.get("papers_below_threshold", 0),
         graph_contradictions=final_state.get("graph_contradictions", []),
         graph_entities=final_state.get("graph_entities", []),
         response_mode=req.response_mode,
         references=references,
         chart_url=final_state.get("chart_url"),
+        citation_audit=final_state.get("citation_audit", []),
+        math_verification=final_state.get("math_verification"),
+        primary_source_present=final_state.get("primary_source_present"),
         report_plan=final_state.get("report_plan"),
-        sections=final_state.get("section_outputs", []),
-        dynamic_confidence=final_state.get("dynamic_confidence"),
+        sections=sections,
         information_needs=final_state.get("information_needs", []),
         complexity_score=final_state.get("complexity_score", 0),
         report_notice=final_state.get("report_notice"),
@@ -157,16 +256,22 @@ def _finalize_chat_response_blocking(
     turn_id: str,
     final_state: dict,
 ) -> ChatResponse:
-    ranked_papers = final_state.get("ranked_papers", [])
+    ranked_papers = final_state.get("ranked_papers", []) or []
+
     for p in ranked_papers:
         try:
             vector_store.upsert_paper(p, session_id)
         except Exception as e:
-            print(f"[chat] vector_store persistence failed for '{p.get('title', '?')}': {type(e).__name__}: {e}")
+            print(
+                f"[chat] vector_store persistence failed for "
+                f"'{p.get('title', '?')}': {type(e).__name__}: {e}"
+            )
+
     filename = generate_filename(
         turn_id,
         final_state.get("final_answer", ""),
     )
+
     response = _build_stream_response(req, session_id, turn_id, final_state)
     response.filename = filename
     return response
@@ -178,12 +283,17 @@ def _background_persist_and_filename(
     turn_id: str,
     final_state: dict,
 ) -> str:
-    ranked_papers = final_state.get("ranked_papers", [])
+    ranked_papers = final_state.get("ranked_papers", []) or []
+
     for p in ranked_papers:
         try:
             vector_store.upsert_paper(p, session_id)
         except Exception as e:
-            print(f"[chat] background vector_store persistence failed for '{p.get('title', '?')}': {type(e).__name__}: {e}")
+            print(
+                f"[chat] background vector_store persistence failed for "
+                f"'{p.get('title', '?')}': {type(e).__name__}: {e}"
+            )
+
     try:
         filename = generate_filename(
             turn_id,
@@ -192,6 +302,7 @@ def _background_persist_and_filename(
     except Exception as e:
         print(f"[chat] background filename generation failed: {type(e).__name__}: {e}")
         filename = ""
+
     return filename
 
 
@@ -199,12 +310,17 @@ def _background_persist_and_filename(
 async def chat(req: ChatRequest):
     session_id = req.session_id or str(uuid.uuid4())
     turn_id = req.turn_id or str(uuid.uuid4())
+
     initial_state = _build_initial_state(req, session_id, turn_id)
+
     t0 = time.time()
+
     final_state = await research_graph.ainvoke(initial_state)
     final_state = await asyncio.to_thread(run_enrichment, final_state)
+
     elapsed = round(time.time() - t0, 1)
     print(f"[timing] {elapsed}s | mode={req.response_mode} | query='{req.query}'")
+
     return await asyncio.to_thread(
         _finalize_chat_response_blocking,
         req,
@@ -217,13 +333,18 @@ async def chat(req: ChatRequest):
 @router.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
     if not req.request_id:
-        raise HTTPException(status_code=400, detail="request_id is required for /chat/stream.")
+        raise HTTPException(
+            status_code=400,
+            detail="request_id is required for /chat/stream.",
+        )
+
     request_id = req.request_id
     session_id = req.session_id or str(uuid.uuid4())
     turn_id = req.turn_id or str(uuid.uuid4())
 
     async def event_stream():
         cancellation.register(request_id)
+
         try:
             if req.response_mode == "graph_research":
                 graph_store.clear_session(session_id)
@@ -231,15 +352,19 @@ async def chat_stream(req: ChatRequest):
             if req.response_mode in ("researched", "graph_research"):
                 yield sse_event(
                     "notice",
-                    message="Deep research mode can take around 25–35 seconds. Progress will appear as it runs.",
+                    message=(
+                        "Deep research mode can take around 25–35 seconds. "
+                        "Progress will appear as it runs."
+                    ),
                 )
 
             state: AgentState = _build_initial_state(req, session_id, turn_id)
+
             loop = asyncio.get_running_loop()
             bridge_register(request_id, loop)
 
             state["_request_id"] = request_id
-            state["_streaming_enabled"] = req.response_mode in ("researched", "graph_research")
+            state["_streaming_enabled"] = True
             state["_cancel_check"] = lambda: cancellation.is_cancelled(request_id)
 
             t0 = time.time()
@@ -247,12 +372,17 @@ async def chat_stream(req: ChatRequest):
 
             async def _run_graph():
                 try:
-                    async for update in research_graph.astream(state, stream_mode="updates"):
+                    async for update in research_graph.astream(
+                        state,
+                        stream_mode="updates",
+                    ):
                         if cancellation.is_cancelled(request_id):
                             return
+
                         for node_name, delta in update.items():
                             state.update(delta)
                             bridge_push(request_id, ("progress", node_name, delta))
+
                     bridge_push(request_id, ("graph_done", None))
                 except Exception as e:
                     print(f"[chat_stream] graph execution failed: {type(e).__name__}: {e}")
@@ -260,6 +390,7 @@ async def chat_stream(req: ChatRequest):
                     bridge_push(request_id, ("graph_done", None))
 
             graph_task = asyncio.create_task(_run_graph())
+
             sections_streamed = False
 
             while True:
@@ -279,43 +410,42 @@ async def chat_stream(req: ChatRequest):
                 if etype == "progress":
                     node_name, delta = event[1], event[2]
 
-                    if node_name == "quick_preview":
-                        preview = delta.get("preview_answer") or state.get("preview_answer", "")
-                        if preview:
-                            yield progress_event("quick_preview")
-                            preview_status = {}
-                            async for evt in stream_text_chunks_async(
-                                preview,
-                                cancel_check=lambda: cancellation.is_cancelled(request_id),
-                                kind="preview",
-                                status=preview_status,
-                            ):
-                                yield evt
-                            if preview_status.get("completed") is False:
-                                yield sse_event("cancelled")
-                                return
-                            state["preview_streamed"] = True
-                        continue
-
                     detail = None
                     items = None
-                    if node_name in ("plan_query", "search", "report_plan"):
-                        queries = delta.get("search_queries") or state.get("search_queries")
-                        if queries:
-                            detail = queries[0] if isinstance(queries, list) else str(queries)
+
                     if node_name == "report_plan":
                         notice = delta.get("report_notice") or state.get("report_notice")
                         if notice:
                             yield sse_event("notice", message=notice)
+
+                    elif node_name in ("plan_query", "search"):
+                        queries = delta.get("search_queries") or state.get("search_queries")
+                        if queries:
+                            detail = (
+                                queries[0]
+                                if isinstance(queries, list) and queries
+                                else str(queries)
+                            )
+
                     elif node_name in ("rank", "validate"):
                         papers = delta.get("ranked_papers") or state.get("ranked_papers")
                         if papers:
-                            items = [p.get("title", "") for p in papers[:5] if p.get("title")]
+                            items = [
+                                p.get("title", "")
+                                for p in papers[:5]
+                                if p.get("title")
+                            ]
+
                     yield progress_event(node_name, detail=detail, items=items)
+
+                elif etype == "llm_token":
+                    sections_streamed = True
+                    yield sse_event("token", text=event[1], kind="final")
 
                 elif etype == "section":
                     _mid, content = event[1], event[2]
                     sections_streamed = True
+
                     async for evt in stream_section_words(
                         content,
                         cancel_check=lambda: cancellation.is_cancelled(request_id),
@@ -329,17 +459,36 @@ async def chat_stream(req: ChatRequest):
             await graph_task
 
             if graph_error:
-                yield sse_event("error", message="Something went wrong while generating this answer.")
+                yield sse_event(
+                    "error",
+                    message="Something went wrong while generating this answer.",
+                )
                 return
 
             elapsed = round(time.time() - t0, 1)
-            print(f"[timing] {elapsed}s | mode={req.response_mode} | query='{req.query}' | streamed")
+            print(
+                f"[timing] {elapsed}s | mode={req.response_mode} | "
+                f"query='{req.query}' | streamed"
+            )
 
             if not sections_streamed:
-                final_answer = sanitize_for_web(state.get("final_answer", ""))
-                if not final_answer:
-                    final_answer = sanitize_for_web(state.get("preview_answer", ""))
+                refs = state.get("references") or []
+                id_map = paper_id_to_ref_id_map(
+                    state.get("ranked_papers") or [],
+                    refs,
+                )
+
+                final_answer = state.get("final_answer", "") or state.get(
+                    "preview_answer", ""
+                )
+
+                if final_answer:
+                    final_answer = sanitize_for_web_preserving_math(
+                        rewrite_inline_citations(final_answer, id_map)
+                    )
+
                 final_status = {}
+
                 async for evt in stream_text_chunks_async(
                     final_answer,
                     cancel_check=lambda: cancellation.is_cancelled(request_id),
@@ -347,6 +496,7 @@ async def chat_stream(req: ChatRequest):
                     status=final_status,
                 ):
                     yield evt
+
                 if final_status.get("completed") is False:
                     yield sse_event("cancelled")
                     return
@@ -357,6 +507,7 @@ async def chat_stream(req: ChatRequest):
             if not cancellation.is_cancelled(request_id):
                 enriched_state = await asyncio.to_thread(run_enrichment, dict(state))
                 state.update(enriched_state)
+
                 if state.get("chart_url"):
                     yield sse_event(
                         "artifact",
@@ -364,6 +515,7 @@ async def chat_stream(req: ChatRequest):
                         url=state.get("chart_url"),
                         raw_spec=state.get("chart_spec_raw"),
                     )
+
                 if state.get("comparison_table_markdown"):
                     yield sse_event(
                         "artifact",
@@ -371,6 +523,7 @@ async def chat_stream(req: ChatRequest):
                         markdown=state.get("comparison_table_markdown"),
                         caption=state.get("comparison_table_caption"),
                     )
+
                 if state.get("graph_entities"):
                     yield sse_event(
                         "artifact",
@@ -386,6 +539,7 @@ async def chat_stream(req: ChatRequest):
                     turn_id,
                     state,
                 )
+
                 if filename:
                     yield sse_event("filename", filename=filename)
 
@@ -408,14 +562,17 @@ async def chat_stream(req: ChatRequest):
 @router.post("/chat/cancel/{request_id}")
 def chat_cancel(request_id: str):
     found = cancellation.cancel(request_id)
+
     if not found:
         return {"cancelled": False}
+
     return {"cancelled": True}
 
 
 @router.post("/chat/regenerate", response_model=ChatResponse)
 async def regenerate(req: RegenerateRequest):
     turn_id = req.turn_id or str(uuid.uuid4())
+
     if req.is_followup:
         followup_req = FollowupRequest(
             session_id=req.session_id,
@@ -423,18 +580,26 @@ async def regenerate(req: RegenerateRequest):
             question=req.query,
             response_mode=req.response_mode,
         )
+
         from app.api.routes.followup import followup as run_followup
-        result: FollowupResponse = await asyncio.to_thread(run_followup, followup_req)
+
+        result: FollowupResponse = await asyncio.to_thread(
+            run_followup,
+            followup_req,
+        )
+
         return ChatResponse(
             answer=result.answer,
             session_id=req.session_id,
             turn_id=turn_id,
             papers=[],
             citations=result.sources,
+            disclaimer=get_disclaimer(),
             response_mode=req.response_mode,
             references=result.references,
             chart_url=result.chart_url,
         )
+
     chat_req = ChatRequest(
         query=req.query,
         session_id=req.session_id,
@@ -442,9 +607,12 @@ async def regenerate(req: RegenerateRequest):
         evidence_mode=req.evidence_mode,
         response_mode=req.response_mode,
     )
+
     initial_state = _build_initial_state(chat_req, req.session_id, turn_id)
+
     final_state = await research_graph.ainvoke(initial_state)
     final_state = await asyncio.to_thread(run_enrichment, final_state)
+
     return await asyncio.to_thread(
         _finalize_chat_response_blocking,
         chat_req,

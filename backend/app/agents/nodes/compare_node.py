@@ -1,5 +1,5 @@
+import re
 from langchain_core.messages import SystemMessage, HumanMessage
-
 from app.agents.state import AgentState
 from app.agents.schemas import ComparisonTable
 from app.services.llm_client import get_llm
@@ -40,6 +40,10 @@ _DEFINITIONAL_STARTS = (
     "overview of",
     "introduction to",
 )
+
+def _clean_table_cell(text: str) -> str:
+    text = re.sub(r"\[paper_id=\d+\]", "", text)
+    return text.replace("|", "/").strip()
 
 
 def _is_definitional_query(query: str) -> bool:
@@ -124,8 +128,18 @@ Build a table where:
 - each cell = a short, specific, factual claim under ~20 words
 - cite [paper_id=N] only where a retrieved paper directly supports the claim
 
-Set applicable=false ONLY if the query truly has no comparable multi-item structure.
+MANDATORY DIMENSION CATEGORIES TO CONSIDER (use these exact rows if applicable to the domain):
+- Core Mechanism / Pathway (How it fundamentally works)
+- Asymptotic / Theoretical Bounds (Big-O, physical limits, mathematical guarantees)
+- Empirical Performance / Effect Size (Benchmark results, clinical outcomes, yield)
+- Resource / Cost Profile (Compute, memory, capital, biological toll, time)
+- Boundary Conditions / Failure Modes (Where it breaks down or is contraindicated)
+- Ecosystem / Maturity (Tooling, standardization, clinical adoption, market penetration)
 
+Rules for cells:
+- Be highly specific and analytical. Use quantitative anchors where possible.
+- Cite [paper_id=N] or [web_doc] where supported.
+- Set applicable=false ONLY if the query truly has no comparable multi-item structure.
 Return a ComparisonTable JSON object.
 """
 
@@ -177,11 +191,14 @@ def _table_to_markdown(table: ComparisonTable) -> str:
     sep = "|---|" + "---|" * len(table.columns)
 
     lines = [header, sep]
-
     for row in table.rows:
         cells = [row.dimension] + row.values
         cells = (cells + [""] * (len(table.columns) + 1))[: len(table.columns) + 1]
-        lines.append("| " + " | ".join(c.replace("|", "/") for c in cells) + " |")
+        lines.append(
+            "| "
+            + " | ".join(_clean_table_cell(c) for c in cells)
+            + " |"
+        )
 
     return "\n".join(lines)
 
@@ -222,9 +239,16 @@ def _generate_basic_fallback_table(
 
     for dim, values in rows:
         values = (values + [""] * len(columns))[:len(columns)]
-        lines.append("| " + dim + " | " + " | ".join(v.replace("|", "/") for v in values) + " |")
+        lines.append(
+            "| "
+            + dim
+            + " | "
+            + " | ".join(_clean_table_cell(v) for v in values)
+            + " |"
+        )
 
     return "\n".join(lines)
+
 
 
 def compare_node(state: AgentState) -> AgentState:
