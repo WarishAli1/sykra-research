@@ -1,214 +1,654 @@
 import asyncio
-import hashlib
 import re
-import threading
-import time
-
-from app.agents.state import AgentState
-from app.services.paper_search import (
-    search_arxiv_async,
-    search_openalex_async,
-    search_openalex_foundational_async,
-    fetch_referenced_work_ids_async,
-    fetch_openalex_works_by_ids_async,
-    sanitize_openalex_search,
+from collections import Counter
+from app.agents.research_engine import (
+    assess_coverage,
+    derive_research_needs,
+    merge_duplicate_papers,
+    uncovered_needs,
 )
+from app.agents.state import AgentState
+
+from app.services.paper_search import (
+    fetch_openalex_works_by_ids_async,
+    fetch_referenced_work_ids_async,
+    sanitize_openalex_search,
+    search_arxiv_async,
+    search_arxiv_by_title_async,
+    search_openalex_async,
+    search_openalex_by_title_async,
+    search_openalex_foundational_async,
+    search_semantic_scholar_async,
+)
+
+from app.services.web_search import search_web_async
+
 from app.services.embeddings import embed_texts, similarity
 from app.services.embedding_cache import batch_get_or_compute
-from app.services import semantic_cache
+
 from app.services import request_dedup
+from app.services import semantic_cache
+
+from app.services.provider_capabilities import (
+    providers_for_capabilities,
+    web_source_intent_for_capabilities,
+)
+
 from app.config import settings
 
-_query_cache: dict[str, tuple[float, list[dict]]] = {}
-_cache_lock = threading.Lock()
-CACHE_TTL_SECONDS = 3600
 
-MAX_TOTAL_CANDIDATES = 150
-SIM_THRESH = 0.35
-FOUNDATION_SIM_THRESH = 0.22
-FOUNDATION_BACKTRACK_SIM_THRESH = 0.15
-FOUNDATION_GUARANTEE_SIM = 0.15
-
-MAX_FOUNDATION_TERMS = 5 
-FOUNDATION_PER_TERM = 12 
-
-CANDIDATE_PRE_EMBED = 120
-
-ENABLE_FOUNDATION_BACKTRACK = False 
-MAX_BACKTRACK_ANCHORS = 2
-MAX_REFERENCED_PER_ANCHOR = 25
-MAX_BACKTRACK_IDS = 50
-MAX_BACKTRACK_WORKS = 50
-
-FAST_MAX_QUERIES = 3
-FAST_MAX_FOUNDATION_TERMS = 2
-FAST_CANDIDATE_PRE_EMBED = 40
-FAST_FOUNDATION_APPEND = 6
-FAST_ARXIV_RESULTS = 8
+try:
+    from app.services.provider_health import is_available as _provider_is_available
+except Exception:
+    def _provider_is_available(provider: str) -> bool:
+        return True
 
 
-def _paper_key(p: dict) -> str:
-    return p.get("link") or p.get("title", "").strip().lower()
+MAX_TOTAL_CANDIDATES = 90
+
+BASE_SIM_THRESH_FAST = 0.38
+BASE_SIM_THRESH_RESEARCH = 0.32
+
+_QUOTED_RE = re.compile(r'"([^"]+)"')
 
 
-def _cache_key(query: str, kind: str) -> str:
-    return hashlib.sha256(f"{kind}:{query.lower()}".encode()).hexdigest()
+_BUDGETS = {
+    "fast": {
+        "openalex": 2,
+        "arxiv": 1,
+        "web": 1,
+        "total": 3,
+    },
+    "research": {
+        "openalex": 7,
+        "arxiv": 3,
+        "web": 1,
+        "total": 11,
+    },
+}
 
 
-def _get_cached(query: str, kind: str = "normal") -> list[dict] | None:
-    with _cache_lock:
-        entry = _query_cache.get(_cache_key(query, kind))
+class SearchMetrics:
+    def __init__(self):
+        self.openalex = 0
+        self.arxiv = 0
+        self.web = 0
+        self.total = 0
 
-    if entry and (time.time() - entry[0]) < CACHE_TTL_SECONDS:
-        return entry[1]
+    def can_search(
+        self,
+        provider: str,
+        count: int,
+        maxes: dict,
+    ) -> bool:
+        if self.total + count > maxes["total"]:
+            return False
 
-    return None
+        if provider in ("openalex", "foundational", "backtrack"):
+            return self.openalex + count <= maxes["openalex"]
 
+        if provider == "arxiv":
+            return self.arxiv + count <= maxes["arxiv"]
 
-def _set_cached(query: str, results: list[dict], kind: str = "normal") -> None:
-    with _cache_lock:
-        _query_cache[_cache_key(query, kind)] = (time.time(), results)
+        if provider == "web":
+            return self.web + count <= maxes["web"]
+
+        return True
+
+    def record(
+        self,
+        provider: str,
+        count: int = 1,
+    ) -> None:
+        if provider in ("openalex", "foundational", "backtrack"):
+            self.openalex += count
+
+        elif provider == "arxiv":
+            self.arxiv += count
+
+        elif provider == "web":
+            self.web += count
+
+        self.total += count
 
 
 def _safe_results(result) -> list[dict]:
     if isinstance(result, Exception):
         return []
+
     return result or []
 
 
-def _foundation_search_terms(state: AgentState) -> list[str]:
-    qu = state.get("query_understanding") or {}
+def _get_plan(state: AgentState) -> dict:
+    """
+    Return the RetrievalPlan from state.
 
-    main_topic = (qu.get("main_topic") or "").strip()
-    domain = (qu.get("application_domain") or "").strip()
-    methods = [m.strip() for m in (qu.get("methods_techniques") or []) if m and m.strip()]
-    entities = [e.strip() for e in (qu.get("entities") or []) if e and e.strip()]
+    This fallback is intentionally minimal.
 
-    terms = []
+    It must not reinterpret AnswerSpec.
+    retrieval_plan_node.py is the only real retrieval planner.
+    """
+    plan = state.get("retrieval_plan") or {}
 
-    if main_topic and domain:
-        terms.append(f"{main_topic} {domain}")
+    if plan.get("intents"):
+        return plan
 
-    if main_topic and methods:
-        terms.append(f"{main_topic} {methods[0]}")
-
-    if main_topic:
-        terms.append(main_topic)
-
-    for e in entities[:2]:
-        terms.append(e)
-
-    for m in methods[:2]:
-        terms.append(m)
-
-    cleaned_query = sanitize_openalex_search(state.get("query", ""), max_words=6)
-    if cleaned_query:
-        terms.append(cleaned_query)
-
-    raw_q = state.get("query", "").lower()
-    if " and " in raw_q or " vs " in raw_q or " or " in raw_q:
-        parts = re.split(r"\s+(?:and|vs|or)\s+", raw_q)
-        for part in parts:
-            clean_part = sanitize_openalex_search(part, max_words=4)
-            if clean_part and len(clean_part) > 2:
-                terms.append(clean_part)
-
-    clean, seen = [], set()
-
-    for t in terms:
-        t = (t or "").strip()
-        key = t.lower()
-
-        if t and key not in seen and len(t) <= 120:
-            seen.add(key)
-            clean.append(t)
-
-    return clean[:MAX_FOUNDATION_TERMS]
-
-
-def _mark_foundational(p: dict, source: str) -> dict:
-    p["_foundational_candidate"] = True
-
-    rank = {
-        "citation_backtrack": 3,
-        "precision": 2,
-        "generic": 1,
+    return {
+        "intents": [
+            {
+                "query": state.get("query", ""),
+                "purpose": "requirement",
+                "priority": 1,
+                "source_capabilities": [
+                    "secondary_research"
+                ],
+            }
+        ],
+        "primary_source_required": False,
+        "freshness_required": False,
+        "use_foundational_search": False,
+        "use_citation_backtracking": False,
+        "max_search_intents": 1,
     }
 
-    prev = p.get("_foundational_source")
-    if not prev or rank.get(source, 0) > rank.get(prev, 0):
-        p["_foundational_source"] = source
 
-    return p
+def _extract_quoted_title(query: str) -> str | None:
+    match = _QUOTED_RE.search(query or "")
 
+    if not match:
+        return None
 
-def _merge_foundational_into_deduped(deduped, seen_ids, seen_titles, papers, source):
-    for p in papers:
-        norm = p.get("title", "").strip().lower()
-        if not norm:
-            continue
-
-        arxiv_id, openalex_id = p.get("arxiv_id"), p.get("openalex_id")
-
-        existing = deduped.get(norm)
-        if existing:
-            _mark_foundational(existing, source)
-
-            if (p.get("citation_count") or 0) > (existing.get("citation_count") or 0):
-                existing["citation_count"] = p.get("citation_count")
-                existing["source"] = existing.get("source") or p.get("source")
-
-            continue
-
-        if arxiv_id and arxiv_id in seen_ids:
-            continue
-
-        if openalex_id and openalex_id in seen_ids:
-            continue
-
-        if norm in seen_titles:
-            continue
-
-        if arxiv_id:
-            seen_ids.add(arxiv_id)
-
-        if openalex_id:
-            seen_ids.add(openalex_id)
-
-        seen_titles.add(norm)
-
-        _mark_foundational(p, source)
-        deduped[norm] = p
+    return match.group(1).strip()
 
 
-async def _fetch_normal_term(term: str, arxiv_limit: int | None) -> tuple[str, list[dict]]:
-    arxiv_task = asyncio.create_task(search_arxiv_async(term, arxiv_limit))
-    openalex_task = asyncio.create_task(search_openalex_async(term, 10, True))
+def _normalize_title_strict(title: str) -> str:
+    """
+    Strict title normalization.
 
-    arxiv_res, openalex_res = await asyncio.gather(
-        arxiv_task,
-        openalex_task,
-        return_exceptions=True,
+    Do NOT remove discriminating words such as:
+    - revisiting
+    - survey
+    - review
+    - analysis
+
+    Those words are important for conservative primary-source detection.
+    """
+    t = (title or "").lower()
+
+    t = re.sub(
+        r"[^\w\s]",
+        " ",
+        t,
     )
 
-    return term, _safe_results(arxiv_res) + _safe_results(openalex_res)
+    t = re.sub(
+        r"\s+",
+        " ",
+        t,
+    ).strip()
+
+    return t
 
 
-async def _fetch_precision_term(term: str) -> tuple[str, list[dict]]:
+def _expected_canonical_titles(plan: dict) -> list[str]:
+    titles = []
+
+    for intent in plan.get("intents", []):
+        if intent.get("purpose") != "canonical_source":
+            continue
+
+        title = _extract_quoted_title(
+            str(intent.get("query") or "")
+        )
+
+        if title:
+            titles.append(title)
+
+    return list(dict.fromkeys(titles))
+
+
+def _verify_primary_sources(
+    candidates: list[dict],
+    plan: dict,
+) -> None:
+    """
+    Conservative primary-source detection.
+
+    A paper is marked primary only when its normalized title exactly equals
+    an expected canonical title from the RetrievalPlan.
+    """
+    expected_titles = _expected_canonical_titles(plan)
+
+    if not expected_titles:
+        return
+
+    expected_normalized = {
+        _normalize_title_strict(title)
+        for title in expected_titles
+        if title
+    }
+
+    for paper in candidates:
+        paper_title = _normalize_title_strict(
+            paper.get("title", "")
+        )
+
+        if paper_title in expected_normalized:
+            paper["_primary_candidate"] = True
+            paper["_source_role"] = "primary"
+            paper["_primary_source_score"] = 1.0
+
+        else:
+            paper["_primary_candidate"] = False
+
+            if paper.get("_source_role") == "primary":
+                paper["_source_role"] = "secondary"
+
+            paper.pop("_primary_source_score", None)
+
+
+def _all_capabilities(plan: dict) -> set[str]:
+    capabilities = set()
+
+    for intent in plan.get("intents", []):
+        capabilities.update(
+            intent.get("source_capabilities", [])
+        )
+
+    return capabilities
+
+
+async def _fetch_intent(
+    intent: dict,
+    maxes: dict,
+    metrics: SearchMetrics,
+    web_intent: str,
+    min_year: int | None = None,
+    max_year: int | None = None,
+) -> list[dict]:
+    query = str(intent.get("query") or "").strip()
+    if not query:
+        return []
+
+    purpose = str(intent.get("purpose") or "requirement")
+    capabilities = set(intent.get("source_capabilities") or [])
+    if not capabilities:
+        capabilities = {"secondary_research"}
+
+    web_query = query
+    if capabilities.intersection({
+        "official_authority",
+        "official_authority_financial",
+        "official_authority_legal",
+        "official_authority_clinical",
+    }):
+        web_query = (
+            f"{query} site:worldbank.org OR site:adb.org OR "
+            f"site:iea.org OR site:imf.org OR site:un.org OR site:who.int"
+        )
+
+
+    providers = providers_for_capabilities(capabilities)
+    providers = {
+        provider
+        for provider in providers
+        if _provider_is_available(provider)
+    }
+    if not providers:
+        return []
+
+    tasks = []
+    title = (
+        _extract_quoted_title(query)
+        if purpose == "canonical_source"
+        else None
+    )
+
+    if title:
+        if (
+            "openalex" in providers
+            and metrics.can_search("openalex", 1, maxes)
+        ):
+            tasks.append(search_openalex_by_title_async(title, 3))
+            metrics.record("openalex")
+        if (
+            "arxiv" in providers
+            and metrics.can_search("arxiv", 1, maxes)
+        ):
+            tasks.append(search_arxiv_by_title_async(title, 3))
+            metrics.record("arxiv")
+        if (
+            "web" in providers
+            and metrics.can_search("web", 1, maxes)
+        ):
+            tasks.append(
+                search_web_async(
+                    web_query,
+                    web_intent,
+                    max_results=3,
+                )
+            )
+            metrics.record("web")
+    else:
+        apply_year_filter = (
+            min_year is not None
+            or max_year is not None
+        ) and purpose not in ("canonical_source", "equation")
+
+        if (
+            "openalex" in providers
+            and metrics.can_search("openalex", 1, maxes)
+        ):
+            tasks.append(
+                search_openalex_async(
+                    query,
+                    5,
+                    purpose in ("canonical_source", "equation"),
+                    min_year=min_year if apply_year_filter else None,
+                    max_year=max_year if apply_year_filter else None,
+                )
+            )
+            metrics.record("openalex")
+        if (
+            "arxiv" in providers
+            and metrics.can_search("arxiv", 1, maxes)
+        ):
+            tasks.append(
+                search_arxiv_async(
+                    query,
+                    4,
+                )
+            )
+            metrics.record("arxiv")
+        if (
+            "web" in providers
+            and metrics.can_search("web", 1, maxes)
+        ):
+            tasks.append(
+                search_web_async(
+                    web_query,
+                    web_intent,
+                    max_results=3,
+                )
+            )
+            metrics.record("web")
+
+    if not tasks:
+        return []
+
+    results = await asyncio.gather(
+        *tasks,
+        return_exceptions=True,
+    )
+    rows: list[dict] = []
+    for result in results:
+        rows.extend(_safe_results(result))
+
+    for paper in rows:
+        paper["_source_term"] = query
+        paper["_retrieval_purpose"] = purpose
+        paper["_primary_candidate"] = False
+
+    return rows
+
+
+async def _retrieve_foundational_budgeted(
+    intents: list[dict],
+    maxes: dict,
+    metrics: SearchMetrics,
+) -> list[dict]:
+    if not _provider_is_available("openalex"):
+        return []
+
+    terms = []
+    for intent in intents:
+        if intent.get("purpose") not in (
+            "canonical_source",
+            "equation",
+            "requirement",
+        ):
+            continue
+        raw_query = str(intent.get("query") or "")
+        title = _extract_quoted_title(raw_query)
+        query = title or raw_query
+        sanitized = sanitize_openalex_search(query, max_words=6)
+        if sanitized:
+            terms.append(sanitized)
+
+    terms = list(dict.fromkeys(terms))[:2]
+    if not terms:
+        return []
+
+    rows = []
+    for term in terms:
+        if not metrics.can_search("foundational", 1, maxes):
+            break
+        metrics.record("foundational")
+        try:
+            oa_result, s2_result = await asyncio.gather(
+                search_openalex_foundational_async(term, 5),
+                search_semantic_scholar_async(
+                    term, limit=5, sort_by_citations=True
+                ),
+                return_exceptions=True,
+            )
+        except Exception:
+            oa_result, s2_result = [], []
+
+        for paper in _safe_results(oa_result):
+            paper["_foundational_candidate"] = True
+            paper["_foundational_source"] = "citation_sort"
+            paper["_source_term"] = term
+            rows.append(paper)
+
+        for paper in _safe_results(s2_result):
+            paper["_foundational_candidate"] = True
+            paper["_foundational_source"] = "influential_sort"
+            paper["_source_term"] = term
+            rows.append(paper)
+
+    return rows
+
+
+async def _citation_backtrack_budgeted(
+    candidates: list[dict],
+    maxes: dict,
+    metrics: SearchMetrics,
+) -> list[dict]:
+    if not _provider_is_available("openalex"):
+        return []
+
+    anchors = [
+        paper.get("openalex_id")
+        for paper in candidates
+        if paper.get("openalex_id")
+    ][:1]
+
+    if not anchors:
+        return []
+
+    if not metrics.can_search("backtrack", 2, maxes):
+        return []
+
     try:
-        results = await search_openalex_foundational_async(term, FOUNDATION_PER_TERM)
+        refs = await fetch_referenced_work_ids_async(anchors[0], 15)
+
     except Exception:
-        results = []
+        refs = []
 
-    return term, results or []
+    metrics.record("backtrack", 1)
+
+    ref_ids = []
+
+    for wid in refs or []:
+        if wid not in ref_ids:
+            ref_ids.append(wid)
+
+        if len(ref_ids) >= 8:
+            break
+
+    if not ref_ids:
+        return []
+
+    if not metrics.can_search("backtrack", 1, maxes):
+        return []
+
+    try:
+        works = await fetch_openalex_works_by_ids_async(
+            ref_ids,
+            limit=8,
+        )
+
+    except Exception:
+        return []
+
+    metrics.record("backtrack", 1)
+
+    rows = []
+
+    for paper in _safe_results(works):
+        paper["_foundational_candidate"] = True
+        paper["_foundational_source"] = "citation_backtrack"
+        paper["_source_term"] = "citation_backtrack"
+
+        rows.append(paper)
+
+    return rows
 
 
-async def _materialize_cached_search(state: AgentState, cached: dict) -> dict:
-    raw = cached.get("raw_search_results", []) or []
+async def _foundational_convergence_budgeted(
+    candidates: list[dict],
+    maxes: dict,
+    metrics: SearchMetrics,
+) -> list[dict]:
+    """
+    Connected Papers-style "prior works" discovery. Pure code, no LLM.
+
+    Intersects the reference lists of the top relevant papers: a work
+    that several independent papers ALL cite is very likely the
+    foundational origin of the topic — even when the topic is not in
+    FOUNDATIONAL_PAPERS and even when a survey out-cites the origin.
+
+    Budget-adaptive: uses as many anchors (2-3) as budget allows.
+    """
+    if not _provider_is_available("openalex"):
+        return []
+
+    anchors = [
+        paper.get("openalex_id")
+        for paper in sorted(
+            candidates,
+            key=lambda p: p.get("_initial_sim", 0),
+            reverse=True,
+        )
+        if paper.get("openalex_id")
+        and not paper.get("_foundational_candidate")
+    ]
+    anchors = list(dict.fromkeys(anchors))[:3]
+
+    affordable = min(
+        3,
+        max(0, maxes["openalex"] - metrics.openalex - 1),
+        max(0, maxes["total"] - metrics.total - 1),
+    )
+    if affordable < 2:
+        return []
+    anchors = anchors[:affordable]
+    if len(anchors) < 2:
+        return []
+
+    metrics.record("backtrack", len(anchors))
+    ref_lists = await asyncio.gather(
+        *[fetch_referenced_work_ids_async(oid, 40) for oid in anchors],
+        return_exceptions=True,
+    )
+    ref_sets = [
+        set(refs)
+        for refs in ref_lists
+        if isinstance(refs, list) and refs
+    ]
+    if len(ref_sets) < 2:
+        return []
+
+    counts = Counter()
+    for ref_set in ref_sets:
+        counts.update(ref_set)
+
+    common = [
+        wid for wid, cnt in counts.items() if cnt >= 2
+    ][:12]
+    if not common:
+        return []
+
+    if not metrics.can_search("backtrack", 1, maxes):
+        return []
+    metrics.record("backtrack", 1)
+    try:
+        works = await fetch_openalex_works_by_ids_async(common, 12)
+    except Exception:
+        return []
+
+    hit_map = {wid: counts[wid] for wid in common}
+    rows = []
+    for paper in _safe_results(works):
+        paper["_foundational_candidate"] = True
+        paper["_foundational_source"] = "citation_convergence"
+        paper["_source_term"] = "citation_convergence"
+        paper["_convergence_hits"] = hit_map.get(
+            paper.get("openalex_id", ""), 0
+        )
+        rows.append(paper)
+
+    print(
+        f"[search] convergence discovery: {len(anchors)} anchors -> "
+        f"{len(rows)} common-ancestor candidates"
+    )
+    return rows
+
+
+async def _embed_candidates(
+    candidates: list[dict],
+    query_embedding: list[float],
+) -> None:
+    missing = [
+        paper
+        for paper in candidates
+        if paper.get("abstract_vec") is None
+    ]
+
+    if not missing:
+        return
+
+    paired = await asyncio.to_thread(
+        batch_get_or_compute,
+        missing[:MAX_TOTAL_CANDIDATES],
+        embed_texts,
+    )
+
+    for paper, vec in paired:
+        paper["_initial_sim"] = similarity(
+            query_embedding,
+            vec,
+        )
+
+        paper["abstract_vec"] = vec
+
+
+async def _materialize_cached_search(
+    state: AgentState,
+    cached: dict,
+) -> dict:
+
+    raw = merge_duplicate_papers(cached.get("raw_search_results", []) or [])
     query_embedding = cached.get("query_embedding")
 
     if not query_embedding:
-        query_embedding = (await asyncio.to_thread(embed_texts, [state["query"]]))[0]
+        query_embedding = (
+            await asyncio.to_thread(
+                embed_texts,
+                [state["query"]],
+            )
+        )[0]
 
     paired = await asyncio.to_thread(
         batch_get_or_compute,
@@ -217,10 +657,27 @@ async def _materialize_cached_search(state: AgentState, cached: dict) -> dict:
     )
 
     for paper, vec in paired:
-        paper["_initial_sim"] = similarity(query_embedding, vec)
+        paper["_initial_sim"] = similarity(
+            query_embedding,
+            vec,
+        )
+
         paper["abstract_vec"] = vec
 
     combined = [p for p, _ in paired]
+
+    _verify_primary_sources(
+        combined,
+        state.get("retrieval_plan") or {},
+    )
+
+    needs = derive_research_needs(
+        state.get("query", ""),
+        state.get("query_understanding") or {},
+        state.get("report_plan") or {},
+    )
+
+    coverage = assess_coverage(needs, combined)
 
     return {
         "raw_search_results": combined,
@@ -228,347 +685,294 @@ async def _materialize_cached_search(state: AgentState, cached: dict) -> dict:
         "needs_retry": False,
         "query_embedding": query_embedding,
         "search_cache_hit": True,
+        "term_coverage": coverage,
     }
 
 
-async def _search_core_async(state: AgentState, scope: str) -> dict:
+async def _search_core_async(
+    state: AgentState,
+    scope: str,
+) -> dict:
     mode = state.get("response_mode", "normal")
     evidence_mode = state.get("evidence_mode", "literature")
+
     is_fast = mode not in ("researched", "graph_research")
 
-    target_k = int(state.get("target_paper_k") or settings.TOP_K_PAPERS_MAX)
-
-    terms = state.get("search_queries") or state.get("search_terms") or [state["query"]]
-    terms = list(dict.fromkeys(terms))
-
-    if is_fast:
-        max_queries = min(FAST_MAX_QUERIES, max(2, target_k))
-        terms = terms[:max_queries]
-
-    foundation_terms = _foundation_search_terms(state)
-
-    if is_fast:
-        max_foundation_terms = min(FAST_MAX_FOUNDATION_TERMS, max(1, target_k - 2))
-        foundation_terms = foundation_terms[:max_foundation_terms]
-
-    arxiv_limit = FAST_ARXIV_RESULTS if is_fast else max(settings.ARXIV_MAX_RESULTS, target_k * 2)
-
-    print(
-        f"[search] mode={mode} fast={is_fast} target_k={target_k} "
-        f"terms={len(terms)} foundation_terms={foundation_terms}"
+    target_k = int(
+        state.get("target_paper_k")
+        or settings.TOP_K_PAPERS_MAX
     )
 
-    per_term_results = {t: _get_cached(t, "normal") or [] for t in terms}
-    to_fetch = [t for t in terms if _get_cached(t, "normal") is None]
+    plan = _get_plan(state)
 
-    if to_fetch:
-        tasks = [_fetch_normal_term(term, arxiv_limit) for term in to_fetch]
-        fetched = await asyncio.gather(*tasks, return_exceptions=True)
+    maxes = _BUDGETS["fast"] if is_fast else _BUDGETS["research"]
 
-        for item in fetched:
-            if isinstance(item, Exception):
-                continue
+    metrics = SearchMetrics()
 
-            term, results = item
-            _set_cached(term, results, "normal")
-            per_term_results[term] = results
+    all_capabilities = _all_capabilities(plan)
 
-    precision_results = []
-    cached_precision = {t: _get_cached(t, "foundation_v2") or [] for t in foundation_terms}
-    to_fetch_precision = [t for t in foundation_terms if _get_cached(t, "foundation_v2") is None]
-
-    if to_fetch_precision:
-        tasks = [_fetch_precision_term(t) for t in to_fetch_precision]
-        fetched_precision = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for item in fetched_precision:
-            if isinstance(item, Exception):
-                continue
-
-            term, results = item
-            _set_cached(term, results, "foundation_v2")
-            cached_precision[term] = results
-
-    for term, results in cached_precision.items():
-        for p in results:
-            p["_source_term"] = term
-            _mark_foundational(p, "precision")
-            precision_results.append(p)
-
-    seen_ids, seen_titles = set(), set()
-    deduped = {}
-
-    for term, results in per_term_results.items():
-        for p in results:
-            arxiv_id, openalex_id = p.get("arxiv_id"), p.get("openalex_id")
-            norm = p.get("title", "").strip().lower()
-
-            if not norm:
-                continue
-
-            if arxiv_id and arxiv_id in seen_ids:
-                continue
-
-            if openalex_id and openalex_id in seen_ids:
-                continue
-
-            if norm in seen_titles:
-                continue
-
-            if arxiv_id:
-                seen_ids.add(arxiv_id)
-
-            if openalex_id:
-                seen_ids.add(openalex_id)
-
-            seen_titles.add(norm)
-
-            p["_source_term"] = term
-            deduped[norm] = p
-
-    _merge_foundational_into_deduped(
-        deduped,
-        seen_ids,
-        seen_titles,
-        precision_results,
-        "precision",
+    web_intent = web_source_intent_for_capabilities(
+        all_capabilities
     )
 
-    all_papers = list(deduped.values())
-
-    query_words = [w for w in state["query"].lower().split() if len(w) > 3]
-
-    if query_words:
-        filtered = [p for p in all_papers if any(qw in p.get("title", "").lower() for qw in query_words)]
-
-        if len(filtered) >= 5:
-            filtered_keys = {_paper_key(p) for p in filtered}
-
-            found = [
-                p for p in all_papers
-                if p.get("_foundational_candidate") and _paper_key(p) not in filtered_keys
-            ]
-
-            all_papers = filtered + found[:4]
-
-    candidate_cap = FAST_CANDIDATE_PRE_EMBED if is_fast else CANDIDATE_PRE_EMBED
-    candidate_cap = max(candidate_cap, target_k * 8)
-
-    foundation_append = FAST_FOUNDATION_APPEND if is_fast else 12
-    foundation_append = max(foundation_append, target_k)
-
-    candidates = all_papers[:candidate_cap]
-
-    foundation_candidates = [p for p in all_papers if p.get("_foundational_candidate")]
-    foundation_candidates.sort(key=lambda x: x.get("citation_count", 0) or 0, reverse=True)
-
-    candidate_keys = {_paper_key(p) for p in candidates}
-
-    for p in foundation_candidates[:foundation_append]:
-        key = _paper_key(p)
-        if key not in candidate_keys:
-            candidates.append(p)
-            candidate_keys.add(key)
-
-    query_embedding = (await asyncio.to_thread(embed_texts, [state["query"]]))[0]
-
-    paired = await asyncio.to_thread(
-        batch_get_or_compute,
-        candidates,
-        embed_texts,
+    intents = sorted(
+        plan.get("intents", []),
+        key=lambda x: (
+            int(x.get("priority", 1) or 1),
+            x.get("purpose") == "canonical_source",
+        ),
+        reverse=True,
     )
 
-    for paper, vec in paired:
-        paper["_initial_sim"] = similarity(query_embedding, vec)
-        paper["abstract_vec"] = vec
+    evidence_contract = state.get("evidence_contract") or {}
+    min_year = None
+    max_year = None
+    for c in evidence_contract.get("constraints", []):
+        if c.get("field") == "publication_year":
+            try:
+                val = int(c.get("value", 0))
+            except (ValueError, TypeError):
+                continue
+            if c.get("operator") == "gte":
+                min_year = val
+            elif c.get("operator") == "lte":
+                max_year = val
 
-    backtrack_results = []
-    enable_backtrack = ENABLE_FOUNDATION_BACKTRACK and not is_fast
+    max_intents = int(
+        plan.get("max_search_intents")
+        or (3 if is_fast else 4)
+    )
 
-    if enable_backtrack:
-        anchor_pool = [
-            p for p, _ in paired
-            if p.get("openalex_id") and not p.get("_foundational_candidate")
+    intents = intents[:max_intents]
+
+    all_rows: list[dict] = []
+
+    for intent in intents:
+        if metrics.total >= maxes["total"]:
+            break
+        rows = await _fetch_intent(
+            intent,
+            maxes,
+            metrics,
+            web_intent,
+            min_year=min_year,
+            max_year=max_year,
+        )
+
+        all_rows.extend(rows)
+
+    all_rows = merge_duplicate_papers(all_rows)
+
+    if plan.get("use_foundational_search"):
+        foundational_rows = await _retrieve_foundational_budgeted(
+            intents,
+            maxes,
+            metrics,
+        )
+
+        if foundational_rows:
+            all_rows = merge_duplicate_papers(
+                all_rows + foundational_rows
+            )
+
+    answer_spec = state.get("answer_spec") or {}
+    foundational_papers = answer_spec.get("foundational_papers") or []
+    if foundational_papers and not is_fast:
+        for fp in foundational_papers[:2]:
+            title = fp.get("title", "")
+            if not title:
+                continue
+            try:
+                oa_results = await search_openalex_by_title_async(title, 3)
+                arxiv_results = await search_arxiv_by_title_async(title, 3)
+                for p in oa_results + arxiv_results:
+                    p["_foundational_candidate"] = True
+                    p["_foundational_source"] = "explicit"
+                    p["_source_term"] = title
+                all_rows = merge_duplicate_papers(all_rows + oa_results + arxiv_results)
+            except Exception:
+                pass
+
+    _verify_primary_sources(all_rows, plan)
+
+    query_embedding = (
+        await asyncio.to_thread(
+            embed_texts,
+            [state["query"]],
+        )
+    )[0]
+
+    await _embed_candidates(all_rows, query_embedding)
+
+    candidates = all_rows
+
+    needs = derive_research_needs(
+        state.get("query", ""),
+        state.get("query_understanding") or {},
+        state.get("report_plan") or {},
+    )
+
+    coverage = assess_coverage(needs, candidates)
+
+    gaps = uncovered_needs(
+        coverage,
+        max_items=2,
+    )
+
+    if (
+        not is_fast
+        and gaps
+        and metrics.total < maxes["total"]
+    ):
+        understanding = state.get("query_understanding") or {}
+
+        main_topic = str(understanding.get("main_topic") or "").strip()
+
+        gap_capabilities = sorted(
+            all_capabilities
+            or {"secondary_research"}
+        )
+
+        for gap in gaps[:2]:
+            if metrics.total >= maxes["total"]:
+                break
+
+            gap = str(gap).strip()
+
+            if not gap:
+                continue
+
+            if len(gap.split()) < 4 and main_topic:
+                gap_query = f"{main_topic} {gap}"
+
+            else:
+                gap_query = gap
+
+            rows = await _fetch_intent(
+                {
+                    "query": gap_query[:140],
+                    "purpose": "requirement",
+                    "priority": 2,
+                    "source_capabilities": gap_capabilities,
+                },
+                maxes,
+                metrics,
+                web_intent,
+                min_year=min_year,
+                max_year=max_year,
+            )
+
+            for paper in rows:
+                paper["_followup_for_gap"] = True
+
+            candidates = merge_duplicate_papers(candidates + rows)
+
+        await _embed_candidates(candidates, query_embedding)
+
+        _verify_primary_sources(candidates, plan)
+
+        coverage = assess_coverage(needs, candidates)
+
+    weak = [
+        value
+        for value in coverage.values()
+        if value.get("status") != "covered"
+    ]
+    if plan.get("use_citation_backtracking") and not is_fast:
+        discovered: list[dict] = []
+        already_foundational = any(
+            p.get("_foundational_candidate") for p in candidates
+        )
+        if not already_foundational:
+            discovered = await _foundational_convergence_budgeted(
+                candidates,
+                maxes,
+                metrics,
+            )
+
+        if not discovered and weak:
+            discovered = await _citation_backtrack_budgeted(
+                sorted(
+                    candidates,
+                    key=lambda p: p.get("_initial_sim", 0),
+                    reverse=True,
+                )[:6],
+                maxes,
+                metrics,
+            )
+
+        if discovered:
+            candidates = merge_duplicate_papers(candidates + discovered)
+            await _embed_candidates(candidates, query_embedding)
+            _verify_primary_sources(candidates, plan)
+
+    sim_thresh = (
+        BASE_SIM_THRESH_FAST
+        if is_fast
+        else BASE_SIM_THRESH_RESEARCH
+    )
+
+    RELAXED_SIM_FLOOR = sim_thresh * 0.75
+
+    filtered = [
+        paper
+        for paper in sorted(
+            candidates,
+            key=lambda x: x.get("_initial_sim", 0),
+            reverse=True,
+        )
+        if (paper.get("_initial_sim") or 0) >= sim_thresh
+        or paper.get("_foundational_candidate")
+        or paper.get("_primary_candidate")
+    ]
+
+    if len(filtered) < max(6, target_k):
+        relaxed = [
+            paper
+            for paper in sorted(
+                candidates,
+                key=lambda x: x.get("_initial_sim", 0),
+                reverse=True,
+            )
+            if (paper.get("_initial_sim") or 0) >= RELAXED_SIM_FLOOR
+            or paper.get("_foundational_candidate")
+            or paper.get("_primary_candidate")
         ]
 
-        anchor_pool.sort(
-            key=lambda p: (p.get("_initial_sim", 0), p.get("citation_count", 0) or 0),
-            reverse=True,
-        )
+        if relaxed:
+            filtered = relaxed[: max(16, target_k * 2)]
 
-        anchors = [
-            p["openalex_id"] for p in anchor_pool
-            if p.get("_initial_sim", 0) >= 0.40
-        ][:MAX_BACKTRACK_ANCHORS]
+    combined = filtered[:MAX_TOTAL_CANDIDATES]
 
-        if not anchors:
-            anchors = [p["openalex_id"] for p in anchor_pool[:MAX_BACKTRACK_ANCHORS]]
+    coverage = assess_coverage(needs, combined)
 
-        if anchors:
-            ref_ids = []
+    found_primary = sum(
+        1
+        for paper in combined
+        if paper.get("_primary_candidate")
+    )
 
-            tasks = [
-                fetch_referenced_work_ids_async(aid, MAX_REFERENCED_PER_ANCHOR)
-                for aid in anchors
-            ]
+    found_foundational = sum(
+        1
+        for paper in combined
+        if paper.get("_foundational_candidate")
+    )
 
-            fetched_refs = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for ids in fetched_refs:
-                if isinstance(ids, Exception):
-                    continue
-
-                for wid in ids or []:
-                    if wid not in ref_ids:
-                        ref_ids.append(wid)
-
-                    if len(ref_ids) >= MAX_BACKTRACK_IDS:
-                        break
-
-            if ref_ids:
-                works = await fetch_openalex_works_by_ids_async(ref_ids, limit=MAX_BACKTRACK_WORKS)
-
-                for w in works:
-                    w["_source_term"] = "citation_backtrack"
-                    _mark_foundational(w, "citation_backtrack")
-
-                backtrack_results = works
-
-    paired_keys = {_paper_key(p) for p, _ in paired}
-    to_embed_backtrack = []
-
-    for p in backtrack_results:
-        norm = p.get("title", "").strip().lower()
-        if not norm:
-            continue
-
-        existing = deduped.get(norm)
-
-        if existing:
-            _mark_foundational(existing, "citation_backtrack")
-
-            if (p.get("citation_count") or 0) > (existing.get("citation_count") or 0):
-                existing["citation_count"] = p.get("citation_count")
-
-            target = existing
-
-        else:
-            arxiv_id, openalex_id = p.get("arxiv_id"), p.get("openalex_id")
-
-            if arxiv_id and arxiv_id in seen_ids:
-                continue
-
-            if openalex_id and openalex_id in seen_ids:
-                continue
-
-            if norm in seen_titles:
-                continue
-
-            if arxiv_id:
-                seen_ids.add(arxiv_id)
-
-            if openalex_id:
-                seen_ids.add(openalex_id)
-
-            seen_titles.add(norm)
-
-            deduped[norm] = p
-            target = p
-
-        key = _paper_key(target)
-        if key not in paired_keys:
-            to_embed_backtrack.append(target)
-            paired_keys.add(key)
-
-    if to_embed_backtrack:
-        bp_paired = await asyncio.to_thread(
-            batch_get_or_compute,
-            to_embed_backtrack[:MAX_BACKTRACK_WORKS],
-            embed_texts,
-        )
-
-        for paper, vec in bp_paired:
-            paper["_initial_sim"] = similarity(query_embedding, vec)
-            paper["abstract_vec"] = vec
-
-        paired.extend(bp_paired)
-
-    filtered_papers, seen_keys, foundational_pool = [], set(), []
-
-    for paper, vec in paired:
-        sim = paper.get("_initial_sim", 0.0)
-        key = _paper_key(paper)
-
-        if paper.get("_foundational_candidate"):
-            foundational_pool.append(paper)
-
-            src = paper.get("_foundational_source")
-            cites = paper.get("citation_count", 0) or 0
-
-            if src == "citation_backtrack" and (sim >= FOUNDATION_BACKTRACK_SIM_THRESH or cites >= 1000):
-                if key not in seen_keys:
-                    filtered_papers.append(paper)
-                    seen_keys.add(key)
-
-            elif src == "precision" and (sim >= FOUNDATION_SIM_THRESH or (cites >= 5000 and sim >= 0.12)):
-                if key not in seen_keys:
-                    filtered_papers.append(paper)
-                    seen_keys.add(key)
-
-            elif sim >= FOUNDATION_SIM_THRESH:
-                if key not in seen_keys:
-                    filtered_papers.append(paper)
-                    seen_keys.add(key)
-
-        else:
-            if sim >= SIM_THRESH:
-                if key not in seen_keys:
-                    filtered_papers.append(paper)
-                    seen_keys.add(key)
-
-    if not any(p.get("_foundational_candidate") for p in filtered_papers):
-        top_found = sorted(
-            foundational_pool,
-            key=lambda p: (
-                {"citation_backtrack": 2, "precision": 1}.get(p.get("_foundational_source"), 0),
-                p.get("citation_count", 0),
-                p.get("_initial_sim", 0),
-            ),
-            reverse=True,
-        )[:2]
-
-        for p in top_found:
-            key = _paper_key(p)
-            if key in seen_keys:
-                continue
-
-            if (
-                p.get("_foundational_source") == "citation_backtrack"
-                or p.get("_initial_sim", 0) >= FOUNDATION_GUARANTEE_SIM
-            ):
-                filtered_papers.append(p)
-                seen_keys.add(key)
-
-    if len(filtered_papers) < 5:
-        for p, vec in paired:
-            key = _paper_key(p)
-            if key in seen_keys:
-                continue
-
-            filtered_papers.append(p)
-            seen_keys.add(key)
-
-    combined = filtered_papers[:MAX_TOTAL_CANDIDATES]
-
-    search_attempts = state.get("search_attempts", 0) + 1
-    needs_retry = len(combined) < 5 and search_attempts < state.get("max_search_attempts", 2)
-
-    found = [p for p in combined if p.get("_foundational_candidate")]
+    covered_count = sum(
+        1
+        for value in coverage.values()
+        if value.get("status") == "covered"
+    )
 
     print(
-        f"[search:foundation] kept {len(combined)} candidates; "
-        f"foundational={len(found)}; "
-        f"top_foundational={[p.get('title', '')[:60] for p in found[:3]]}"
+        "[search] budget:\n"
+        f"total={metrics.total}/{maxes['total']}\n"
+        f"openalex={metrics.openalex}/{maxes['openalex']}\n"
+        f"arxiv={metrics.arxiv}/{maxes['arxiv']}\n"
+        f"web={metrics.web}/{maxes['web']}\n"
+        f"primary={found_primary}\n"
+        f"foundational={found_foundational}\n"
+        f"coverage={covered_count}/{len(coverage)}"
     )
 
     if (
@@ -586,10 +990,11 @@ async def _search_core_async(state: AgentState, scope: str) -> dict:
 
     return {
         "raw_search_results": combined,
-        "search_attempts": search_attempts,
-        "needs_retry": needs_retry,
+        "search_attempts": state.get("search_attempts", 0) + 1,
+        "needs_retry": False,
         "query_embedding": query_embedding,
         "search_cache_hit": False,
+        "term_coverage": coverage,
     }
 
 
@@ -599,10 +1004,12 @@ async def search_node(state: AgentState) -> AgentState:
             "raw_search_results": [],
             "needs_retry": False,
             "search_cache_hit": False,
+            "term_coverage": {},
         }
 
     mode = state.get("response_mode", "normal")
     evidence_mode = state.get("evidence_mode", "literature")
+
     query = state.get("query", "")
 
     scope = f"search:{mode}:{evidence_mode}"
@@ -615,9 +1022,12 @@ async def search_node(state: AgentState) -> AgentState:
         )
 
         if cached:
-            print(f"[search] semantic cache hit similarity={cached.get('_cache_similarity', 0):.3f}")
-            return await _materialize_cached_search(state, cached)
+            print(
+                f"[search] semantic cache hit "
+                f"similarity={cached.get('_cache_similarity', 0):.3f}"
+            )
 
+            return await _materialize_cached_search(state, cached)
 
     dedup_key = semantic_cache.make_scope_key(query, scope)
 

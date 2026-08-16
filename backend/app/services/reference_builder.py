@@ -21,6 +21,9 @@ def build_references(papers: list[dict]) -> list[dict]:
                 "link": link,
                 "published": p.get("published"),
                 "source": p.get("source", "unknown"),
+                "source_role": p.get("_source_role") or p.get("source_role"),
+                "why_cited": p.get("_why_cited") or p.get("why_cited"),
+                "support_level": p.get("_support_level") or p.get("support_level"),
             }
         )
     return refs
@@ -50,9 +53,11 @@ def paper_id_to_ref_id_map(papers: list[dict], references: list[dict]) -> dict[s
             mapping[str(i)] = link_to_ref_id[link]
     return mapping
 
-_PAPER_ID_MARKER = re.compile(r"[\[【]\s*paper_id\s*[=＝]\s*(\d+)\s*[\]】]")
+_PAPER_ID_MARKER = re.compile(
+    r"[\[【]\s*paper[\s_]?id\s*[=＝]\s*(\d+)\s*[\]】]",
+    re.IGNORECASE,
+)
 _REF_ID_MARKER = re.compile(r"\[(\d+)\]")
-
 
 def extract_paper_ids(text: str) -> list[str]:
     if not text:
@@ -72,8 +77,20 @@ def rewrite_inline_citations(text: str, id_map: dict[str, int]) -> str:
         ref_id = id_map.get(pid)
         return f"[{ref_id}]" if ref_id is not None else ""
     text = _PAPER_ID_MARKER.sub(_sub, text)
-    text = re.sub(r"[\[【]\s*paper_id\s*[=＝]\s*\d+\s*[\]】]", "", text)
+    text = _PAPER_ID_MARKER.sub("", text)
     return text
+
+
+def _clean_content(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(
+        r"\[paper_id=\d+(?:\s*,\s*paper_id=\d+)+\]",
+        lambda m: "".join(f"[paper_id={i}]" for i in re.findall(r"\d+", m.group(0))),
+        text,
+    )
+    return text.strip()
 
 
 def format_reference_block(references: list[dict]) -> str:

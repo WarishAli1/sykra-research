@@ -47,7 +47,7 @@ function mergePapers(existing: Paper[], incoming: Paper[]): Paper[] {
 
 const RAIL_WIDTH = 340;
 const STRIP_WIDTH = 44;
-const SIDEBAR_WIDTH = 224;
+const SIDEBAR_WIDTH = 260;
 const SIDEBAR_COLLAPSED_WIDTH = 48;
 const PDF_WIDTH_DEFAULT = 50;
 const PDF_WIDTH_MIN = 30;

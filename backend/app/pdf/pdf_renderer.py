@@ -26,6 +26,16 @@ CITATION_GROUP_RE = re.compile(
 IMAGE_RE = re.compile(r"!\[([^\]]*)\]\((/?exports/[^)]+)\)")
 REF_MARKER = "\n\n---\n\nReferences"
 
+DISCLAIMER_RE = re.compile(
+    r"\n*\s*\*?_?Sykra can make mistakes\.[^\n]*?starting baseline\.?_?\*?\s*"
+    r"(?=\n*(?:---\s*\n*)?(?:#{1,6}\s*)?References\b|$)",
+    re.IGNORECASE,
+)
+
+
+def _strip_disclaimer(text: str) -> str:
+    return DISCLAIMER_RE.sub("\n\n", text)
+
 
 def _normalize_citations(text: str) -> str:
     """Convert [paper_id=1,5] / [1,5] into [1][5]."""
@@ -127,6 +137,7 @@ def render_answer_pdf(
     latex_style: bool = False,
 ) -> bytes:
     """Main entry point: answer markdown -> branded PDF bytes."""
+    answer = _strip_disclaimer(answer)
     body, inline_refs = _split_answer_and_references(answer)
     body = _normalize_citations(body)
     body = sanitize_for_web(body)

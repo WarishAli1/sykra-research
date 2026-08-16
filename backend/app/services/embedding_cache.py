@@ -38,15 +38,15 @@ def batch_get_or_compute(papers: list[dict], embed_fn) -> list[tuple[dict, list[
     Returns list of (paper, embedding_vector) in the same order.
     """
     fps = [_fingerprint(p) for p in papers]
-    existing = batch_get_paper_embeddings(fps)
+    unique_fps = list(dict.fromkeys(fps))
+    existing = batch_get_paper_embeddings(unique_fps)
 
-    need_compute_indices = []
-    need_compute_papers = []
-
-    for i, (p, fp) in enumerate(zip(papers, fps)):
-        if fp not in existing:
-            need_compute_indices.append(i)
-            need_compute_papers.append(p)
+    need_compute_papers: list[dict] = []
+    seen_new: set[str] = set()
+    for paper, fp in zip(papers, fps):
+        if fp not in existing and fp not in seen_new:
+            seen_new.add(fp)
+            need_compute_papers.append(paper)
 
     if need_compute_papers:
         abstracts = [
@@ -54,8 +54,7 @@ def batch_get_or_compute(papers: list[dict], embed_fn) -> list[tuple[dict, list[
             for p in need_compute_papers
         ]
         new_vecs = embed_fn(abstracts)
-
-        for idx, vec, paper in zip(need_compute_indices, new_vecs, need_compute_papers):
+        for vec, paper in zip(new_vecs, need_compute_papers):
             cache_embedding(paper, vec)
             existing[_fingerprint(paper)] = vec
 
