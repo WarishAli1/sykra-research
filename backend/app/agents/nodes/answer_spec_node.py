@@ -550,6 +550,7 @@ def answer_spec_node(state: AgentState) -> AgentState:
 
     allow_llm = (
         not is_normal
+        and state.get("evidence_mode") != "uploaded"
         and not is_llm_rate_limited()
         and getattr(settings, "LLM_ANSWER_SPEC_ENABLED", True)
     )

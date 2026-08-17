@@ -19,6 +19,7 @@ export type StepEvent = {
   detail?: string;
   items?: string[];
   done?: boolean;
+  evidence_mode?: string;
 };
 
 type PhaseId = "search" | "review" | "synthesize" | "refine" | "finalize";
@@ -156,7 +157,49 @@ export function ResearchSteps({
 
   if (!steps.length) return null;
 
-  const phases = buildPhases(steps);
+    let phases = buildPhases(steps);
+
+  const uploadedOnly =
+    steps.some((s) => s.evidence_mode === "uploaded") ||
+    steps.some(
+      (s) =>
+        /reading uploaded document/i.test(s.label ?? "") ||
+        /skipping external search/i.test(s.label ?? "")
+    );
+
+  if (uploadedOnly) {
+    const uploadedMeta: Record<PhaseId, { title: string; placeholder: string }> = {
+      search: {
+        title: "Reading uploaded document",
+        placeholder: "Reading uploaded document",
+      },
+      review: {
+        title: "Reviewing uploaded document",
+        placeholder: "Reviewing uploaded document",
+      },
+      synthesize: {
+        title: "Writing from uploaded document",
+        placeholder: "Writing from uploaded document",
+      },
+      refine: {
+        title: "Checking document answer quality",
+        placeholder: "Checking document answer quality",
+      },
+      finalize: {
+        title: "Finalizing the response",
+        placeholder: "Finalizing the response",
+      },
+    };
+
+    phases = phases.map((st) => ({
+      ...st,
+      def: {
+        ...st.def,
+        title: uploadedMeta[st.def.id].title,
+        placeholder: uploadedMeta[st.def.id].placeholder,
+      },
+    }));
+  }
   const lastIndex = phases.length - 1;
 
   const rootCls = embedded

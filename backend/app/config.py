@@ -82,13 +82,22 @@ class Settings(BaseSettings):
     GROQ_MODEL_DEFAULT: str = "qwen/qwen3.6-27b"
     GROQ_MODEL_STRONG: str = "openai/gpt-oss-120b"
 
+    LLM_THINKING_CONTROL_MAP: str = (
+        "qwen=Do not think or output internal reasoning. Return only final answer."
+    )
+    GROQ_REASONING_MODEL_SUBSTRINGS: str = "qwen/qwen3,qwen3"
+    GROQ_REASONING_EFFORT: str = "none"
+    
     ENABLE_POST_ENRICHMENT: bool = False
     LLM_RERANK_ENABLED: bool = True
     LLM_VERIFY_ENABLED: bool = True
     LLM_REVISE_ENABLED: bool = True
     LLM_ANSWER_SPEC_ENABLED: bool = True
+    LLM_MAX_PROMPT_TOKENS: int = 5500
     RERANK_MAX_CANDIDATES: int = 10
-
+    GROQ_TPM_LIMIT: int = 8000
+    LLM_MAX_OUTPUT_TOKENS: int = 4096
+    
     EVIDENCE_SUFFICIENCY_THRESHOLD: float = 0.60
     EVIDENCE_SUFFICIENCY_WARNING_THRESHOLD: float = 0.85
 

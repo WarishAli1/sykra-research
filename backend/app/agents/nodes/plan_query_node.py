@@ -221,6 +221,37 @@ def plan_query_node(state: AgentState) -> AgentState:
     is_normal = mode == "normal"
     is_derivation = _is_technical_derivation(query)
 
+    is_uploaded = state.get("evidence_mode") == "uploaded"
+    if is_uploaded:
+        understanding = {
+            "main_topic": query,
+            "subtopics": [],
+            "objectives": [query],
+            "methods_techniques": [],
+            "application_domain": "uploaded_document",
+            "acronyms": {},
+            "entities": [],
+            "academic_terminology": [],
+            "explicit_tasks": [query],
+            "implicit_subtopics": [],
+        }
+        plan = {
+            "rewritten_queries": [query],
+            "expanded_queries": [query],
+            "method_queries": [],
+            "domain_queries": [],
+            "fallback_queries": [],
+            "information_needs": [query],
+        }
+        return {
+            "refined_query": None,
+            "query_understanding": understanding,
+            "query_plan": plan,
+            "search_queries": [query],
+            "search_terms": [query],
+        }
+
+
     llm_fast = get_llm(temperature=0, task="fast")
 
     refined_query = None

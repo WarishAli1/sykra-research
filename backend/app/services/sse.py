@@ -25,6 +25,26 @@ NODE_LABELS = {
     "verify_claims": "Verifying claims and citations...",
 }
 
+UPLOADED_NODE_LABELS = {
+    "plan_query": "Understanding your question...",
+    "answer_spec_node": "Understanding your question...",
+    "build_retrieval_plan": "Preparing document-only lookup...",
+    "plan_report": "Planning document answer...",
+    "search": "Skipping external search (uploaded-only mode)",
+    "retrieve_uploaded": "Reading uploaded document...",
+    "validate": "Checking uploaded document passages...",
+    "rank": "Selecting relevant uploaded passages...",
+    "build_ledger": "Extracting key points from uploaded document...",
+    "summarize": "Writing answer from uploaded document...",
+    "critique": "Checking answer against uploaded document...",
+    "revise": "Refining uploaded-document answer...",
+    "verify_claims": "Verifying document-grounded claims...",
+    "cite": "Finalizing citations...",
+    "answer_ready": "Answer ready.",
+}
+
+
+
 _CHUNK_PATTERN = re.compile(r"\S+\s*")
 
 _section_queues: dict[str, asyncio.Queue] = {}
@@ -44,16 +64,27 @@ def progress_event(
     node: str,
     detail: str | None = None,
     items: list[str] | None = None,
+    evidence_mode: str | None = None,
 ) -> str:
-    label = NODE_LABELS.get(node, f"Running {node}...")
+    if evidence_mode == "uploaded" and node in UPLOADED_NODE_LABELS:
+        label = UPLOADED_NODE_LABELS[node]
+    else:
+        label = NODE_LABELS.get(node, f"Running {node}...")
+
     fields = {
         "stage": node,
         "label": label,
     }
+
     if detail is not None:
         fields["detail"] = detail
+
     if items is not None:
         fields["items"] = items
+
+    if evidence_mode:
+        fields["evidence_mode"] = evidence_mode
+
     return sse_event("progress", **fields)
 
 

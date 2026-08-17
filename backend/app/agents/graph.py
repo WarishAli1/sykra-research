@@ -97,10 +97,8 @@ def route_after_summarize(state: AgentState) -> str:
     """
     if state.get("response_mode") == "normal":
         return "cite"
-
     if _needs_verification(state):
         return "verify_claims"
-
     return "critique"
 
 

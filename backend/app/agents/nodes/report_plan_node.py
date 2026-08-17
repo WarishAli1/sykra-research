@@ -112,6 +112,7 @@ def _adaptive_target_paper_k(plan: dict, state: AgentState) -> int:
 
 def report_plan_node(state: AgentState) -> AgentState:
     response_mode = state.get("response_mode", "normal")
+    evidence_mode = state.get("evidence_mode", "literature")
 
     if response_mode == "normal":
         raw_plan = default_report_plan(state)
