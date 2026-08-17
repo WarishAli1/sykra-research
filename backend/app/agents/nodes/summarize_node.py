@@ -30,6 +30,10 @@ llm = get_llm(temperature=0, task="default")
 
 
 FORMAT_INSTRUCTION = """
+OUTPUT DISCIPLINE:
+Never output <think>, thinking, chain-of-thought, internal analysis, planning, drafts, or reasoning.
+Return only final user-facing content.
+
 MATH FORMATTING:
 Use LaTeX delimiters for formulas.
 Inline math: $x$.
@@ -57,7 +61,7 @@ Never combine multiple ids in one bracket like [paper_id=0, paper_id=1]. Cite ea
 source in its own bracket: [paper_id=0][paper_id=1].
 
 QUANTITATIVE & CITATION INTEGRITY (CRITICAL):
-1. NUMERICAL GROUNDING: Never invent specific numbers, dollar amounts, percentages, or dates. Use ONLY figures present in the REASONING LEDGER. If a required figure is listed under UNSUPPORTED VARIABLES, do not guess it — state that it is unknown, or describe the formula/inputs needed to derive it, or prefix an estimate with "Inference:".
+1. NUMERICAL GROUNDING: Never invent specific numbers, dollar amounts, percentages, or dates. Use ONLY figures present in the REASONING LEDGER. If a required figure is listed under UNSUPPORTED VARIABLES, do not guess it — state that it is unknown, or describe the formula/inputs needed to derive it. If you must provide an estimate, explicitly state your assumptions in the sentence rather than using labels.
 2. CITATION LAUNDERING BAN: Never cite a paper by analogy (e.g. "this health-systems finding applies to energy"). If a retrieved source does not directly study the query's domain, do not cite it for domain claims.
 3. INTERNAL CONSISTENCY: If you define strategies, scenarios, or categories, use the exact same names throughout. Do not rename them mid-report.
 4. SCENARIO DISCIPLINE: If a scenario matrix is provided, answer resilience/robustness questions by referencing specific scenario rows, not by asserting a single option is "best" unconditionally.
@@ -132,6 +136,44 @@ class _OrderedSectionEmitter:
             self._next = len(self.order)
 
 
+_INTERNAL_TAG_NAMES = (
+    r"thinking|thought|think|analysis|scratchpad|internal|"
+    r"reasoning|reflection|planning|plan|chain-of-thought|chain|cot"
+)
+
+_INTERNAL_BLOCK_RE = re.compile(
+    rf"<\s*(?P<tag>{_INTERNAL_TAG_NAMES})\b[^>]*>.*?<\s*/\s*(?P=tag)\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_UNCLOSED_INTERNAL_BLOCK_RE = re.compile(
+    rf"<\s*(?:{_INTERNAL_TAG_NAMES})\b[^>]*>.*",
+    re.IGNORECASE | re.DOTALL,
+)
+
+def _strip_internal_monologue(text: str) -> str:
+    if not text:
+        return ""
+
+    previous = None
+    while previous != text:
+        previous = text
+        text = _INTERNAL_BLOCK_RE.sub("", text)
+
+    text = _UNCLOSED_INTERNAL_BLOCK_RE.sub("", text)
+
+    text = re.sub(
+        r"^\s*(?:Here'?s a thinking process:|Thinking process:|Let'?s think step by step:?)\s*",
+        "",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+
 _MATH_DISPLAY_RE = re.compile(r"\$\$.*?\$\$", re.DOTALL)
 _MATH_INLINE_RE = re.compile(r"\$[^$\n]+?\$")
 _DEDUPE_LOCK = threading.Lock()
@@ -141,15 +183,15 @@ def _clean_content(text: str) -> str:
     if not text:
         return ""
 
+    text = _strip_internal_monologue(text)
+
     text = re.sub(
         r"(\$\$.*?\$\$)",
         r"\n\n\1\n\n",
         text,
         flags=re.DOTALL,
     )
-
     text = re.sub(r"\n{3,}", "\n\n", text)
-
     return text.strip()
 
 
@@ -875,11 +917,9 @@ def _section_batch_prompt(
 
     for m in batch_modules:
         module_lines.append(
-            f"- module_id: {m['module_id']}\n"
-            f"  title: {m['title']}\n"
-            f"  purpose: {m['purpose']}\n"
-            f"  target_words: {m.get('target_words', 180)}\n"
-            f"  evidence_policy: {m.get('evidence_policy', 'evidence_preferred')}"
+            f"- Heading: ## {m['title']}\n"
+            f"  Goal: {m['purpose']}\n"
+            f"  Target length: ~{m.get('target_words', 180)} words"
         )
 
     evidence_lines = []
@@ -997,10 +1037,11 @@ Avoid heavy literature reviews or recent preprints unless directly relevant to t
 
     if plan.get("depth") in ("medium", "high"):
         depth_enforcer = """
-LENGTH & DEPTH ENFORCEMENT:
-You are writing a comprehensive research report, NOT a brief summary.
-Do not be overly concise. Expand on mechanisms, mathematical proofs, and architectural data flows.
-Aim to meet or exceed the target_words for each module by providing rich, technical detail.
+DEPTH & MATURITY ENFORCEMENT:
+You are writing a mature, comprehensive research report, NOT a brief summary.
+Focus on analytical depth, mechanism-level explanations, and evidence synthesis.
+Do NOT pad the text with unnecessary data, repetitive sentences, or fluff just to increase length.
+Write naturally and thoroughly until the topic is fully covered for the module's Goal.
 """
 
     return f"""
@@ -1060,13 +1101,10 @@ Do not cite a source just because it was retrieved. One citation per specific cl
 Origin/historical/canonical claims must cite the original primary source; do not cite a later interpretive paper for an original claim unless no primary source is available (and then label it as secondary evidence).
 
 If evidence is weak/none, say so explicitly.
-If policy allows first-principles reasoning, label it with "Inference:".
-If policy allows speculation, label it with "Speculative:".
+If policy allows first-principles reasoning, clearly state your assumptions in the prose (e.g., "Based on first principles, assuming X..."). Do not use literal "Inference:" labels.
+If policy allows speculation, clearly frame it as a hypothesis or forward-looking projection in the prose. Do not use literal "Speculative:" labels.
 
-For independent_analysis, tradeoffs, risk_analysis, use:
-Evidence:
-Inference:
-Recommendation:
+For independent_analysis, tradeoffs, and risk_analysis, clearly separate factual evidence from your own logical inferences and final recommendations in your prose, but DO NOT use literal "Evidence:", "Inference:", or "Recommendation:" labels or headings. Write in natural, professional paragraphs.
 
 If the answer spec marks a topic as a NON-GOAL, do NOT write about it.
 If expected equations are listed, use their canonical form and do not simplify or drop terms.
@@ -1218,11 +1256,11 @@ def _invoke_section_batch(
     full_prompt = (
         prompt
         + "\n\nOUTPUT FORMAT:\n"
-        + "Return markdown only. Start each module with a level-2 heading "
-        + "exactly matching its title, e.g.:\n"
-        + "## Direct Answer\n\n(content)\n\n## Research Findings\n\n(content)\n"
-        + "Do NOT wrap in JSON. Do NOT use code fences. Do NOT return a "
-        + "SectionBatch object."
+        + "Return markdown only. Start each module with the exact level-2 heading "
+        + "provided in the 'Heading' field above.\n"
+        + "Do NOT output 'module_id', 'Goal:', 'Target length:', or any metadata labels.\n"
+        + "Just write the heading and the content paragraphs below it.\n"
+        + "Do NOT wrap in JSON. Do NOT use code fences."
     )
 
     messages = [
@@ -1290,11 +1328,11 @@ def _stream_invoke_section_batch(
     full_prompt = (
         prompt
         + "\n\nOUTPUT FORMAT:\n"
-        + "Return markdown only. Start each module with a level-2 heading "
-        + "exactly matching its title, e.g.:\n"
-        + "## Direct Answer\n\n(content)\n\n## Research Findings\n\n(content)\n"
-        + "Do NOT wrap in JSON. Do NOT use code fences. Do NOT return a "
-        + "SectionBatch object."
+        + "Return markdown only. Start each module with the exact level-2 heading "
+        + "provided in the 'Heading' field above.\n"
+        + "Do NOT output 'module_id', 'Goal:', 'Target length:', or any metadata labels.\n"
+        + "Just write the heading and the content paragraphs below it.\n"
+        + "Do NOT wrap in JSON. Do NOT use code fences."
     )
 
     messages = [
@@ -1689,22 +1727,24 @@ def _deterministic_section_fallback(
     labels: dict[str, str],
     state: AgentState,
 ) -> str:
+    if state.get("evidence_mode") == "uploaded":
+        return (
+            f"The uploaded document does not contain enough explicit content "
+            f"to fully support this section (*{m.get('title', '')}*)."
+        )
+
     mid = m["module_id"]
-
     qu = state.get("query_understanding") or {}
-
     candidates = list(
         dict.fromkeys(
             (qu.get("methods_techniques") or []) + (qu.get("entities") or [])
         )
     )[:4]
-
-    lines = []
-
+    
     if mid == "comparative_analysis" and len(candidates) >= 2:
+        lines = []
         for c in candidates:
             key = c.lower().split()[0]
-
             hit = next(
                 (
                     (i, p)
@@ -1713,14 +1753,11 @@ def _deterministic_section_fallback(
                 ),
                 None,
             )
-
             if hit:
                 i, p = hit
-
                 s = summaries.get(str(i), {})
-
                 lines.append(
-                    f"- **{c}** — [{labels.get(str(i), 'Source')}] "
+                    f"- **{c}** — [{labels.get(str(i), 'Source')}]: "
                     f"{(s.get('findings') or p.get('summary', ''))[:260]}"
                 )
             else:
@@ -1728,29 +1765,32 @@ def _deterministic_section_fallback(
                     f"- **{c}** — No directly retrieved paper; "
                     f"treat claims about it as inference."
                 )
-
         return (
-            "Evidence:\n"
+            "The available sources do not provide sufficient detail for a direct comparison. "
+            "The most relevant retrieved papers include:\n"
             + "\n".join(lines)
             + (
-                "\n\nInference: Head-to-head differences should be interpreted cautiously "
-                "because direct comparative studies are limited."
+                "\n\n*Note: Head-to-head differences should be interpreted cautiously "
+                "because direct comparative studies are limited.*"
             )
         )
-
+        
+    lines = []
     for i, p in enumerate(papers[:4]):
         s = summaries.get(str(i), {})
-
         lines.append(
-            f"- [{labels.get(str(i), 'Source')}] {p.get('title', '')}: "
+            f"- **{p.get('title', '')}** [{labels.get(str(i), 'Source')}]: "
             f"{(s.get('findings') or '')[:220]}"
         )
+        
+    if not lines:
+         return "The currently retrieved literature does not contain sufficient information to address this specific section."
 
     return (
-        "Evidence:\n"
+        "The retrieved literature provides limited direct coverage for this specific aspect. "
+        "The most relevant available sources include:\n"
         + "\n".join(lines)
-        + "\n\nInference: The retrieved evidence for this section is limited; "
-        "treat the synthesis as provisional."
+        + "\n\n*Note: Because direct evidence for this section is limited, treat this synthesis as provisional.*"
     )
 
 
@@ -1970,8 +2010,8 @@ Write ONE concise evidence-backed answer.
 Length:
 450 to 650 words.
 
-Use these bold labels exactly:
-**Direct answer:**
+Start with a direct, unlabeled opening paragraph that answers the question.
+Then, use these exact bold labels for the rest of the response:
 **Evidence:**
 **Limitations:**
 
@@ -2015,9 +2055,8 @@ Keep the answer accurate, concise, and high-quality.
         abstract = (first.get("summary") or first.get("text") or "")[:400]
 
         content = (
-            f"**Direct answer:** The available evidence is limited, but the top retrieved source is: "
-            f"{first.get('title', 'Untitled')}.\n\n"
-            f"**Evidence:** [paper_id=0] {abstract}\n\n"
+            f"The available evidence is limited, but the top retrieved source provides some insight.\n\n"
+            f"**Evidence:** [paper_id=0] {first.get('title', 'Untitled')}: {abstract}\n\n"
             f"**Limitations:** Only limited evidence could be retrieved quickly."
         )
 
@@ -2653,6 +2692,8 @@ def _generate_premium_normal_sections(
 USER QUERY:
 {query}
 
+{_evidence_mode_instruction(state.get('evidence_mode', 'literature'))}
+
 AVAILABLE SOURCES:
 {paper_block or "(no retrieved sources)"}
 
@@ -2664,15 +2705,17 @@ Write a concise, high-quality, evidence-backed answer.
 Length:
 650 to 900 words.
 
-Use these bold labels exactly:
-**Direct answer:**
+Start with a direct, unlabeled opening paragraph that answers the question.
+Then, use these exact bold labels for the rest of the response:
 **Evidence:**
-**Independent analysis:**
+**Analysis:**
 **Limitations:**
 
 {comparison_hint}
 
 Rules:
+Do not output <think>, thinking, analysis, planning, or internal reasoning. Return only final user-facing content.
+If the available source is short or fragmented, give a shorter answer and explicitly state what is missing. Do not expand with outside knowledge.
 Answer the exact question. Do not add unrelated applications, surveys, or background unless required by the answer spec.
 If the question asks about an original system, theory, algorithm, equation, or architecture, describe the original/canonical version first.
 Never invent specific numbers. If quantifying without sources, prefix with "Inference:" or "Estimate:" and state assumptions.
@@ -2705,11 +2748,12 @@ Do not use markdown headings.
                 SystemMessage(
                     content=(
                         "You are a premium, evidence-grounded research analyst. "
-                        "Return markdown only."
+                        "Return markdown only. "
+                        "Never output <think>, thinking, chain-of-thought, or internal reasoning."
                     )
                 ),
-                HumanMessage(content=prompt),
-            ],
+                    HumanMessage(content=prompt),
+                ],
             config={"timeout": settings.REPORT_SECTION_TIMEOUT_NORMAL},
         )
 
@@ -2727,10 +2771,9 @@ Do not use markdown headings.
         abstract = (first.get("summary") or first.get("text") or "")[:500]
 
         content = (
-            f"**Direct answer:** The available evidence is limited, but the top retrieved source is: "
-            f"{first.get('title', 'Untitled')}.\n\n"
-            f"**Evidence:** [paper_id=0] {abstract}\n\n"
-            f"**Independent analysis:** The answer should be treated as provisional.\n\n"
+            f"The available evidence is limited, but the top retrieved source provides some insight.\n\n"
+            f"**Evidence:** [paper_id=0] {first.get('title', 'Untitled')}: {abstract}\n\n"
+            f"**Analysis:** The answer should be treated as provisional based on this single source.\n\n"
             f"**Limitations:** Only limited evidence could be retrieved quickly."
         )
 
@@ -2738,9 +2781,9 @@ Do not use markdown headings.
         first = papers[0]
 
         content = (
-            f"**Direct answer:** The top retrieved evidence is: {first.get('title', 'Untitled')}.\n\n"
+            f"The top retrieved evidence is: {first.get('title', 'Untitled')}.\n\n"
             f"**Evidence:** [paper_id=0] {(first.get('summary') or '')[:400]}\n\n"
-            f"**Independent analysis:** The answer should be treated as provisional.\n\n"
+            f"**Analysis:** The answer should be treated as provisional.\n\n"
             f"**Limitations:** Only limited evidence could be retrieved quickly."
         )
 
@@ -2759,6 +2802,335 @@ Do not use markdown headings.
             "confidence": "medium",
         }
     ]
+
+
+_UPLOADED_PAGE_MARKER_RE = re.compile(r"\[PAGE\s*\d+\]", re.IGNORECASE)
+
+
+def _normalize_uploaded_excerpt(text: str) -> str:
+    if not text:
+        return ""
+
+    text = _UPLOADED_PAGE_MARKER_RE.sub(" ", text)
+
+    text = re.sub(r"^\s*\d+\s*$", " ", text, flags=re.MULTILINE)
+
+    text = re.sub(r"\s+", " ", text)
+    text = text.strip()
+
+    if not text:
+        return ""
+
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    seen = set()
+    cleaned = []
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+
+        key = sentence.lower()
+
+        if len(key) >= 45 and key in seen:
+            continue
+
+        seen.add(key)
+        cleaned.append(sentence)
+
+    return " ".join(cleaned).strip()
+
+
+_UPLOADED_QA_SYSTEM = (
+    "You are a precise document analyst. Answer ONLY from the provided "
+    "passages of the user's uploaded document. Never use outside knowledge. "
+    "Never output thinking or internal reasoning. Return markdown only."
+)
+
+
+def _build_uploaded_passage_block(
+    papers: list[dict],
+    max_total_chars: int = 6000,
+) -> str:
+    parts = []
+    used = 0
+
+    for i, p in enumerate(papers):
+        raw_text = (p.get("summary") or p.get("text") or "")[:1600]
+        text = _normalize_uploaded_excerpt(raw_text)
+
+        if not text:
+            continue
+
+        block = f"[paper_id={i}] {p.get('title', 'Uploaded document')}\n{text}"
+
+        if used + len(block) > max_total_chars:
+            break
+
+        parts.append(block)
+        used += len(block)
+
+    return "\n\n".join(parts)
+
+
+def _uploaded_passage_fallback(papers: list[dict]) -> str:
+    lines = []
+    used = 0
+
+    for i, p in enumerate(papers[:3]):
+        excerpt = _normalize_uploaded_excerpt((p.get("summary") or "")[:900])
+
+        if not excerpt:
+            continue
+
+        lines.append(f"From the uploaded document [paper_id={i}]: {excerpt}")
+        used += len(excerpt)
+
+        if used > 1800:
+            break
+
+    return "\n\n".join(lines) or (
+        "The uploaded document does not contain information relevant to "
+        "this question."
+    )
+
+
+def _generate_uploaded_sections(
+    papers: list[dict],
+    summaries: dict[str, dict],
+    state: AgentState,
+    plan: dict,
+    evidence_map: dict[str, dict],
+    emitter,
+    id_map: dict,
+) -> list[dict]:
+    """
+    Dedicated uploaded-document generation.
+
+    Normal mode:
+      One direct answer.
+
+    Researched / graph_research mode:
+      Sectioned uploaded-document report using the strong model.
+    """
+    query = state.get("query", "")
+    response_mode = state.get("response_mode", "normal")
+    is_normal = response_mode == "normal"
+
+    uploaded_task = (
+        "strong"
+        if response_mode in ("researched", "graph_research")
+        else "default"
+    )
+
+    uploaded_max_tokens = (
+        4096
+        if response_mode in ("researched", "graph_research")
+        else 2048
+    )
+
+    print(
+        f"[summarize:uploaded] response_mode={response_mode} "
+        f"task={uploaded_task} max_tokens={uploaded_max_tokens}"
+    )
+
+    passage_block = _build_uploaded_passage_block(papers)
+
+    if not papers or not passage_block:
+        content = (
+            "The uploaded document does not contain information relevant to "
+            "this question."
+        )
+        sec = {
+            "module_id": "direct_answer",
+            "title": "Direct Answer",
+            "content": content,
+            "cited_paper_ids": [],
+            "evidence_status": "none",
+            "confidence": "low",
+        }
+
+        if emitter is not None:
+            emitter.submit("direct_answer", f"## Direct Answer\n\n{content}\n")
+
+        return [sec]
+
+    if is_normal:
+        prompt = (
+            f"USER QUESTION:\n{query}\n\n"
+            f"DOCUMENT PASSAGES (from the user's uploaded document, most relevant first):\n"
+            f"{passage_block}\n\n"
+            f"Write a complete answer using ONLY the passages above.\n"
+            f"Rules:\n"
+            f"- Address EVERY part of the question.\n"
+            f"- Cite passages as [paper_id=N].\n"
+            f"- Use the document's own facts, names, numbers, and examples.\n"
+            f"- If something is not covered, say so in one sentence; never invent.\n"
+            f"- Write 400-700 words: an unlabeled opening paragraph that directly "
+            f"answers the question, then bold labels **Evidence:** and **Limitations:**."
+        )
+
+        content = None
+
+        messages = [
+            SystemMessage(content=_UPLOADED_QA_SYSTEM),
+            HumanMessage(content=prompt),
+        ]
+
+        try:
+            llm = get_llm(temperature=0, task=uploaded_task)
+            raw = llm.invoke(
+                messages,
+                max_tokens=uploaded_max_tokens,
+                config={"timeout": settings.REPORT_SECTION_TIMEOUT_DEEP},
+            )
+            content = _clean_content(
+                raw.content if hasattr(raw, "content") else str(raw)
+            )
+        except Exception as e:
+            print(f"[summarize:uploaded] answer failed: {type(e).__name__}: {e}")
+
+        if (not content or len(content) < 120) and uploaded_task != "strong":
+            print(
+                "[summarize:uploaded] primary uploaded answer was short/empty; "
+                "retrying once with task=strong"
+            )
+
+            try:
+                retry_llm = get_llm(temperature=0, task="strong")
+                raw = retry_llm.invoke(
+                    messages,
+                    max_tokens=uploaded_max_tokens,
+                    config={"timeout": settings.REPORT_SECTION_TIMEOUT_DEEP},
+                )
+                retry_content = _clean_content(
+                    raw.content if hasattr(raw, "content") else str(raw)
+                )
+
+                if retry_content and len(retry_content) >= 120:
+                    content = retry_content
+            except Exception as e:
+                print(
+                    f"[summarize:uploaded] strong retry failed: "
+                    f"{type(e).__name__}: {e}"
+                )
+
+        if not content or len(content) < 120:
+            print(
+                f"[summarize:uploaded] SHORT/EMPTY content, falling back. "
+                f"len={len(content) if content else 0} repr={content!r}"
+            )
+            content = _uploaded_passage_fallback(papers)
+
+        sec = {
+            "module_id": "direct_answer",
+            "title": "Direct Answer",
+            "content": content,
+            "cited_paper_ids": extract_paper_ids(content),
+            "evidence_status": "strong" if extract_paper_ids(content) else "mixed",
+            "confidence": "medium",
+        }
+
+        if emitter is not None:
+            display = _sanitize_preserving_math(
+                rewrite_inline_citations(content, id_map)
+            )
+            emitter.submit("direct_answer", f"## Direct Answer\n\n{display}\n")
+
+        return [sec]
+        
+    batch_modules = [
+        m
+        for m in plan.get("modules", [])
+        if m.get("module_id") not in ("references", "confidence_uncertainty")
+    ] or [{"module_id": "direct_answer", "title": "Direct Answer"}]
+
+    titles = "\n".join(f"## {m['title']}" for m in batch_modules)
+
+    prompt = (
+        f"USER QUESTION:\n{query}\n\n"
+        f"DOCUMENT PASSAGES (from the user's uploaded document, most relevant first):\n"
+        f"{passage_block}\n\n"
+        f"Write a report using ONLY the passages above with EXACTLY these section headings:\n"
+        f"{titles}\n\n"
+        f"Rules:\n"
+        f"- Address EVERY part of the question across the sections.\n"
+        f"- Direct Answer 60-120 words; other sections 120-300 words each.\n"
+        f"- Cite passages as [paper_id=N].\n"
+        f"- Use the document's own facts, names, numbers, and examples.\n"
+        f"- If a section has no supporting passage content, say so in one sentence; never invent.\n"
+        f"- No References section. No thinking."
+    )
+
+    sections: dict[str, dict] = {}
+
+    try:
+        llm = get_llm(temperature=0, task=uploaded_task)
+        raw = llm.invoke(
+            [
+                SystemMessage(content=_UPLOADED_QA_SYSTEM),
+                HumanMessage(content=prompt),
+            ],
+            max_tokens=uploaded_max_tokens,
+            config={"timeout": settings.REPORT_SECTION_TIMEOUT_DEEP},
+        )
+
+        raw_content = raw.content if hasattr(raw, "content") else str(raw)
+
+        if raw_content and len(raw_content.strip()) >= 80:
+            sections = _parse_plain_sections(batch_modules, raw_content)
+        else:
+            print(
+                "[summarize:uploaded] researched report returned short/empty content; "
+                f"len={len(raw_content or '')}"
+            )
+
+    except Exception as e:
+        print(
+            f"[summarize:uploaded] section generation failed: "
+            f"{type(e).__name__}: {e}"
+        )
+
+    for m in batch_modules:
+        mid = m["module_id"]
+
+        if mid in sections:
+            continue
+
+        if mid in ("direct_answer", "research_findings"):
+            content = _uploaded_passage_fallback(papers)
+        else:
+            content = (
+                f"The uploaded document provides limited detail for this "
+                f"section ({m['title']})."
+            )
+
+        sections[mid] = {
+            "module_id": mid,
+            "title": m["title"],
+            "content": content,
+            "cited_paper_ids": extract_paper_ids(content),
+            "evidence_status": "mixed",
+            "confidence": "low",
+        }
+
+    ordered = []
+
+    for m in batch_modules:
+        sec = sections[m["module_id"]]
+        sec["content"] = _clean_content(sec.get("content", ""))
+        ordered.append(sec)
+
+        if emitter is not None:
+            display = _sanitize_preserving_math(
+                rewrite_inline_citations(sec["content"], id_map)
+            )
+            emitter.submit(
+                sec["module_id"],
+                f"## {sec['title']}\n\n{display}\n",
+            )
+
+    return ordered
 
 
 def summarize_node(state: AgentState) -> AgentState:
@@ -2822,7 +3194,7 @@ def summarize_node(state: AgentState) -> AgentState:
     request_id = state.get("_request_id", "")
 
     streaming_enabled = bool(request_id and state.get("_streaming_enabled"))
-
+    
     if state.get("response_mode", "normal") == "normal":
         sections = _generate_premium_normal_sections(
             papers=papers,
@@ -2925,6 +3297,7 @@ def summarize_node(state: AgentState) -> AgentState:
     )
 
     answer_text = _merge_sections(sections, plan)
+    answer_text = _strip_internal_monologue(answer_text)
 
     cite_markers: list[str] = []
 

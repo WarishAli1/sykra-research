@@ -48,7 +48,12 @@ def _build_initial_state(req: ChatRequest, session_id: str, turn_id: str) -> dic
         "turn_id": turn_id,
         "evidence_mode": req.evidence_mode,
         "response_mode": req.response_mode,
-        "conversation_history": req.conversation_history,
+        "conversation_history": [
+            {**h, "content": str(h.get("content", ""))[:600]}
+            if isinstance(h, dict)
+            else h
+            for h in (req.conversation_history or [])[-4:]
+        ],
 
         "refined_query": None,
         "search_terms": [],
@@ -419,13 +424,17 @@ async def chat_stream(req: ChatRequest):
                             yield sse_event("notice", message=notice)
 
                     elif node_name in ("plan_query", "search"):
-                        queries = delta.get("search_queries") or state.get("search_queries")
-                        if queries:
-                            detail = (
-                                queries[0]
-                                if isinstance(queries, list) and queries
-                                else str(queries)
-                            )
+                        if req.evidence_mode == "uploaded":
+                            detail = None
+                            items = None
+                        else:
+                            queries = delta.get("search_queries") or state.get("search_queries")
+                            if queries:
+                                detail = (
+                                    queries[0]
+                                    if isinstance(queries, list) and queries
+                                    else str(queries)
+                                )
 
                     elif node_name in ("rank", "validate"):
                         papers = delta.get("ranked_papers") or state.get("ranked_papers")
@@ -436,7 +445,7 @@ async def chat_stream(req: ChatRequest):
                                 if p.get("title")
                             ]
 
-                    yield progress_event(node_name, detail=detail, items=items)
+                    yield progress_event(node_name, detail=detail, items=items, evidence_mode=req.evidence_mode)
 
                 elif etype == "llm_token":
                     sections_streamed = True

@@ -823,11 +823,14 @@ def rank_node(state: AgentState) -> AgentState:
     ABSOLUTE_MIN_SCORE_FLOOR = 0.22
     HARD_SEMANTIC_FLOOR = 0.30
 
-    prefiltered = [
-        p for p in all_papers[:PRE_FILTER_N]
-        if p.get("final_score", 0.0) >= max(settings.MIN_FINAL_SCORE * 0.65, ABSOLUTE_MIN_SCORE_FLOOR)
-        and p.get("_relevance_combined", 0.0) >= HARD_SEMANTIC_FLOOR
-    ]
+    if is_uploaded_only:
+        prefiltered = all_papers[:PRE_FILTER_N]
+    else:
+        prefiltered = [
+            p for p in all_papers[:PRE_FILTER_N]
+            if p.get("final_score", 0.0) >= max(settings.MIN_FINAL_SCORE * 0.65, ABSOLUTE_MIN_SCORE_FLOOR)
+            and p.get("_relevance_combined", 0.0) >= HARD_SEMANTIC_FLOOR
+        ]
 
     low_confidence_results = False
     if len(prefiltered) < settings.TOP_K_PAPERS_MIN and not is_uploaded_only:
@@ -896,7 +899,7 @@ def rank_node(state: AgentState) -> AgentState:
             top_k.append(best_foundational)
             top_k.sort(key=lambda p: p.get("final_score", 0), reverse=True)
 
-    if answer_spec:
+    if answer_spec and not is_uploaded_only:
         top_k = _llm_rerank_top_k(top_k, state, answer_spec)
 
     for p in top_k:
