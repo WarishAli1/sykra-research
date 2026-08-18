@@ -19,6 +19,7 @@ class ResearchResponse(BaseModel):
     answer: str
     session_id: str
     papers_processed: int
+    paper_links: list[str] = []
 
 
 @router.post("/research", response_model=ResearchResponse)
@@ -117,11 +118,18 @@ async def research(req: ResearchRequest):
 
     final_state = await research_graph.ainvoke(initial_state)
     final_state = await asyncio.to_thread(run_enrichment, final_state)
-
+    ranked_papers = final_state.get("ranked_papers", [])
+    cited_papers = final_state.get("citations", []) 
+    
+    paper_links = list({
+        p.get("link") for p in (ranked_papers + cited_papers) 
+        if isinstance(p, dict) and p.get("link")
+    })
     return ResearchResponse(
         answer=final_state.get("final_answer", ""),
         session_id=session_id,
         papers_processed=len(final_state.get("ranked_papers", [])),
+        paper_links=paper_links,
     )
 
 class GraphQueryRequest(BaseModel):
@@ -139,7 +147,7 @@ class GraphPathRequest(GraphViewRequest):
 @router.post("/graph/{session_id}/view")
 def graph_view(session_id: str, req: GraphViewRequest):
     enriched = graph_builder.get_enriched(session_id)
-    links = req.paper_links if (req.scope == "message" and req.paper_links) else None
+    links = req.paper_links if req.scope == "message" else None 
     view = graph_builder.filter_view(enriched, links, req.max_year)
     return {**view, "legend": enriched["legend"], "rel": enriched["rel"],
             "global_stats": enriched["stats"]}
@@ -147,7 +155,7 @@ def graph_view(session_id: str, req: GraphViewRequest):
 @router.post("/graph/{session_id}/path")
 def graph_path(session_id: str, req: GraphPathRequest):
     enriched = graph_builder.get_enriched(session_id)
-    links = req.paper_links if (req.scope == "message" and req.paper_links) else None
+    links = req.paper_links if req.scope == "message" else None 
     return {"path": graph_builder.shortest_path(enriched, req.a, req.b, links, req.max_year)}
 
 @router.get("/graph/{session_id}/suggest")

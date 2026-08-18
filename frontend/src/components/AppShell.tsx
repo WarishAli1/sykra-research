@@ -8,12 +8,14 @@ import {
   ArrowLeft,
   PanelLeftOpen,
   Plus,
+  Shapes,
 } from "lucide-react";
 import Image from "next/image";
 import { RightRail } from "./RightRail";
 import { ChatPanel } from "./ChatPanel";
 import { GraphView } from "./GraphView";
 import { api, ApiError } from "@/lib/api";
+import { StudioView } from "./studio/StudioView";
 import type { ChatTurn, Paper, EvidenceMode } from "@/lib/types";
 import dynamic from "next/dynamic";
 
@@ -68,6 +70,8 @@ export function AppShell() {
   const [pdfWidthPct, setPdfWidthPct] = useState(PDF_WIDTH_DEFAULT);
   const [draggingPdf, setDraggingPdf] = useState(false);
 
+  const [showStudio, setShowStudio] = useState(false);
+
   const [uploadState, setUploadState] = useState({
     status: "idle" as "idle" | "uploading" | "processing" | "done" | "error",
     filename: "",
@@ -81,6 +85,35 @@ export function AppShell() {
   const lastAssistantTurnId =
     [...turns].reverse().find((t) => t.role === "assistant" && t.turnId)?.turnId ?? null;
 
+  const getConversationContext = useCallback(() => {
+    const reversed = [...turns].reverse();
+
+    const lastAssistant = reversed.find(
+      (t) => t.role === "assistant" && t.text?.trim()
+    );
+
+    const lastUser = reversed.find(
+      (t) => t.role === "user" && t.text?.trim()
+    );
+
+    const excerpt = [
+      lastAssistant?.text?.trim(),
+      lastUser?.text?.trim(),
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+      .slice(0, 3000);
+
+    const paperLinks = papers
+      .map((p) => p.link)
+      .filter(Boolean) as string[];
+
+    return {
+      excerpt,
+      papers: paperLinks,
+    };
+  }, [turns, papers]);
+
   const handleNewPapers = useCallback((incoming: Paper[]) => {
     if (!incoming.length) return;
     setPapers((prev) => mergePapers(prev, incoming));
@@ -89,9 +122,13 @@ export function AppShell() {
   const handleOpenGraph = () => {
     setShowGraphView(true);
     setRailOpen(true);
+    setShowStudio(false);
     setTab("explore");
   };
-  const handleBackToChat = () => setShowGraphView(false);
+  const handleBackToChat = () => {
+    setShowGraphView(false);
+    setShowStudio(false);
+  };
 
   const handleOpenPdf = (url: string) => setPdfViewerUrl(url);
   const handleClosePdf = () => setPdfViewerUrl(null);
@@ -128,6 +165,7 @@ export function AppShell() {
     setEvidenceMode("literature");
     setSessionId(crypto.randomUUID());
     setShowGraphView(false);
+    setShowStudio(false);
   };
   const messagePaperLinks = useMemo(() => {
     const t = [...turns].reverse().find((x) => x.role === "assistant" && x.turnId === lastAssistantTurnId);
@@ -255,6 +293,7 @@ export function AppShell() {
               <button
                 onClick={() => {
                   setShowGraphView(false);
+                  setShowStudio(false);
                   setTab("library");
                   setRailOpen(true);
                 }}
@@ -283,6 +322,18 @@ export function AppShell() {
               >
                 <Network className="h-3.5 w-3.5 shrink-0" />
                 Explore Graph
+              </button>
+
+              <button
+                onClick={() => { setShowStudio(true); setShowGraphView(false); }}
+                className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+                  showStudio
+                    ? "bg-indigo-tint text-ink font-medium"
+                    : "text-ink-soft hover:bg-paper hover:text-ink"
+                }`}
+              >
+                  <Shapes className="h-3.5 w-3.5 shrink-0" />
+                Studio
               </button>
             </div>
 
@@ -382,13 +433,41 @@ export function AppShell() {
                 aria-hidden="true"
               />
             </button>
+            <button
+              onClick={() => { setShowStudio(true); setShowGraphView(false); }}
+              aria-label="Open Studio"
+              title="Studio"
+              className={`relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
+                showStudio
+                  ? "bg-indigo-tint text-ink"
+                  : "text-ink-soft hover:bg-paper hover:text-ink"
+              }`}
+            >
+              {showStudio && (
+                <span
+                  className="absolute -left-1.5 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-indigo"
+                  aria-hidden="true"
+                />
+              )}
+              <Shapes className="h-4 w-4" />
+              <span
+                className="absolute bottom-1.5 h-[2px] w-3.5 rounded-full bg-line/80"
+                aria-hidden="true"
+              />
+            </button>
           </div>
         )}
       </div>
 
       <div ref={containerRef} className="flex flex-1 min-h-0 min-w-0">
         <main className="flex-1 min-w-0">
-          {showGraphView ? (
+          {showStudio ? (
+            <StudioView
+              sessionId={sessionId}
+              getConversationContext={getConversationContext}
+            />
+
+          ) : showGraphView ? (
             <div className="h-full flex flex-col">
               <div className="flex items-center justify-between border-b border-line px-4 py-3">
                 <button
@@ -435,7 +514,7 @@ export function AppShell() {
           )}
         </main>
 
-        {!pdfViewerUrl && (
+        {!pdfViewerUrl && !showStudio && (
           <div
             className="relative shrink-0 h-full border-l border-line overflow-hidden transition-[width] duration-200 ease-out"
             style={{ width: railOpen ? RAIL_WIDTH : STRIP_WIDTH }}
