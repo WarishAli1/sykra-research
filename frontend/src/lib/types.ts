@@ -218,6 +218,7 @@ export type ResearchResponse = {
   answer: string;
   session_id: string;
   papers_processed: number;
+  paper_links: string[];
 };
 
 export type ClusterOut = {
@@ -280,3 +281,140 @@ export interface PdfExportRequest {
   turn_id?: string;
   chart_path?: string;
 }
+
+export type StudioVisualType = "chart" | "flowchart" | "dfd" | "architecture" | "diagram";
+export type StudioChartType = "bar" | "line" | "pie" | "scatter";
+export type StudioGroundingLevel =
+  | "user_provided"
+  | "grounded"
+  | "mixed"
+  | "illustrative"
+  | "draft";
+export type StudioDataPath = "manual" | "papers" | "web_search";
+
+export type StudioProvenance = {
+  kind:
+    | "user_provided"
+    | "grounded"
+    | "derived"
+    | "illustrative"
+    | "user_edited"
+    | "ai_proposed";
+  source_paper_id?: number | null;
+  source_ref_id?: number | null;
+  source_url?: string | null;
+  source_quote?: string | null;
+  derivation?: string | null;
+  note?: string | null;
+};
+
+export type StudioChartSeries = {
+  label: string;
+  values: (number | null)[];
+  x_values?: (number | null)[];
+  unit?: string | null;
+  provenance: StudioProvenance[];
+};
+
+export type StudioChartPayload = {
+  kind: "chart";
+  chart_type: StudioChartType;
+  categories: string[];
+  series: StudioChartSeries[];
+  x_label?: string | null;
+  y_label?: string | null;
+  log_y?: boolean;
+  show_values?: boolean;
+};
+
+export type StudioDiagramNode = {
+  id: string;
+  label: string;
+  node_type?: "process" | "terminal" | "data" | "external" | "store" | "decision";
+  layer?: number | null;
+  provenance?: StudioProvenance | null;
+};
+
+export type StudioDiagramEdge = {
+  source: string;
+  target: string;
+  label?: string | null;
+};
+
+export type StudioDiagramPayload = {
+  kind: "flowchart" | "architecture" | "dfd" | "diagram";
+  layout?: "top_down" | "left_right" | "layered";
+  nodes: StudioDiagramNode[];
+  edges: StudioDiagramEdge[];
+  dfd_level?: 0 | 1 | null;
+};
+
+export type StudioGroundingSummary = {
+  level: StudioGroundingLevel;
+  grounded_count: number;
+  user_provided_count: number;
+  illustrative_count: number;
+  ai_proposed_count?: number;
+  citations: number[];
+  note?: string | null;
+};
+
+export type StudioVisualSpec = {
+  spec_version: number;
+  visual_id: string;
+  session_id: string;
+  turn_id?: string | null;
+  revision: number;
+  title: string;
+  caption?: string | null;
+  grounding: StudioGroundingSummary;
+  payload: StudioChartPayload | StudioDiagramPayload;
+  created_at: string;
+  asset_path?: string | null;
+};
+
+export type StudioGenerateRequest = {
+  spec: StudioVisualSpec;
+};
+
+export type StudioGenerateResponse = {
+  visual_id: string;
+  revision: number;
+  asset_path: string;
+  grounding: StudioGroundingSummary;
+};
+
+export type StudioSessionListResponse = {
+  visuals: StudioVisualSpec[];
+};
+
+export type StudioDraftSource =
+  | "prompt"
+  | "manual"
+  | "papers"
+  | "conversation"
+  | "web_search";
+
+export type StudioDraftRequest = {
+  session_id: string;
+  family: StudioVisualType;
+  prompt: string;
+  source?: StudioDraftSource;
+  chart_type?: StudioChartType;
+  dfd_level?: 0 | 1 | null;
+  conversation_context?: string | null;
+  selected_paper_links?: string[] | null;
+};
+
+export type StudioDraftResponse = {
+  spec: StudioVisualSpec;
+  asset_path: string | null;
+  grounding: StudioGroundingSummary;
+  warnings: string[];
+  missing_data: string[];
+};
+
+export type StudioConversationContext = {
+  excerpt: string;
+  papers: string[];
+};

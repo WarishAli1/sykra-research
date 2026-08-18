@@ -13,7 +13,7 @@ from app.api.routes import (
     export,
     filename as filename_route,
 )
-
+from app.api.routes.studio import router as studio_router
 from app.services.graph_store import graph_store
 
 try:
@@ -66,6 +66,7 @@ app.include_router(followup.router, prefix="/api")
 app.include_router(research.router, prefix="/api")
 app.include_router(filename_route.router, prefix="/api")
 app.include_router(export.router, prefix="/api")
+app.include_router(studio_router, prefix="/api/studio", tags=["studio"])
 
 app.mount("/api/uploads", StaticFiles(directory="uploads"), name="uploads")
 app.mount("/exports", StaticFiles(directory="exports"), name="exports")
