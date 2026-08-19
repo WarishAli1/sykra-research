@@ -210,40 +210,33 @@ def _expected_canonical_titles(plan: dict) -> list[str]:
 def _verify_primary_sources(
     candidates: list[dict],
     plan: dict,
+    answer_spec: dict | None = None,
 ) -> None:
-    """
-    Conservative primary-source detection.
-
-    A paper is marked primary only when its normalized title exactly equals
-    an expected canonical title from the RetrievalPlan.
-    """
     expected_titles = _expected_canonical_titles(plan)
-
+    for fp in (answer_spec or {}).get("foundational_papers") or []:
+        t = str(fp.get("title") or "").strip()
+        if t:
+            expected_titles.append(t)
+    expected_titles = list(dict.fromkeys(expected_titles))
     if not expected_titles:
         return
-
     expected_normalized = {
         _normalize_title_strict(title)
         for title in expected_titles
         if title
     }
-
     for paper in candidates:
         paper_title = _normalize_title_strict(
             paper.get("title", "")
         )
-
         if paper_title in expected_normalized:
             paper["_primary_candidate"] = True
             paper["_source_role"] = "primary"
             paper["_primary_source_score"] = 1.0
-
         else:
             paper["_primary_candidate"] = False
-
             if paper.get("_source_role") == "primary":
                 paper["_source_role"] = "secondary"
-
             paper.pop("_primary_source_score", None)
 
 
@@ -269,12 +262,10 @@ async def _fetch_intent(
     query = str(intent.get("query") or "").strip()
     if not query:
         return []
-
     purpose = str(intent.get("purpose") or "requirement")
     capabilities = set(intent.get("source_capabilities") or [])
     if not capabilities:
         capabilities = {"secondary_research"}
-
     web_query = query
     if capabilities.intersection({
         "official_authority",
@@ -286,8 +277,6 @@ async def _fetch_intent(
             f"{query} site:worldbank.org OR site:adb.org OR "
             f"site:iea.org OR site:imf.org OR site:un.org OR site:who.int"
         )
-
-
     providers = providers_for_capabilities(capabilities)
     providers = {
         provider
@@ -296,99 +285,66 @@ async def _fetch_intent(
     }
     if not providers:
         return []
-
     tasks = []
+    tags: list[str] = []
     title = (
         _extract_quoted_title(query)
         if purpose == "canonical_source"
         else None
     )
 
+    def _queue(provider: str, coro) -> None:
+        if not metrics.can_search(provider, 1, maxes):
+            return
+        tasks.append(asyncio.wait_for(coro, 7.0))
+        tags.append(provider)
+
     if title:
-        if (
-            "openalex" in providers
-            and metrics.can_search("openalex", 1, maxes)
-        ):
-            tasks.append(search_openalex_by_title_async(title, 3))
-            metrics.record("openalex")
-        if (
-            "arxiv" in providers
-            and metrics.can_search("arxiv", 1, maxes)
-        ):
-            tasks.append(search_arxiv_by_title_async(title, 3))
-            metrics.record("arxiv")
-        if (
-            "web" in providers
-            and metrics.can_search("web", 1, maxes)
-        ):
-            tasks.append(
-                search_web_async(
-                    web_query,
-                    web_intent,
-                    max_results=3,
-                )
+        if "openalex" in providers:
+            _queue("openalex", search_openalex_by_title_async(title, 3))
+        if "arxiv" in providers:
+            _queue("arxiv", search_arxiv_by_title_async(title, 3))
+        if "web" in providers:
+            _queue(
+                "web",
+                search_web_async(web_query, web_intent, max_results=3),
             )
-            metrics.record("web")
     else:
         apply_year_filter = (
             min_year is not None
             or max_year is not None
         ) and purpose not in ("canonical_source", "equation")
-
-        if (
-            "openalex" in providers
-            and metrics.can_search("openalex", 1, maxes)
-        ):
-            tasks.append(
+        if "openalex" in providers:
+            _queue(
+                "openalex",
                 search_openalex_async(
                     query,
                     5,
                     purpose in ("canonical_source", "equation"),
                     min_year=min_year if apply_year_filter else None,
                     max_year=max_year if apply_year_filter else None,
-                )
+                ),
             )
-            metrics.record("openalex")
-        if (
-            "arxiv" in providers
-            and metrics.can_search("arxiv", 1, maxes)
-        ):
-            tasks.append(
-                search_arxiv_async(
-                    query,
-                    4,
-                )
+        if "arxiv" in providers:
+            _queue("arxiv", search_arxiv_async(query, 4))
+        if "web" in providers:
+            _queue(
+                "web",
+                search_web_async(web_query, web_intent, max_results=3),
             )
-            metrics.record("arxiv")
-        if (
-            "web" in providers
-            and metrics.can_search("web", 1, maxes)
-        ):
-            tasks.append(
-                search_web_async(
-                    web_query,
-                    web_intent,
-                    max_results=3,
-                )
-            )
-            metrics.record("web")
-
     if not tasks:
         return []
-
-    results = await asyncio.gather(
-        *tasks,
-        return_exceptions=True,
-    )
+    results = await asyncio.gather(*tasks, return_exceptions=True)
     rows: list[dict] = []
-    for result in results:
-        rows.extend(_safe_results(result))
-
+    for provider, result in zip(tags, results):
+        got = _safe_results(result)
+        if got:
+            metrics.record(provider)
+            rows.extend(got)
     for paper in rows:
         paper["_source_term"] = query
         paper["_retrieval_purpose"] = purpose
         paper["_primary_candidate"] = False
-
     return rows
 
 
@@ -669,6 +625,7 @@ async def _materialize_cached_search(
     _verify_primary_sources(
         combined,
         state.get("retrieval_plan") or {},
+        state.get("answer_spec") or {},
     )
 
     needs = derive_research_needs(
@@ -783,8 +740,10 @@ async def _search_core_async(
             if not title:
                 continue
             try:
-                oa_results = await search_openalex_by_title_async(title, 3)
-                arxiv_results = await search_arxiv_by_title_async(title, 3)
+                oa_results = await asyncio.wait_for(
+                    search_openalex_by_title_async(title, 3), 7.0)
+                arxiv_results = await asyncio.wait_for(
+                    search_arxiv_by_title_async(title, 3), 7.0)
                 for p in oa_results + arxiv_results:
                     p["_foundational_candidate"] = True
                     p["_foundational_source"] = "explicit"
@@ -793,7 +752,7 @@ async def _search_core_async(
             except Exception:
                 pass
 
-    _verify_primary_sources(all_rows, plan)
+    _verify_primary_sources(all_rows, plan, answer_spec)
 
     query_embedding = (
         await asyncio.to_thread(
@@ -869,7 +828,7 @@ async def _search_core_async(
 
         await _embed_candidates(candidates, query_embedding)
 
-        _verify_primary_sources(candidates, plan)
+        _verify_primary_sources(candidates, plan, answer_spec) 
 
         coverage = assess_coverage(needs, candidates)
 
@@ -904,7 +863,7 @@ async def _search_core_async(
         if discovered:
             candidates = merge_duplicate_papers(candidates + discovered)
             await _embed_candidates(candidates, query_embedding)
-            _verify_primary_sources(candidates, plan)
+            _verify_primary_sources(candidates, plan, answer_spec) 
 
     sim_thresh = (
         BASE_SIM_THRESH_FAST

@@ -21,6 +21,54 @@ formula/inputs needed to derive it.
 
 
 REVISE_TIMEOUT = getattr(settings, "REPORT_REVISE_TIMEOUT", 30)
+_LATEX_DISPLAY_BRACKET_RE = re.compile(r"\\\[(.*?)\\\]", re.DOTALL)
+_LATEX_INLINE_PAREN_RE = re.compile(r"\\\((.*?)\\\)", re.DOTALL)
+_CITE_SOURCE_ARTIFACT_RE = re.compile(
+    r"\[\s*(?:paper[\s_]?id\s*[=＝]\s*)?(\d+)\s*(?:[*•,;:]\s*)?source\s*\]",
+    re.IGNORECASE,
+)
+_AUTHOR_YEAR_RE = re.compile(
+    r"\[\s*([A-Z][\w'-]+)(?:\s+et\s+al\.?)?\s*[,.]?\s*((?:19|20)\d{2})\s*\]"
+)
+
+def _normalize_latex_delimiters(text: str) -> str:
+    if not text:
+        return ""
+    text = _LATEX_DISPLAY_BRACKET_RE.sub(
+        lambda m: "\n\n$$" + m.group(1).strip() + "$$\n\n", text)
+    text = _LATEX_INLINE_PAREN_RE.sub(
+        lambda m: "$" + m.group(1).strip() + "$", text)
+    return text
+
+def _normalize_citation_artifacts(text: str) -> str:
+    """[3*source] / [3, source] / [paper_id=3*source] -> [paper_id=3]."""
+    if not text:
+        return ""
+    return _CITE_SOURCE_ARTIFACT_RE.sub(r"[paper_id=\1]", text)
+
+def _rewrite_author_year_markers(text: str, papers: list[dict]) -> str:
+    """[Krizhevsky et al. 2012] -> [paper_id=N] via first-author-last-name + year."""
+    if not text:
+        return ""
+    labels = {}
+    for i, p in enumerate(papers):
+        authors = p.get("authors") or []
+        if not authors:
+            continue
+        labels[(authors[0].split()[-1].lower(),
+                str(p.get("published") or "")[:4])] = i
+    def _sub(m):
+        pid = labels.get((m.group(1).lower(), m.group(2)))
+        return f"[paper_id={pid}]" if pid is not None else ""
+    return _AUTHOR_YEAR_RE.sub(_sub, text)
+
+def _deterministic_repairs(text: str, papers: list[dict]) -> str:
+    return _rewrite_author_year_markers(
+        _normalize_citation_artifacts(
+            _normalize_latex_delimiters(text or "")
+        ),
+        papers or [],
+    )
 
 
 def _looks_like_provider_quota_error(e: Exception) -> bool:
@@ -247,9 +295,18 @@ def revise_node(state: AgentState) -> AgentState:
 
     draft = state.get("final_answer", "")
     instruction = state.get("revision_instruction", "")
-
     if not draft or not instruction:
         return {"needs_revision": False}
+    repaired = _deterministic_repairs(
+        draft, state.get("ranked_papers", [])
+    )
+    if repaired != draft:
+        print(
+            "[revise_node] deterministic repairs applied "
+            "(math delimiters / citation artifacts)"
+        )
+        draft = repaired
+        state = {**state, "final_answer": repaired}
 
     redo_ids = state.get("revision_section_ids") or []
 
@@ -497,4 +554,4 @@ Return the full revised answer body only.
                 "[revise_node] provider quota/rate limit detected; keeping original answer"
             )
 
-        return {"needs_revision": False}
+        return {"needs_revision": False, "final_answer": draft}

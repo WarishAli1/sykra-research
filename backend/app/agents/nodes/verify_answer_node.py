@@ -4,7 +4,8 @@ import re
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Literal, List
-
+from app.agents.nodes.summarize_node import _normalize_latex_delimiters
+from concurrent.futures import ThreadPoolExecutor
 from app.agents.schemas import AnswerClaim, CitationAudit, MathVerification
 from app.agents.state import AgentState
 from app.services.llm_client import get_llm
@@ -253,6 +254,7 @@ def _math_excerpt(draft: str, limit: int = 3000) -> str:
     re-verify identical equations, burning output tokens until the
     response truncates mid-JSON and the whole verification step fails.
     """
+    draft = _normalize_latex_delimiters(draft or "")
     draft = draft or ""
 
     blocks = re.findall(
@@ -969,7 +971,15 @@ def verify_answer_node(state: AgentState) -> AgentState:
             "verification_status": "not_run",
         }
 
-    llm_claims = _extract_claims_llm(state, draft)
+    math_required = bool(answer_spec.get("equation_verification_required"))
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        math_future = (
+            ex.submit(_math_verify_llm, state, draft, answer_spec)
+            if math_required
+            else None
+        )
+        llm_claims = _extract_claims_llm(state, draft)
+        pre_math = math_future.result() if math_future else None
     claims_extraction_failed = llm_claims is None
     claims_source = "deterministic" if claims_extraction_failed else "llm"
 
@@ -1095,13 +1105,12 @@ def verify_answer_node(state: AgentState) -> AgentState:
             verification_status = "partial"
 
     math_verification = None
-
-    if answer_spec.get("equation_verification_required"):
-        math_verification = _math_verify_llm(state, draft, answer_spec)
-
-        if math_verification is None:
-            math_verification = _math_verify_deterministic(answer_spec)
-
+    if math_required:
+        math_verification = (
+            pre_math
+            if pre_math is not None
+            else _math_verify_deterministic(answer_spec)
+        )
         if math_verification.get("critical_math_failed"):
             verification_status = "failed"
         elif "VERIFICATION_SKIPPED" in str(
