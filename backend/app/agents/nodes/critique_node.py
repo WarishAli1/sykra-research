@@ -8,7 +8,7 @@ from app.services.llm_client import get_llm
 from app.config import settings
 
 
-_MAX_REVISIONS = 1
+_MAX_REVISIONS = 2
 _MIN_MODULES_FOR_CRITIQUE = 1
 
 

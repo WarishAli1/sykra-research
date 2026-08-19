@@ -81,6 +81,49 @@ actually happened in this pipeline. If you are explaining a well-established con
 using one primary source, say so plainly — do not dress it up as a research review.
 """
 
+def _estimate_tokens(text: str) -> int:
+    return max(1, len(text) // 4)
+
+
+def _fit_paper_block_to_budget(
+    papers: list[dict],
+    summaries: dict[str, dict],
+    prompt_overhead_tokens: int,
+    max_output_tokens: int,
+    tpm_limit: int = None,
+    max_abstract: int = 700,
+    max_papers: int = 8,
+) -> str:
+    """
+    Shrinks paper_block until (prompt_tokens + max_output_tokens) fits
+    comfortably under the model's TPM limit. Drops lowest-priority papers
+    first, then trims abstract length, rather than discovering the
+    overage via a 413 at call time.
+    """
+    tpm_limit = tpm_limit or getattr(settings, "GROQ_TPM_LIMIT_STRONG", 8000)
+    safety_margin = 0.85  # leave headroom for system/instruction text elsewhere
+
+    budget = int(tpm_limit * safety_margin) - max_output_tokens - prompt_overhead_tokens
+    budget = max(budget, 500)  # never go below a usable floor
+
+    n_papers = max_papers
+    abstract_cap = max_abstract
+
+    while n_papers >= 1:
+        block = _build_paper_block(
+            papers, summaries, max_abstract=abstract_cap, max_papers=n_papers
+        )
+        if _estimate_tokens(block) <= budget:
+            return block
+
+        if abstract_cap > 250:
+            abstract_cap = int(abstract_cap * 0.7)
+        else:
+            n_papers -= 1
+
+    # last resort: single paper, minimal abstract
+    return _build_paper_block(papers, summaries, max_abstract=200, max_papers=1)
+
 
 class _OrderedSectionEmitter:
     """
@@ -179,11 +222,61 @@ _MATH_INLINE_RE = re.compile(r"\$[^$\n]+?\$")
 _DEDUPE_LOCK = threading.Lock()
 
 
+_LATEX_DISPLAY_BRACKET_RE = re.compile(r"\\\[(.*?)\\\]", re.DOTALL)
+_LATEX_INLINE_PAREN_RE = re.compile(r"\\\((.*?)\\\)", re.DOTALL)
+_CITE_SOURCE_ARTIFACT_RE = re.compile(
+    r"\[\s*(?:paper[\s_]?id\s*[=＝]\s*)?(\d+)\s*(?:[*•,;:]\s*)?source\s*\]",
+    re.IGNORECASE,
+)
+_AUTHOR_YEAR_RE = re.compile(
+    r"\[\s*([A-Z][\w'-]+)(?:\s+et\s+al\.?)?\s*[,.]?\s*((?:19|20)\d{2})\s*\]"
+)
+
+def _normalize_latex_delimiters(text: str) -> str:
+    """\[..\] -> $$..$$ and \(..\) -> $..$ so sanitize/verify/render see one form."""
+    if not text:
+        return ""
+    text = _LATEX_DISPLAY_BRACKET_RE.sub(
+        lambda m: "\n\n$$" + m.group(1).strip() + "$$\n\n", text)
+    text = _LATEX_INLINE_PAREN_RE.sub(
+        lambda m: "$" + m.group(1).strip() + "$", text)
+    return text
+
+def _normalize_citation_artifacts(text: str) -> str:
+    """[3*source] / [3, source] / [paper_id=3*source] -> [paper_id=3]."""
+    if not text:
+        return ""
+    return _CITE_SOURCE_ARTIFACT_RE.sub(r"[paper_id=\1]", text)
+
+def _rewrite_author_year_markers(text: str, papers: list[dict]) -> str:
+    """[Krizhevsky et al. 2012] -> [paper_id=N] via first-author-last-name + year."""
+    if not text:
+        return ""
+    labels = {}
+    for i, p in enumerate(papers):
+        authors = p.get("authors") or []
+        if not authors:
+            continue
+        labels[(authors[0].split()[-1].lower(), str(p.get("published") or "")[:4])] = i
+    def _sub(m):
+        pid = labels.get((m.group(1).lower(), m.group(2)))
+        return f"[paper_id={pid}]" if pid is not None else ""
+    return _AUTHOR_YEAR_RE.sub(_sub, text)
+
+def _section_max_tokens(state: AgentState, plan: dict) -> int:
+    if state.get("response_mode", "normal") == "normal":
+        return 2048
+    return 3500 if plan.get("depth") == "high" else 2800
+
+
 def _clean_content(text: str) -> str:
+    text = _normalize_latex_delimiters(text)
+    text = _normalize_citation_artifacts(text)
     if not text:
         return ""
 
     text = _strip_internal_monologue(text)
+    text = _sanitize_preserving_math(text)
 
     text = re.sub(
         r"(\$\$.*?\$\$)",
@@ -203,6 +296,7 @@ def _sanitize_preserving_math(text: str) -> str:
     2. Call sanitize_for_web().
     3. Restore original LaTeX blocks.
     """
+    text = _normalize_latex_delimiters(text)
     if not text:
         return ""
 
@@ -1281,7 +1375,8 @@ def _invoke_section_batch(
             section_task = "default"
         llm = get_llm(temperature=0, task=section_task)
 
-        raw = llm.invoke(messages, config={"timeout": timeout})
+        raw = llm.invoke(messages, config={"timeout": timeout},
+                 max_tokens=_section_max_tokens(state, plan))
 
         return _parse_plain_sections(batch_modules, raw.content)
 
@@ -1362,7 +1457,7 @@ def _stream_invoke_section_batch(
         cleaned = _clean_content(raw_content)
 
         cleaned = _dedupe_paragraphs(cleaned, dedupe_seen)
-
+        cleaned = _rewrite_author_year_markers(cleaned, state.get("ranked_papers", []))
         cited_ids = extract_paper_ids(cleaned)
 
         display_content = rewrite_inline_citations(cleaned, id_map)
@@ -1397,7 +1492,8 @@ def _stream_invoke_section_batch(
         current_title = None
         current_content = ""
 
-        for chunk in llm.stream(messages, config={"timeout": timeout}):
+        for chunk in llm.stream(messages, config={"timeout": timeout},
+                        max_tokens=_section_max_tokens(state, plan)):
             if cancel_check and cancel_check():
                 break
 
@@ -1597,16 +1693,7 @@ def _generate_sections_batch_streaming(
         dedupe_seen,
     )
 
-    missing = [
-        m
-        for m in batch_modules
-        if m["module_id"] not in sections
-        and m["module_id"] in (
-            "direct_answer",
-            "executive_summary",
-            "research_findings",
-        )
-    ]
+    missing = [m for m in batch_modules if m["module_id"] not in sections]
 
     if missing and not (cancel_check and cancel_check()):
         print(f"[summarize:stream] retrying {len(missing)} missing module(s)")
@@ -1720,78 +1807,31 @@ def _rewrite_citations_author_year(text: str, labels: dict[str, str]) -> str:
     return text
 
 
-def _deterministic_section_fallback(
-    m: dict,
-    papers: list[dict],
-    summaries: dict,
-    labels: dict[str, str],
-    state: AgentState,
-) -> str:
+def _deterministic_section_fallback(m, papers, summaries, labels, state):
     if state.get("evidence_mode") == "uploaded":
-        return (
-            f"The uploaded document does not contain enough explicit content "
-            f"to fully support this section (*{m.get('title', '')}*)."
-        )
-
-    mid = m["module_id"]
-    qu = state.get("query_understanding") or {}
-    candidates = list(
-        dict.fromkeys(
-            (qu.get("methods_techniques") or []) + (qu.get("entities") or [])
-        )
-    )[:4]
-    
-    if mid == "comparative_analysis" and len(candidates) >= 2:
-        lines = []
-        for c in candidates:
-            key = c.lower().split()[0]
-            hit = next(
-                (
-                    (i, p)
-                    for i, p in enumerate(papers)
-                    if key in p.get("title", "").lower()
-                ),
-                None,
-            )
-            if hit:
-                i, p = hit
-                s = summaries.get(str(i), {})
-                lines.append(
-                    f"- **{c}** — [{labels.get(str(i), 'Source')}]: "
-                    f"{(s.get('findings') or p.get('summary', ''))[:260]}"
-                )
-            else:
-                lines.append(
-                    f"- **{c}** — No directly retrieved paper; "
-                    f"treat claims about it as inference."
-                )
-        return (
-            "The available sources do not provide sufficient detail for a direct comparison. "
-            "The most relevant retrieved papers include:\n"
-            + "\n".join(lines)
-            + (
-                "\n\n*Note: Head-to-head differences should be interpreted cautiously "
-                "because direct comparative studies are limited.*"
-            )
-        )
-        
-    lines = []
-    for i, p in enumerate(papers[:4]):
-        s = summaries.get(str(i), {})
-        lines.append(
-            f"- **{p.get('title', '')}** [{labels.get(str(i), 'Source')}]: "
-            f"{(s.get('findings') or '')[:220]}"
-        )
-        
-    if not lines:
-         return "The currently retrieved literature does not contain sufficient information to address this specific section."
-
-    return (
-        "The retrieved literature provides limited direct coverage for this specific aspect. "
-        "The most relevant available sources include:\n"
-        + "\n".join(lines)
-        + "\n\n*Note: Because direct evidence for this section is limited, treat this synthesis as provisional.*"
-    )
+        return (f"The uploaded document does not contain enough explicit content "
+                f"to fully support this section ({m.get('title', '')}).")
+    mid, title, query = m["module_id"], m.get("title", ""), state.get("query", "")
+    rows = [(i, p, summaries.get(str(i), {})) for i, p in enumerate(papers[:4])]
+    if not rows:
+        return "No retrieved sources were available for this section."
+    has_direct = any((s.get("evidence_type") or "") == "direct" for _, _, s in rows)
+    if mid == "key_concepts":
+        lines = [f"- **{(p.get('title') or 'Source').strip()}** [paper_id={i}]: "
+                 f"{(s.get('findings') or p.get('summary') or '')[:220]}" for i, p, s in rows]
+        return f"Core concepts for \"{query}\" as covered by the retrieved sources:\n" + "\n".join(lines)
+    if mid == "limitations":
+        return (f"This report synthesizes {len(papers)} retrieved source(s) "
+                f"(most relevant: [paper_id={rows[0][0]}]). Conclusions are bounded by what these "
+                f"sources report; details absent from them (head-to-head comparisons, exact "
+                f"quantitative figures, deployment specifics) remain uncertain.")
+    lines = [f"- **{(p.get('title') or 'Source').strip()}** [paper_id={i}]: "
+             f"{(s.get('findings') or p.get('summary') or '')[:220]}" for i, p, s in rows]
+    lead = (f"Sources underpinning {title}:\n" if has_direct
+            else f"Retrieved sources most relevant to {title}:\n")
+    tail = ("" if has_direct else
+            "\n\n*Note: direct evidence for this section is limited; treat as provisional.*")
+    return lead + "\n".join(lines) + tail
 
 
 def _split_batches(modules: list[dict], depth: str) -> list[list[dict]]:
@@ -1805,6 +1845,8 @@ def _split_batches(modules: list[dict], depth: str) -> list[list[dict]]:
         "key_concepts",
         "methodology",
         "research_findings",
+        "architecture",
+        "derivation",
     }
 
     core = [m for m in modules if m["module_id"] in core_ids]
@@ -1849,7 +1891,7 @@ def _generate_all_sections(
 
     sections = []
 
-    with ThreadPoolExecutor(max_workers=2) as ex:
+    with ThreadPoolExecutor(max_workers=1) as ex:
         futures = {
             ex.submit(
                 _generate_sections_batch,
@@ -1912,7 +1954,7 @@ def _generate_all_sections_streaming(
 
     sections: list[dict] = []
 
-    with ThreadPoolExecutor(max_workers=2) as ex:
+    with ThreadPoolExecutor(max_workers=1) as ex:
         futures = {
             ex.submit(
                 _generate_sections_batch_streaming,
@@ -3215,11 +3257,11 @@ def summarize_node(state: AgentState) -> AgentState:
 
         max_abstract = 750
 
-        paper_block = _build_paper_block(
+        paper_block = _fit_paper_block_to_budget(
             papers,
             summaries,
-            max_abstract=max_abstract,
-            max_papers=max_papers,
+            prompt_overhead_tokens=_estimate_tokens(FORMAT_INSTRUCTION) + 800,  # instructions + evidence map/spec text
+            max_output_tokens=_section_max_tokens(state, plan),
         )
 
         if streaming_enabled:
@@ -3298,7 +3340,8 @@ def summarize_node(state: AgentState) -> AgentState:
 
     answer_text = _merge_sections(sections, plan)
     answer_text = _strip_internal_monologue(answer_text)
-
+    answer_text = _normalize_citation_artifacts(_normalize_latex_delimiters(answer_text))
+    answer_text = _rewrite_author_year_markers(answer_text, papers)
     cite_markers: list[str] = []
 
     def _stash_cite_marker(m):

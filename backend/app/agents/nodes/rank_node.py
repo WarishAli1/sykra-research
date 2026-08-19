@@ -366,8 +366,6 @@ def _llm_rerank_top_k(top_k: list[dict], state: AgentState, answer_spec: dict) -
         return top_k
 
     mode = state.get("response_mode", "normal")
-    if mode == "normal" and not answer_spec.get("primary_source_required"):
-        return top_k
 
     limit = (
         getattr(settings, "RERANK_MAX_CANDIDATES_NORMAL", 6)
