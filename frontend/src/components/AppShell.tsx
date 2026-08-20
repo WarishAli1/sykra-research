@@ -278,7 +278,7 @@ export function AppShell() {
             <div className="px-3">
               <button
                 onClick={handleNewChat}
-                className="flex w-full items-center gap-2 rounded-lg bg-gold-tint border border-gold/40 px-3 py-2 text-[12.5px] font-medium text-ink hover:bg-gold-tint/70 hover:border-gold/60 transition-colors"
+                className="flex w-full items-center gap-2 rounded-lg bg-gold-tint border border-gold/40 px-3 py-2 text-caption font-medium text-ink hover:bg-gold-tint/70 hover:border-gold/60 transition-colors"
               >
                 <Plus className="h-3.5 w-3.5" />
                 New Chat
@@ -286,7 +286,7 @@ export function AppShell() {
             </div>
 
             <div className="mt-5 px-3">
-              <p className="px-1.5 pb-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-ink-soft/70">
+              <p className="px-1.5 pb-1.5 text-label text-ink-soft/70">
                 Workspace
               </p>
 
@@ -297,7 +297,7 @@ export function AppShell() {
                   setTab("library");
                   setRailOpen(true);
                 }}
-                className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+                className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-caption transition-colors ${
                   !showGraphView && tab === "library" && railOpen
                     ? "bg-gold-tint text-ink font-medium"
                     : "text-ink-soft hover:bg-paper hover:text-ink"
@@ -306,7 +306,7 @@ export function AppShell() {
                 <Library className="h-3.5 w-3.5 shrink-0" />
                 Library
                 {papers.length > 0 && (
-                  <span className="ml-auto rounded-full bg-paper px-1.5 py-0 text-[10px] text-ink-soft">
+                  <span className="ml-auto rounded-full bg-paper px-1.5 py-0 text-micro text-ink-soft">
                     {papers.length}
                   </span>
                 )}
@@ -314,7 +314,7 @@ export function AppShell() {
 
               <button
                 onClick={handleOpenGraph}
-                className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+                className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-caption transition-colors ${
                   showGraphView
                     ? "bg-gold-tint text-ink font-medium"
                     : "text-ink-soft hover:bg-paper hover:text-ink"
@@ -326,7 +326,7 @@ export function AppShell() {
 
               <button
                 onClick={() => { setShowStudio(true); setShowGraphView(false); }}
-                className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+                className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-caption transition-colors ${
                   showStudio
                     ? "bg-indigo-tint text-ink font-medium"
                     : "text-ink-soft hover:bg-paper hover:text-ink"
@@ -337,7 +337,7 @@ export function AppShell() {
               </button>
             </div>
 
-            <div className="mt-auto px-4 py-3 text-[10.5px] text-ink-soft/50 shrink-0">
+            <div className="mt-auto px-4 py-3 text-micro text-ink-soft/50 shrink-0">
               AI Research Assistant
             </div>
           </div>
@@ -388,7 +388,7 @@ export function AppShell() {
             >
               {!showGraphView && tab === "library" && railOpen && (
                 <span
-                  className="absolute -left-1.5 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-gold"
+                  className="absolute -left-1.5 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-accent"
                   aria-hidden="true"
                 />
               )}
@@ -397,7 +397,7 @@ export function AppShell() {
 
               {papers.length > 0 && (
                 <span
-                  className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-gold"
+                  className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-accent"
                   aria-hidden="true"
                 />
               )}
@@ -421,7 +421,7 @@ export function AppShell() {
             >
               {showGraphView && (
                 <span
-                  className="absolute -left-1.5 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-gold"
+                  className="absolute -left-1.5 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-accent"
                   aria-hidden="true"
                 />
               )}
@@ -472,7 +472,7 @@ export function AppShell() {
               <div className="flex items-center justify-between border-b border-line px-4 py-3">
                 <button
                   onClick={handleBackToChat}
-                  className="flex items-center gap-2 text-[13px] text-ink-soft hover:text-ink"
+                  className="flex items-center gap-2 text-body text-ink-soft hover:text-ink"
                 >
                   <ArrowLeft className="h-4 w-4" /> Back to Chat
                 </button>
@@ -563,7 +563,7 @@ export function AppShell() {
                 >
                   <Library className="h-4 w-4" />
                   {papers.length > 0 && (
-                    <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-gold" />
+                    <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-accent" />
                   )}
                 </button>
                 <button
