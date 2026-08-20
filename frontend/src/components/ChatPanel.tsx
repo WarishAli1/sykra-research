@@ -610,7 +610,7 @@ export function ChatPanel({
           disabled={isGenerating}
           rows={1}
           placeholder="Ask a question, or drop a PDF to ground it"
-          className="min-h-[24px] max-h-28 flex-1 resize-none overflow-y-auto bg-transparent py-1.5 text-[13.5px] leading-6 text-ink placeholder:text-ink-soft/60 focus:outline-none"
+          className="min-h-[24px] max-h-28 flex-1 resize-none overflow-y-auto bg-transparent py-1.5 text-body leading-6 text-ink placeholder:text-ink-soft/60 focus:outline-none"
         />
 
         {hasUpload && (
@@ -647,7 +647,7 @@ export function ChatPanel({
             onClick={handleSend}
             disabled={!input.trim()}
             aria-label="Send message"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo text-white transition hover:bg-indigo-dark active:scale-95 disabled:opacity-30"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-white transition hover:bg-accent-dark active:scale-95 disabled:opacity-30"
           >
             <ArrowUp className="h-4 w-4" />
           </button>
@@ -682,8 +682,8 @@ export function ChatPanel({
             <h1 className="font-serif text-[30px] font-semibold tracking-tight text-ink mb-2.5 text-center">
               {greeting.title}
             </h1>
-            <p className="text-[13.5px] text-ink-soft mb-8 text-center max-w-[440px] leading-relaxed">
-              Ask anything across your papers and the open literature — every answer arrives cited, sourced, and ready to
+            <p className="text-body text-ink-soft mb-8 text-center max-w-[440px] leading-relaxed">
+              Ask anything across your papers and the open literature. Every answer arrives cited, sourced, and ready to
               export.
             </p>
             {composer}
@@ -692,7 +692,7 @@ export function ChatPanel({
 
         {error && (
           <div className="relative px-6 pb-4">
-            <div className="mx-auto max-w-[560px] rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-[12px] text-danger">
+            <div className="mx-auto max-w-[560px] rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-caption text-danger">
               {error}
             </div>
           </div>
@@ -730,7 +730,7 @@ export function ChatPanel({
                 <button
                   role="menuitem"
                   onClick={handleTogglePin}
-                  className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12.5px] transition-colors hover:bg-paper-dim ${
+                  className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-caption transition-colors hover:bg-paper-dim ${
                     pinned ? "text-indigo" : "text-ink"
                   }`}
                 >
@@ -741,7 +741,7 @@ export function ChatPanel({
                 <button
                   role="menuitem"
                   onClick={handleShareConversation}
-                  className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12.5px] text-ink transition-colors hover:bg-paper-dim"
+                  className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-caption text-ink transition-colors hover:bg-paper-dim"
                 >
                   <Share2 className="h-3.5 w-3.5 text-ink-soft" />
                   <span className="flex-1">Share conversation</span>
@@ -753,7 +753,7 @@ export function ChatPanel({
 
         {toast && (
           <div className="pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 animate-fade-up">
-            <div className="rounded-full border border-white/10 bg-ink/90 px-3.5 py-1.5 text-[12px] font-medium text-white shadow-lg shadow-black/20 backdrop-blur-sm">
+            <div className="rounded-full border border-white/10 bg-ink/90 px-3.5 py-1.5 text-caption font-medium text-white shadow-lg shadow-black/20 backdrop-blur-sm">
               {toast}
             </div>
           </div>
@@ -824,7 +824,7 @@ export function ChatPanel({
           ))}
 
           {error && (
-            <div className="rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-[12px] text-danger animate-fade-up">
+            <div className="rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-caption text-danger animate-fade-up">
               {error}
             </div>
           )}
