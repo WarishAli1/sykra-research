@@ -85,6 +85,82 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def _enforce_groq_request_budget(prompt: str, max_output_tokens: int) -> str:
+    """
+    Groq on_demand tier enforces a hard 8000 token limit per request (prompt + output).
+    This function aggressively trims verbose prompt sections to prevent 413 errors.
+    """
+    target_prompt_tokens = 7500 - max_output_tokens
+    target_chars = target_prompt_tokens * 4
+    
+    if len(prompt) <= target_chars:
+        return prompt
+
+    prompt = re.sub(
+        r"EVIDENCE MATRIX.*?(?=DOMAIN GUARDRAILS|WRITE THESE MODULES|NEED COVERAGE|AVAILABLE SOURCES)",
+        "",
+        prompt,
+        flags=re.DOTALL
+    )
+    
+    if "EPISTEMIC MODE: TEXTBOOK DERIVATION" in prompt:
+        prompt = re.sub(
+            r"EPISTEMIC MODE: TEXTBOOK DERIVATION.*?(?=DEPTH & MATURITY|EPISTEMIC SYNTHESIS|CITATION RULES|FORMAT INSTRUCTION)",
+            "EPISTEMIC MODE: TEXTBOOK DERIVATION\nProvide rigorous step-by-step math. Use $ and $$ correctly. Define all symbols.\n",
+            prompt,
+            flags=re.DOTALL
+        )
+        
+    prompt = re.sub(
+        r"SCENARIO MATRIX.*?(?=AVAILABLE SOURCES|EPISTEMIC SYNTHESIS|NEED COVERAGE|FORMAT INSTRUCTION|\Z)",
+        "",
+        prompt,
+        flags=re.DOTALL
+    )
+    prompt = re.sub(
+        r"DETECTED CONTRADICTIONS.*?(?=AVAILABLE SOURCES|EPISTEMIC SYNTHESIS|NEED COVERAGE|FORMAT INSTRUCTION|\Z)",
+        "",
+        prompt,
+        flags=re.DOTALL
+    )
+    
+    prompt = re.sub(
+        r"OTHER SECTIONS IN THIS REPORT.*?(?=EPISTEMIC SYNTHESIS|CITATION RULES|FORMAT INSTRUCTION)",
+        "Do not repeat content from other sections.\n",
+        prompt,
+        flags=re.DOTALL
+    )
+
+    if len(prompt) > target_chars:
+        prompt = re.sub(
+            r"NEED COVERAGE STATUS:\n(.*?)(?=AVAILABLE SOURCES|EPISTEMIC SYNTHESIS|FORMAT INSTRUCTION)",
+            lambda m: "NEED COVERAGE STATUS:\n" + "\n".join(m.group(1).split("\n")[:8]) + "\n",
+            prompt,
+            flags=re.DOTALL
+        )
+
+    if len(prompt) > target_chars and "AVAILABLE SOURCES:" in prompt:
+        parts = prompt.split("AVAILABLE SOURCES:")
+        if len(parts) == 2:
+            before = parts[0]
+            split_markers = ["\n\nEPISTEMIC SYNTHESIS RULES", "\n\nFORMATTING RULES", "\n\nCITATION RULES", "\n\nEXPERT QUALITY RULES"]
+            papers_text = parts[1]
+            rest = ""
+            for marker in split_markers:
+                if marker in parts[1]:
+                    p_parts = parts[1].split(marker, 1)
+                    papers_text = p_parts[0]
+                    rest = marker + p_parts[1]
+                    break
+            
+            allowed_chars = max(800, target_chars - len(before) - len(rest) - 20)
+            if len(papers_text) > allowed_chars:
+                papers_text = papers_text[:allowed_chars] + "\n[Truncated for length]"
+            prompt = before + "AVAILABLE SOURCES:" + papers_text + rest
+
+    return prompt
+
+
 def _fit_paper_block_to_budget(
     papers: list[dict],
     summaries: dict[str, dict],
@@ -217,13 +293,13 @@ def _strip_internal_monologue(text: str) -> str:
 
 
 
-_MATH_DISPLAY_RE = re.compile(r"\$\$.*?\$\$", re.DOTALL)
-_MATH_INLINE_RE = re.compile(r"\$[^$\n]+?\$")
+_MATH_DISPLAY_RE = re.compile(r"\$\$(.*?)\$\$", re.DOTALL)
+_MATH_INLINE_RE  = re.compile(r"\$([^$\n]+?)\$")
 _DEDUPE_LOCK = threading.Lock()
 
 
-_LATEX_DISPLAY_BRACKET_RE = re.compile(r"\\\[(.*?)\\\]", re.DOTALL)
-_LATEX_INLINE_PAREN_RE = re.compile(r"\\\((.*?)\\\)", re.DOTALL)
+_LATEX_DISPLAY_BRACKET_RE = re.compile(r"\\\[(.+?)\\\]", re.DOTALL)
+_LATEX_INLINE_PAREN_RE    = re.compile(r"\\\((.+?)\\\)", re.DOTALL)
 _CITE_SOURCE_ARTIFACT_RE = re.compile(
     r"\[\s*(?:paper[\s_]?id\s*[=＝]\s*)?(\d+)\s*(?:[*•,;:]\s*)?source\s*\]",
     re.IGNORECASE,
@@ -233,13 +309,18 @@ _AUTHOR_YEAR_RE = re.compile(
 )
 
 def _normalize_latex_delimiters(text: str) -> str:
-    """\[..\] -> $$..$$ and \(..\) -> $..$ so sanitize/verify/render see one form."""
     if not text:
         return ""
+    text = re.sub(
+        r"\[(paper_id=\d+)\]",
+        r"@@CITE_\1@@",
+        text,
+    )
     text = _LATEX_DISPLAY_BRACKET_RE.sub(
         lambda m: "\n\n$$" + m.group(1).strip() + "$$\n\n", text)
     text = _LATEX_INLINE_PAREN_RE.sub(
         lambda m: "$" + m.group(1).strip() + "$", text)
+    text = re.sub(r"@@CITE_(paper_id=\d+)@@", r"[\1]", text)
     return text
 
 def _normalize_citation_artifacts(text: str) -> str:
@@ -269,9 +350,9 @@ def _section_max_tokens(state: AgentState, plan: dict) -> int:
     return 3500 if plan.get("depth") == "high" else 2800
 
 
-def _clean_content(text: str) -> str:
-    text = _normalize_latex_delimiters(text)
+def _clean_content(text):
     text = _normalize_citation_artifacts(text)
+    text = _normalize_latex_delimiters(text) 
     if not text:
         return ""
 
@@ -1356,7 +1437,7 @@ def _invoke_section_batch(
         + "Just write the heading and the content paragraphs below it.\n"
         + "Do NOT wrap in JSON. Do NOT use code fences."
     )
-
+    full_prompt = _enforce_groq_request_budget(full_prompt, _section_max_tokens(state, plan))
     messages = [
         SystemMessage(
             content=(
@@ -1429,7 +1510,7 @@ def _stream_invoke_section_batch(
         + "Just write the heading and the content paragraphs below it.\n"
         + "Do NOT wrap in JSON. Do NOT use code fences."
     )
-
+    full_prompt = _enforce_groq_request_budget(full_prompt, _section_max_tokens(state, plan))
     messages = [
         SystemMessage(
             content=(
@@ -3260,7 +3341,7 @@ def summarize_node(state: AgentState) -> AgentState:
         paper_block = _fit_paper_block_to_budget(
             papers,
             summaries,
-            prompt_overhead_tokens=_estimate_tokens(FORMAT_INSTRUCTION) + 800,  # instructions + evidence map/spec text
+            prompt_overhead_tokens=_estimate_tokens(FORMAT_INSTRUCTION) + 3500,  # Increased to account for ledger, spec, epistemic instructions
             max_output_tokens=_section_max_tokens(state, plan),
         )
 

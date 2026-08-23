@@ -311,7 +311,6 @@ export function StudioView({
   );
 }
 
-// ─── Sub-components ─────────────────────────────────────────────────────────
 
 function ModeButton({
   active,
