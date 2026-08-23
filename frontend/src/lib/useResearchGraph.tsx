@@ -36,9 +36,7 @@ export function useResearchGraph(projectId: string) {
   }
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- standard fetch-on-mount/prop-change pattern
     loadOverview();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
   async function openFocus(link: string, title: string) {

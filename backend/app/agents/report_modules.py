@@ -352,24 +352,27 @@ def _has_architecture_signal(
 
 
 
-def _is_technical_derivation(
-    query: str, understanding: dict | None = None
-) -> bool:
+def _is_technical_derivation(query, understanding):
     q = (query or "").lower()
+
+    comparison_signals = (
+        "differ", "compare", "comparison", "versus", " vs ",
+        "distinction", "contrast", "unlike",
+    )
+    if any(s in q for s in comparison_signals):
+        return False
+
     signals = (
-        "derive ", "derivation ", "prove ", "proof ",
-        "how does ", "how do ", "mathematically ",
-        "step by step ", "step-by-step ", "walk through ",
-        "mechanism of ", "explain the math ",
+        "derive", "derivation", "prove", "proof",
+        "mathematically", "step by step", "step-by-step",
+        "walk through", "mechanism of", "explain the math",
     )
     if any(s in q for s in signals):
         return True
+
     understanding = understanding or {}
-    methods = [
-        str(x).lower()
-        for x in (understanding.get("methods_techniques") or [])
-    ]
-    return any("equation " in m or "algorithm " in m for m in methods)
+    methods = [str(x).lower() for x in (understanding.get("methods_techniques") or [])]
+    return any("equation" in m or "algorithm" in m for m in methods)
 
 
 

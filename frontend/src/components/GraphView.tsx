@@ -291,7 +291,6 @@ export function GraphView({
     if (!fg || !colored?.nodes.length || typeof fg.d3Force !== "function") return;
     const n = colored.nodes.length;
     const charge = fg.d3Force("charge");
-    // Lower distanceMax prevents disconnected clusters from repelling each other across the canvas
     if (charge) { charge.strength(n <= 40 ? -55 : -80); charge.distanceMax(160); }
     const link = fg.d3Force("link");
     if (link) {

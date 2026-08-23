@@ -219,7 +219,7 @@ def plan_query_node(state: AgentState) -> AgentState:
     mode = state.get("response_mode", "normal")
 
     is_normal = mode == "normal"
-    is_derivation = _is_technical_derivation(query)
+    is_derivation = _is_technical_derivation(query, None)
 
     is_uploaded = state.get("evidence_mode") == "uploaded"
     if is_uploaded:
