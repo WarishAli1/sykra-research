@@ -116,7 +116,8 @@ def _deterministic_ledger(papers: list[dict], answer_spec: dict) -> dict:
 
 def ledger_node(state: AgentState) -> AgentState:
     term_coverage = state.get("term_coverage") or {}
-    if term_coverage:
+    is_uploaded = state.get("evidence_mode") == "uploaded"
+    if term_coverage and not is_uploaded:
         covered = sum(1 for v in term_coverage.values() if v.get("status") == "covered")
         coverage_ratio = covered / len(term_coverage)
         if coverage_ratio < 0.30:

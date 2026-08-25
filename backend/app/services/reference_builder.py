@@ -76,9 +76,7 @@ def rewrite_inline_citations(text: str, id_map: dict[str, int]) -> str:
         pid = m.group(1)
         ref_id = id_map.get(pid)
         return f"[{ref_id}]" if ref_id is not None else ""
-    text = _PAPER_ID_MARKER.sub(_sub, text)
-    text = _PAPER_ID_MARKER.sub("", text)
-    return text
+    return _PAPER_ID_MARKER.sub(_sub, text)
 
 
 def _clean_content(text: str) -> str:

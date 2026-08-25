@@ -5,6 +5,7 @@ from app.agents.report_modules import (
     module_catalog_text,
     normalize_report_plan,
     default_report_plan,
+    _has_comparison_signal,
 )
 from app.services.llm_client import get_llm
 from app.config import settings
@@ -65,11 +66,17 @@ def _adaptive_target_paper_k(plan: dict, state: AgentState) -> int:
     Normal mode  → 4–7 papers
     Researched   → 8–15 papers
     Both scale with depth, complexity, and information-needs.
+
+    NOTE: for evidence_mode in ("uploaded", "blended"), this value is a
+    pre-retrieval ESTIMATE only — report_plan_node runs before
+    retrieve_uploaded_node, so the real uploaded chunk count isn't known
+    yet here. rank_node.py is responsible for treating this as a floor,
+    not a hard cap, once state["uploaded_context"] is populated. See the
+    target_k_setting fix in rank_node.py.
     """
     response_mode = state.get("response_mode", "normal")
     depth = plan.get("depth", "low")
     is_normal = response_mode == "normal"
-
 
     if is_normal:
         base = {"low": 4, "medium": 5, "high": 7}.get(depth, 5)
@@ -77,7 +84,6 @@ def _adaptive_target_paper_k(plan: dict, state: AgentState) -> int:
     else:
         base = {"low": 8, "medium": 11, "high": 15}.get(depth, 11)
         lo, hi = settings.TOP_K_PAPERS_RESEARCH_MIN, settings.TOP_K_PAPERS_RESEARCH_MAX
-
 
     target = base
     information_needs = [
@@ -94,17 +100,14 @@ def _adaptive_target_paper_k(plan: dict, state: AgentState) -> int:
     ):
         target += 1
 
-
     complexity = int(plan.get("complexity_score", 50) or 50)
     if complexity >= 75:
         target += 1
     if len(information_needs) >= 6:
         target += 1
 
-
     if state.get("evidence_mode") in ("uploaded", "blended"):
         target = max(target, settings.TOP_K_PAPERS_MEDIUM)
-
 
     target = max(lo, min(hi, target))
     return int(target)
@@ -113,6 +116,44 @@ def _adaptive_target_paper_k(plan: dict, state: AgentState) -> int:
 def report_plan_node(state: AgentState) -> AgentState:
     response_mode = state.get("response_mode", "normal")
     evidence_mode = state.get("evidence_mode", "literature")
+    
+    query = state.get("query", "")
+    understanding = state.get("query_understanding") or {}
+
+    if evidence_mode == "uploaded":
+        modules = [
+            {"module_id": "direct_answer", "importance": 100},
+        ]
+        
+        if _has_comparison_signal(query, understanding):
+            modules.append({"module_id": "comparative_analysis", "importance": 95})
+            
+        modules.append({"module_id": "research_findings", "importance": 90})
+        modules.append({"module_id": "evidence_mapping", "importance": 95})
+        modules.append({"module_id": "limitations", "importance": 85})
+        modules.append({"module_id": "references", "importance": 100})
+        
+        raw_plan = {
+            "primary_intent": "extract",
+            "depth": "medium",
+            "target_words": 1800,
+            "reference_policy": "standard",
+            "reasoning_policy": "evidence_only",
+            "modules": modules,
+            "information_needs": understanding.get("objectives", []),
+            "complexity_score": 60,
+        }
+        plan = normalize_report_plan(raw_plan, state)
+        return {
+            "report_plan": plan,
+            "information_needs": plan.get("information_needs", []),
+            "complexity_score": 60,
+            "report_depth": "medium",
+            "target_word_count": 1800,
+            "module_plan": plan.get("modules", []),
+            "report_notice": None,
+            "target_paper_k": _adaptive_target_paper_k(plan, state),
+        }
 
     if response_mode == "normal":
         raw_plan = default_report_plan(state)
@@ -166,10 +207,6 @@ def report_plan_node(state: AgentState) -> AgentState:
             "report_notice": None,
             "target_paper_k": _adaptive_target_paper_k(plan, state),
         }
-
-    query = state.get("query", "")
-    evidence_mode = state.get("evidence_mode", "literature")
-    understanding = state.get("query_understanding") or {}
 
     llm = get_llm(temperature=0, task="structured")
 

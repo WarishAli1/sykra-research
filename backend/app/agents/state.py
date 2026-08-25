@@ -25,6 +25,7 @@ class AgentState(TypedDict):
     summaries: dict[str, dict]
     low_confidence_results: bool
     uploaded_context: list[dict]
+    document_map: Optional[str]
     term_coverage: dict[str, dict]
     papers_below_threshold: int
     final_answer: str

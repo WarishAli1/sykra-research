@@ -89,40 +89,6 @@ def candidate_fingerprint(paper: dict) -> str:
     return f"fallback:{source}:{paper.get('link', '')}"
 
 
-def merge_duplicate_papers(papers: list[dict]) -> list[dict]:
-    merged: dict[str, dict] = {}
-
-    for p in papers:
-        fp = candidate_fingerprint(p)
-        existing = merged.get(fp)
-
-        if not existing:
-            merged[fp] = dict(p)
-            continue
-
-        if len((p.get("summary") or "")) > len((existing.get("summary") or "")):
-            existing["summary"] = p.get("summary")
-
-        if (p.get("citation_count") or 0) > (existing.get("citation_count") or 0):
-            existing["citation_count"] = p.get("citation_count")
-
-        for key in ("doi", "arxiv_id", "openalex_id", "venue", "published", "pdf_url"):
-            if not existing.get(key) and p.get(key):
-                existing[key] = p.get(key)
-
-        for key in ("_primary_candidate", "_source_search_type", "_source_role"):
-            if p.get(key) and not existing.get(key):
-                existing[key] = p.get(key)
-
-        existing_sources = set((existing.get("source") or "").split("+"))
-        new_source = p.get("source") or ""
-        if new_source:
-            existing_sources.add(new_source)
-        existing["source"] = "+".join(sorted(s for s in existing_sources if s)) or existing.get("source")
-
-    return list(merged.values())
-
-
 def derive_research_needs(query: str, understanding: dict | None = None, plan: dict | None = None) -> list[ResearchNeed]:
     understanding = understanding or {}
     plan = plan or {}
@@ -300,10 +266,26 @@ def _merge_pair(existing: dict, p: dict) -> None:
         or existing.get("source")
     )
 
+_UPLOAD_SOURCE_LABELS = {
+    "user_upload",
+    "uploaded",
+    "upload",
+    "user_uploaded",
+}
+
 
 def merge_duplicate_papers(papers: list[dict]) -> list[dict]:
+    uploaded = [
+        p for p in papers
+        if str(p.get("source") or "").lower() in _UPLOAD_SOURCE_LABELS
+    ]
+    mergeable = [
+        p for p in papers
+        if str(p.get("source") or "").lower() not in _UPLOAD_SOURCE_LABELS
+    ]
+
     merged: dict[str, dict] = {}
-    for p in papers:
+    for p in mergeable:
         fp = candidate_fingerprint(p)
         existing = merged.get(fp)
         if not existing:
@@ -337,4 +319,6 @@ def merge_duplicate_papers(papers: list[dict]) -> list[dict]:
             _merge_pair(base, other)
             absorbed.add(id(other))
 
-    return [p for p in records if id(p) not in absorbed]
+    merged_literature = [p for p in records if id(p) not in absorbed]
+
+    return merged_literature + uploaded

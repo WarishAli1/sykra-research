@@ -172,24 +172,63 @@ def _fit_paper_block_to_budget(
 ) -> str:
     """
     Shrinks paper_block until (prompt_tokens + max_output_tokens) fits
-    comfortably under the model's TPM limit. Drops lowest-priority papers
-    first, then trims abstract length, rather than discovering the
-    overage via a 413 at call time.
+    comfortably under the model's TPM limit.
     """
-    tpm_limit = tpm_limit or getattr(settings, "GROQ_TPM_LIMIT_STRONG", 8000)
-    safety_margin = 0.85  # leave headroom for system/instruction text elsewhere
+    tpm_limit = tpm_limit or getattr(
+        settings,
+        "GROQ_TPM_LIMIT_STRONG",
+        8000,
+    )
 
-    budget = int(tpm_limit * safety_margin) - max_output_tokens - prompt_overhead_tokens
-    budget = max(budget, 500)  # never go below a usable floor
+    safety_margin = 0.85
+
+    budget = (
+        int(tpm_limit * safety_margin)
+        - max_output_tokens
+        - prompt_overhead_tokens
+    )
+    budget = max(budget, 500)
 
     n_papers = max_papers
     abstract_cap = max_abstract
 
+    print(
+        f"[summarize:budget] START "
+        f"input_papers={len(papers)} "
+        f"max_papers={max_papers} "
+        f"max_abstract={max_abstract} "
+        f"tpm_limit={tpm_limit} "
+        f"budget={budget} "
+        f"prompt_overhead={prompt_overhead_tokens} "
+        f"max_output={max_output_tokens}"
+    )
+
     while n_papers >= 1:
         block = _build_paper_block(
-            papers, summaries, max_abstract=abstract_cap, max_papers=n_papers
+            papers,
+            summaries,
+            max_abstract=abstract_cap,
+            max_papers=n_papers,
         )
-        if _estimate_tokens(block) <= budget:
+
+        estimated_tokens = _estimate_tokens(block)
+
+        print(
+            f"[summarize:budget] CHECK "
+            f"n_papers={n_papers} "
+            f"abstract_cap={abstract_cap} "
+            f"estimated_tokens={estimated_tokens} "
+            f"budget={budget}"
+        )
+
+        if estimated_tokens <= budget:
+            print(
+                f"[summarize:budget] FIT "
+                f"n_papers={n_papers} "
+                f"abstract_cap={abstract_cap} "
+                f"estimated_tokens={estimated_tokens} "
+                f"budget={budget}"
+            )
             return block
 
         if abstract_cap > 250:
@@ -197,8 +236,24 @@ def _fit_paper_block_to_budget(
         else:
             n_papers -= 1
 
-    # last resort: single paper, minimal abstract
-    return _build_paper_block(papers, summaries, max_abstract=200, max_papers=1)
+    # last resort
+    block = _build_paper_block(
+        papers,
+        summaries,
+        max_abstract=200,
+        max_papers=1,
+    )
+
+    print(
+        f"[summarize:budget] LAST_RESORT "
+        f"n_papers=1 "
+        f"abstract_cap=200 "
+        f"estimated_tokens={_estimate_tokens(block)} "
+        f"budget={budget}"
+    )
+
+    return block
+
 
 
 class _OrderedSectionEmitter:
@@ -2163,6 +2218,7 @@ Keep the answer accurate, concise, and high-quality.
                 ),
                 HumanMessage(content=prompt),
             ],
+            max_tokens=2048,
             config={"timeout": settings.REPORT_SECTION_TIMEOUT_NORMAL},
         )
 
@@ -2226,24 +2282,7 @@ def _select_default_cited_ids(
     summaries: dict,
     plan: dict,
 ) -> list[str]:
-    direct_ids = [
-        sid
-        for sid, s in summaries.items()
-        if s.get("evidence_type") == "direct"
-    ]
-
-    supporting_ids = [
-        sid
-        for sid, s in summaries.items()
-        if s.get("evidence_type") == "supporting"
-    ]
-
-    ids = direct_ids[:3] + supporting_ids[:2]
-
-    if not ids:
-        ids = [str(i) for i, _ in enumerate(papers[:3])]
-
-    return ids
+    return []
 
 
 def _select_references(
@@ -2737,6 +2776,7 @@ Return only the revised module content (no heading).
                     ),
                     HumanMessage(content=prompt),
                 ],
+                max_tokens=2048,
                 config={"timeout": settings.REPORT_SECTION_TIMEOUT_NORMAL},
             )
 
@@ -2877,6 +2917,7 @@ Do not use markdown headings.
                 ),
                     HumanMessage(content=prompt),
                 ],
+            max_tokens=2048,
             config={"timeout": settings.REPORT_SECTION_TIMEOUT_NORMAL},
         )
 
@@ -3079,11 +3120,17 @@ def _generate_uploaded_sections(
         return [sec]
 
     if is_normal:
+        document_map = state.get("document_map", "No document structure or table of contents was detected.")
         prompt = (
             f"USER QUESTION:\n{query}\n\n"
+            f"{document_map}\n\n"
             f"DOCUMENT PASSAGES (from the user's uploaded document, most relevant first):\n"
             f"{passage_block}\n\n"
             f"Write a complete answer using ONLY the passages above.\n"
+            f"CRITICAL CLOSED-BOOK RULES:\n"
+            f"1. NO OUTSIDE KNOWLEDGE: You are strictly forbidden from using sector averages, lifecycle assumptions, or first-principles inference. If a number, metric, or comparison is not explicitly written in the passages above, DO NOT INVENT IT.\n"
+            f"2. RESPECT DOCUMENT SCOPE: Look at the DOCUMENT STRUCTURE. Do not assume a chapter covers something its headings do not mention.\n"
+            f"3. EXPLICIT OMISSIONS: If the document lacks a comparison or specific data, state clearly that the document does not provide it.\n\n"
             f"Rules:\n"
             f"- Address EVERY part of the question.\n"
             f"- Cite passages as [paper_id=N].\n"
@@ -3170,18 +3217,25 @@ def _generate_uploaded_sections(
 
     titles = "\n".join(f"## {m['title']}" for m in batch_modules)
 
+    document_map = state.get("document_map", "No document structure or table of contents was detected.")
+    
     prompt = (
         f"USER QUESTION:\n{query}\n\n"
-        f"DOCUMENT PASSAGES (from the user's uploaded document, most relevant first):\n"
+        f"{document_map}\n\n"
+        f"RELEVANT PASSAGES (from the user's uploaded document):\n"
         f"{passage_block}\n\n"
-        f"Write a report using ONLY the passages above with EXACTLY these section headings:\n"
+        f"Write a report using STRICTLY AND ONLY the passages above with EXACTLY these section headings:\n"
         f"{titles}\n\n"
-        f"Rules:\n"
-        f"- Address EVERY part of the question across the sections.\n"
+        f"CRITICAL CLOSED-BOOK RULES:\n"
+        f"1. NO OUTSIDE KNOWLEDGE: You are strictly forbidden from using sector averages, lifecycle assumptions, or first-principles inference. If a number, metric, or comparison is not explicitly written in the passages above, DO NOT INVENT IT.\n"
+        f"2. NO 'UNSUPPORTED' TABLES: Do not create tables of metrics and label them 'Unsupported' or 'Inferred'. If the data is not in the text, simply write: 'The provided document does not contain quantitative data on [metric].'\n"
+        f"3. RESPECT DOCUMENT SCOPE: Look at the DOCUMENT STRUCTURE. If a chapter is titled 'Environmental Impact' but the headings show it only covers 'Indoor Pollutants' and 'Battery Hazards', do not assume it covers lifecycle GHG emissions. Report exactly what the chapters cover.\n"
+        f"4. EXPLICIT OMISSIONS: If the user asks for a comparison (e.g., renewable vs non-renewable) and the document lacks this comparison, state clearly: 'The document describes X but does not provide a comparative analysis of Y.'\n"
+        f"5. DIRECT QUOTES: Where the document makes specific admissions (e.g., 'wind power does produce some pollution' during manufacturing), quote or closely paraphrase them rather than generalizing.\n\n"
+        f"SECTION INSTRUCTIONS:\n"
         f"- Direct Answer 60-120 words; other sections 120-300 words each.\n"
         f"- Cite passages as [paper_id=N].\n"
-        f"- Use the document's own facts, names, numbers, and examples.\n"
-        f"- If a section has no supporting passage content, say so in one sentence; never invent.\n"
+        f"- If a section has no supporting passage content, state that the document does not cover it.\n"
         f"- No References section. No thinking."
     )
 
