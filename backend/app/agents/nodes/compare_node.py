@@ -58,20 +58,28 @@ def _has_explicit_compare_intent(query: str) -> bool:
 
 def _gather_comparison_candidates(state: AgentState) -> list[str]:
     understanding = state.get("query_understanding") or {}
-
     candidates = []
     candidates.extend(understanding.get("methods_techniques") or [])
     candidates.extend(understanding.get("entities") or [])
-
+    
     seen = set()
     deduped = []
-
     for c in candidates:
         key = c.strip().lower()
         if key and key not in seen:
             seen.add(key)
             deduped.append(c.strip())
-
+            
+    if not deduped and state.get("evidence_mode") == "uploaded":
+        q = state.get("query", "")
+        match = re.search(r"compare\s+(.*?)\s+and\s+(.*?)(?:\s+in\s+terms|\s+vs|\.|,|$)", q, re.IGNORECASE)
+        if match:
+            deduped = [match.group(1).strip(), match.group(2).strip()]
+        else:
+            match_vs = re.search(r"\b(.*?)\s+vs\.?\s+(.*?)\b", q, re.IGNORECASE)
+            if match_vs:
+                deduped = [match_vs.group(1).strip(), match_vs.group(2).strip()]
+                
     return deduped
 
 

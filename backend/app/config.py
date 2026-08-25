@@ -24,9 +24,9 @@ class Settings(BaseSettings):
     TOP_K_PAPERS_NORMAL_MIN: int = 4
     TOP_K_PAPERS_NORMAL_MAX: int = 7
     TOP_K_PAPERS_RESEARCH_MIN: int = 8
-    TOP_K_PAPERS_RESEARCH_MAX: int = 15
+    TOP_K_PAPERS_RESEARCH_MAX: int = 20
 
-    TOP_K_PAPERS_MAX: int = 15
+    TOP_K_PAPERS_MAX: int = 20
     TOP_K_PAPERS_MIN: int = 4
     TOP_K_PAPERS_LOW: int = 4
     TOP_K_PAPERS_MEDIUM: int = 6

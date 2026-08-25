@@ -769,7 +769,13 @@ def rank_node(state: AgentState) -> AgentState:
             "ineligible_papers": [],
         }
 
-    papers = merge_duplicate_papers(papers)
+    if is_uploaded_only:
+        print(
+            f"[rank] uploaded mode: skipping merge_duplicate_papers "
+            f"for {len(papers)} passage(s)"
+        )
+    else:
+        papers = merge_duplicate_papers(papers)
     _ensure_vectors(papers)
 
     original_query = state.get("query", "")
@@ -857,9 +863,17 @@ def rank_node(state: AgentState) -> AgentState:
                 if p.get("final_score", 0.0) >= max(settings.MIN_FINAL_SCORE * 0.65, ABSOLUTE_MIN_SCORE_FLOOR)
             ]
 
-    target_k_setting = int(state.get("target_paper_k") or settings.TOP_K_PAPERS_MAX)
-    target_k_setting = max(settings.TOP_K_PAPERS_MIN, target_k_setting)
-    target_k_setting = min(settings.TOP_K_PAPERS_MAX, target_k_setting)
+    if is_uploaded_only:
+        target_k_setting = len(prefiltered)
+        print(
+            f"[rank] uploaded mode: target_k_setting={target_k_setting} "
+            f"(actual retrieved chunk count, overriding target_paper_k="
+            f"{state.get('target_paper_k')!r})"
+        )
+    else:
+        target_k_setting = int(state.get("target_paper_k") or settings.TOP_K_PAPERS_MAX)
+        target_k_setting = max(settings.TOP_K_PAPERS_MIN, target_k_setting)
+        target_k_setting = min(settings.TOP_K_PAPERS_MAX, target_k_setting)
     target_k = min(len(prefiltered), target_k_setting)
 
     top_k = _marginal_gain_select(prefiltered, needs, target_k) if prefiltered else []
