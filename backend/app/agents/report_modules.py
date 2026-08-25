@@ -51,13 +51,13 @@ MODULE_LIBRARY = {
         "requires_citations": True,
         "always": False,
     },
-    "evidence_mapping ": {
-        "title ":  "Claim Verification  & Source Gaps ",
-        "order ": 450,
-        "purpose ":  "Map each specific sub-claim or question component to what the document explicitly states versus what is missing. Use a structured list or table.",
-        "evidence_policy ":  "evidence_required ",
-        "requires_citations ": True,
-        "always ": False,
+    "evidence_mapping": {
+        "title": "Claim Verification & Source Gaps",
+        "order": 450,
+        "purpose": "Map each specific sub-claim or question component to what the document explicitly states versus what is missing. Use a structured list or table.",
+        "evidence_policy": "evidence_required",
+        "requires_citations": True,
+        "always": False,
     },
     "comparative_analysis": {
         "title": "Comparative Analysis",
