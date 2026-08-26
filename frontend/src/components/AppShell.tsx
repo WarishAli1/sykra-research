@@ -82,8 +82,13 @@ export function AppShell() {
   const [hasUpload, setHasUpload] = useState(false);
   const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>("literature");
 
-  const lastAssistantTurnId =
-    [...turns].reverse().find((t) => t.role === "assistant" && t.turnId)?.turnId ?? null;
+  const lastAssistantTurn = [...turns].reverse().find((t) => t.role === "assistant" && t.turnId);
+  const lastAssistantTurnId = lastAssistantTurn?.turnId ?? null;
+  const lastAssistantPaperLinks = (
+    lastAssistantTurn?.references?.length
+      ? lastAssistantTurn.references.map((r) => r.link)
+      : lastAssistantTurn?.papers?.map((p) => p.link) ?? []
+  ).filter(Boolean);
 
   const getConversationContext = useCallback(() => {
     const reversed = [...turns].reverse();
@@ -167,10 +172,6 @@ export function AppShell() {
     setShowGraphView(false);
     setShowStudio(false);
   };
-  const messagePaperLinks = useMemo(() => {
-    const t = [...turns].reverse().find((x) => x.role === "assistant" && x.turnId === lastAssistantTurnId);
-    return t?.papers?.map((p) => p.link).filter(Boolean) ?? [];
-  }, [turns, lastAssistantTurnId]);
   const handleDeletePaper = async (paper: Paper) => {
     setPapers((prev) => prev.filter((p) => p.link !== paper.link));
     const wasActiveUpload =
@@ -480,7 +481,7 @@ export function AppShell() {
                 <span className="w-[90px]" />
               </div>
               <div className="flex-1 min-h-0">
-                <GraphView sessionId={sessionId} activeTurnId={lastAssistantTurnId} messagePaperLinks={messagePaperLinks} />
+                <GraphView sessionId={sessionId} activeTurnId={lastAssistantTurnId} messagePaperLinks={lastAssistantPaperLinks} />
               </div>
             </div>
           ) : (

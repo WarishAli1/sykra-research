@@ -24,7 +24,6 @@ import {
   Clock,
   Zap,
   ChevronDown,
-  Network,
   Table2,
   AlertTriangle,
 } from "lucide-react";
@@ -507,16 +506,6 @@ export function ChatMessage({
                   {artifacts.comparisonTableMarkdown}
                 </ReactMarkdown>
               </div>
-            )}
-
-            {!!artifacts?.graphEntities?.length && onOpenGraph && (
-              <button
-                onClick={onOpenGraph}
-                className="mt-3 flex items-center gap-1.5 rounded-md border border-indigo/30 bg-indigo/5 px-2.5 py-1.5 text-micro font-medium text-indigo transition-colors hover:bg-indigo/10 animate-fade-up"
-              >
-                <Network className="h-3.5 w-3.5" />
-                Knowledge graph updated — Explore
-              </button>
             )}
 
             {isStopped && (
