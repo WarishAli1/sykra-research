@@ -754,22 +754,22 @@ export function GraphView({
           )}
 
           {/* stats panel */}
-          {showStats && gStats && (
+           {showStats && view?.stats && (
             <div className={`absolute top-3 right-14 w-60 rounded-lg border p-3 ${ui.panel}`}>
               <p className={`mb-2 text-[9.5px] font-semibold uppercase tracking-wider ${ui.faint}`}>Graph analytics</p>
               <div className={`grid grid-cols-2 gap-x-3 gap-y-1.5 text-[10.5px] ${ui.text}`}>
-                <span>Papers</span><span className="text-right">{gStats.papers}</span>
-                <span>Concepts</span><span className="text-right">{gStats.concepts}</span>
-                <span>Methods</span><span className="text-right">{gStats.methods}</span>
-                <span>Datasets</span><span className="text-right">{gStats.datasets}</span>
-                <span>Relationships</span><span className="text-right">{gStats.links}</span>
-                <span>Density</span><span className="text-right">{gStats.density.toFixed(3)}</span>
-                <span>Avg degree</span><span className="text-right">{gStats.avg_degree.toFixed(1)}</span>
+                <span>Papers</span><span className="text-right">{view.stats.papers}</span>
+                <span>Concepts</span><span className="text-right">{view.stats.concepts}</span>
+                <span>Methods</span><span className="text-right">{view.stats.methods}</span>
+                <span>Datasets</span><span className="text-right">{view.stats.datasets}</span>
+                <span>Relationships</span><span className="text-right">{view.stats.links}</span>
+                <span>Density</span><span className="text-right">{view.stats.density.toFixed(3)}</span>
+                <span>Avg degree</span><span className="text-right">{view.stats.avg_degree.toFixed(1)}</span>
               </div>
               <div className={`mt-2 border-t pt-2 text-[10.5px] space-y-1 ${theme === "dark" ? "border-white/10" : "border-slate-900/10"} ${ui.text}`}>
-                <p>Most central concept: <span>{gStats.top_concept ?? "—"}</span></p>
-                {gStats.top_paper && <p>Most cited: <span>{String(gStats.top_paper.name).slice(0, 34)}… ({gStats.top_paper.citation_count})</span></p>}
-                {gStats.min_year != null && <p>Span: <span>{gStats.min_year}–{gStats.max_year}</span></p>}
+                <p>Most central concept: <span>{view.stats.top_concept ?? "—"}</span></p>
+                {view.stats.top_paper && <p>Most cited: <span>{String(view.stats.top_paper.name).slice(0, 34)}… ({view.stats.top_paper.citation_count})</span></p>}
+                {view.stats.min_year != null && <p>Span: <span>{view.stats.min_year}–{view.stats.max_year}</span></p>}
               </div>
             </div>
           )}

@@ -102,10 +102,15 @@ def filter_view(enriched: dict, paper_links: list[str] | None = None,
     nodes, links = enriched["nodes"], enriched["links"]
     if paper_links is not None:
         wanted = set(paper_links)
-        keep = {n["id"] for n in nodes if n["type"] == "paper" and n["id"] in wanted}
+        seed = {n["id"] for n in nodes if n["type"] == "paper" and n["id"] in wanted}
+        keep = set(seed)
         for l in links:
-            if l["source"] in keep or l["target"] in keep:
-                keep.add(l["source"]); keep.add(l["target"])
+            if l["type"] == "similar":
+                continue
+            if l["source"] in seed:
+                keep.add(l["target"])
+            if l["target"] in seed:
+                keep.add(l["source"])
         nodes = [n for n in nodes if n["id"] in keep]
         links = [l for l in links if l["source"] in keep and l["target"] in keep]
     if max_year is not None:
@@ -410,7 +415,7 @@ def _mirror_neo4j(session_id: str, papers_meta: list[dict], entities: dict, grap
                     graph_store.link_method(m, link)
                 for d in ent.get("datasets", []):
                     graph_store.link_dataset(d, link)
-            link_similar = getattr(graph_store, "link_similar", None)  # optional method
+            link_similar = getattr(graph_store, "link_similar", None)
             for l in graph["links"]:
                 if l["type"] == "similar" and link_similar:
                     link_similar(l["source"], l["target"], l.get("weight", 0.0))
