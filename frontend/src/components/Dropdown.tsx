@@ -7,18 +7,21 @@ type DropdownItem<T extends string> = {
   value: T;
   label: string;
   hint?: string;
+  disabled?: boolean;
 };
 
 type DropdownProps<T extends string> = {
   value: T;
   items: DropdownItem<T>[];
   onChange: (value: T) => void;
+  onDisabledSelect?: (value: T) => void;
 };
 
 export function Dropdown<T extends string>({
   value,
   items,
   onChange,
+  onDisabledSelect,
 }: DropdownProps<T>) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -52,14 +55,22 @@ export function Dropdown<T extends string>({
           {items.map((item) => (
             <button
               key={item.value}
+              disabled={item.disabled}
+              aria-disabled={item.disabled}
               onClick={() => {
+                if (item.disabled) {
+                  onDisabledSelect?.(item.value);
+                  return;
+                }
                 onChange(item.value);
                 setOpen(false);
               }}
-              className={`flex w-full flex-col items-start gap-0.5 px-3 py-1.5 text-left text-[11.5px] hover:bg-paper-dim ${
-                value === item.value
-                  ? "text-indigo font-medium"
-                  : "text-ink"
+              className={`flex w-full flex-col items-start gap-0.5 px-3 py-1.5 text-left text-[11.5px] ${
+                item.disabled
+                  ? "cursor-not-allowed text-ink-soft/50"
+                  : `hover:bg-paper-dim ${
+                      value === item.value ? "text-indigo font-medium" : "text-ink"
+                    }`
               }`}
             >
               <span>{item.label}</span>

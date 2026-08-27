@@ -173,32 +173,45 @@ export function AppShell() {
     setShowStudio(false);
   };
   const handleDeletePaper = async (paper: Paper) => {
-    setPapers((prev) => prev.filter((p) => p.link !== paper.link));
+    const remainingPapers = papers.filter((p) => p.link !== paper.link);
+    setPapers(remainingPapers);
+
     const wasActiveUpload =
       paper.link === uploadState.fileUrl ||
       (uploadState.filename && paper.title === uploadState.filename);
-    if (wasActiveUpload) {
+
+    const stillHasUpload = remainingPapers.some((p) => p.is_uploaded);
+
+    if (!stillHasUpload) {
       setUploadState({ status: "idle", filename: "", progress: "", stage: "", fileUrl: "" });
       setHasUpload(false);
       setEvidenceMode("literature");
       setUploadedFilename(null);
     }
+
     try {
       await api.deleteUploadedPdf(sessionId, paper.link);
     } catch (e) {
       console.error("Failed to delete paper:", e);
-      setPapers((prev) => (prev.some((p) => p.link === paper.link) ? prev : [...prev, paper]));
-      if (wasActiveUpload) {
-        setUploadedFilename(paper.title);
+      const restoredPapers = papers.some((p) => p.link === paper.link)
+        ? remainingPapers
+        : [...remainingPapers, paper];
+      setPapers(restoredPapers);
+
+      const hasUploadAfterRestore = restoredPapers.some((p) => p.is_uploaded);
+      if (hasUploadAfterRestore) {
         setHasUpload(true);
-        setEvidenceMode("uploaded");
-        setUploadState({
-          status: "done",
-          filename: paper.title,
-          progress: "Ready",
-          stage: "",
-          fileUrl: paper.link,
-        });
+        if (wasActiveUpload || !stillHasUpload) {
+          setUploadedFilename(paper.title);
+          setEvidenceMode("uploaded");
+          setUploadState({
+            status: "done",
+            filename: paper.title,
+            progress: "Ready",
+            stage: "",
+            fileUrl: paper.link,
+          });
+        }
       }
     }
   };
