@@ -167,14 +167,24 @@ async def delete_uploaded_pdf(
     session_id: str,
     link: str,
 ):
-    vector_store.delete_paper(link,session_id)
-    graph_store.delete_paper(link)
+    try:
+        vector_store.delete_paper(link, session_id)
+    except Exception as exc:
+        print(f"[upload] vector_store.delete_paper failed: {exc}; continuing")
+
+    try:
+        graph_store.delete_paper(link)
+    except Exception as exc:
+        print(f"[upload] graph_store.delete_paper failed: {exc}; continuing")
 
     filename = os.path.basename(link)
     file_path = os.path.join(UPLOAD_DIR, session_id, filename)
 
-    if os.path.exists(file_path):
-        os.remove(file_path)
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    except Exception as exc:
+        print(f"[upload] failed to remove file {file_path}: {exc}; continuing")
 
     return {"status": "deleted"}
 

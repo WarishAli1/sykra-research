@@ -613,16 +613,30 @@ export function ChatPanel({
           className="min-h-[24px] max-h-28 flex-1 resize-none overflow-y-auto bg-transparent py-1.5 text-body leading-6 text-ink placeholder:text-ink-soft/60 focus:outline-none"
         />
 
-        {hasUpload && (
-          <Dropdown
-            value={evidenceMode}
-            onChange={setEvidenceMode}
-            items={[
-              { value: "uploaded", label: "Uploaded document", hint: "Answer using only the uploaded document." },
-              { value: "blended", label: "Blend", hint: "Combine the uploaded document with external literature." },
-            ]}
-          />
-        )}
+        <Dropdown
+          value={evidenceMode}
+          onChange={setEvidenceMode}
+          onDisabledSelect={() => flashToast("To use this mode, please first upload at least 1 file.")}
+          items={[
+            {
+              value: "uploaded",
+              label: "Uploaded document",
+              hint: hasUpload
+                ? "Answer using only the uploaded document."
+                : "Upload a file to enable this mode.",
+              disabled: !hasUpload,
+            },
+            {
+              value: "blended",
+              label: "Blend",
+              hint: hasUpload
+                ? "Combine the uploaded document with external literature."
+                : "Upload a file to enable this mode.",
+              disabled: !hasUpload,
+            },
+            { value: "literature", label: "Literature only", hint: "Answer from external literature." },
+          ]}
+        />
 
         <Dropdown
           value={responseMode}
