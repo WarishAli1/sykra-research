@@ -16,17 +16,20 @@ import { ChatMessage } from "./ChatMessage";
 import { UploadPreviewCard } from "./UploadPreviewCard";
 import { Dropdown } from "@/components/Dropdown";
 
-function getGreeting(): { title: string; subtitle: string } {
-  const h = new Date().getHours();
-  if (h >= 0 && h < 5)
+function getGreetingByHour(hour: number): { title: string; subtitle: string } {
+  if (hour >= 0 && hour < 5)
     return { title: "Late-night research", subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it." };
-  if (h < 12)
+  if (hour < 12)
     return { title: "Good morning", subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it." };
-  if (h < 18)
+  if (hour < 18)
     return { title: "Good afternoon", subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it." };
-  if (h < 23)
+  if (hour < 23)
     return { title: "Good evening", subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it." };
   return { title: "Still thinking?", subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it." };
+}
+
+function getGreeting(): { title: string; subtitle: string } {
+  return getGreetingByHour(new Date().getHours());
 }
 
 export function ChatPanel({
@@ -84,6 +87,7 @@ export function ChatPanel({
   const [menuOpen, setMenuOpen] = useState(false);
   const [pinned, setPinned] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [hasMounted, setHasMounted] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -140,6 +144,10 @@ export function ChatPanel({
     }
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
+  }, []);
+
+  useEffect(() => {
+    setHasMounted(true);
   }, []);
 
   useEffect(() => {
@@ -671,7 +679,7 @@ export function ChatPanel({
   );
 
   if (!hasConversation) {
-    const greeting = getGreeting();
+    const greeting = hasMounted ? getGreeting() : { title: "Research", subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it." };
     return (
       <div className="relative flex h-full flex-col overflow-hidden">
         <div aria-hidden="true" className="pointer-events-none absolute inset-0 grid place-items-center">

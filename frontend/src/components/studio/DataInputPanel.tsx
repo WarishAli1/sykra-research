@@ -1,5 +1,6 @@
 "use client";
-import { useEffect, useState } from "react";
+
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
   PenLine,
@@ -19,7 +20,7 @@ import {
   RotateCcw,
   MessageSquareText,
   MessageCircle,
-  Settings2,
+  Sparkles,
 } from "lucide-react";
 import type {
   StudioChartType,
@@ -33,11 +34,13 @@ import type {
 type VisualFamily = "chart" | "flowchart" | "architecture" | "dfd";
 type NodeType = "process" | "terminal" | "data" | "external" | "store" | "decision";
 type NodeDraft = { id: string; label: string; node_type: NodeType; layer: number | null };
-type EdgeDraft = { source: string; target: string; label: string };
+type EdgeDraft = { id: string; source: string; target: string; label: string };
+
+type StepKey = "family" | "description" | "source" | "chartType" | "manualChart" | "manualDiagram";
 
 const FAMILIES: { id: VisualFamily; icon: React.ReactNode; label: string; desc: string }[] = [
-  { id: "chart", icon: <BarChart3 className="h-4 w-4" />, label: "Chart", desc: "Bar / line / pie from real data" },
-  { id: "flowchart", icon: <GitBranch className="h-4 w-4" />, label: "Flowchart", desc: "Steps, decisions, terminals" },
+  { id: "chart", icon: <BarChart3 className="h-4 w-4" />, label: "Chart", desc: "Bar, line, pie, or scatter" },
+  { id: "flowchart", icon: <GitBranch className="h-4 w-4" />, label: "Flowchart", desc: "Steps and decision paths" },
   { id: "architecture", icon: <Layers className="h-4 w-4" />, label: "Architecture", desc: "Layered system blocks" },
   { id: "dfd", icon: <Network className="h-4 w-4" />, label: "DFD", desc: "Processes, stores, externals" },
 ];
@@ -55,36 +58,11 @@ const DRAFT_SOURCES: {
   title: string;
   desc: string;
 }[] = [
-  {
-    id: "prompt",
-    icon: <MessageSquareText className="h-4 w-4" />,
-    title: "From prompt",
-    desc: "Draft from the description alone",
-  },
-  {
-    id: "manual",
-    icon: <PenLine className="h-4 w-4" />,
-    title: "Use my data",
-    desc: "Values you provide directly",
-  },
-  {
-    id: "papers",
-    icon: <BookOpen className="h-4 w-4" />,
-    title: "From my papers",
-    desc: "Use session Library context",
-  },
-  {
-    id: "conversation",
-    icon: <MessageCircle className="h-4 w-4" />,
-    title: "From this conversation",
-    desc: "Use recent chat context explicitly",
-  },
-  {
-    id: "web_search",
-    icon: <Globe className="h-4 w-4" />,
-    title: "Find data",
-    desc: "Search and ground from the web",
-  },
+  { id: "prompt", icon: <MessageSquareText className="h-4 w-4" />, title: "From prompt", desc: "Describe the visual in plain language" },
+  { id: "manual", icon: <PenLine className="h-4 w-4" />, title: "Use my data", desc: "Enter values or nodes directly" },
+  { id: "papers", icon: <BookOpen className="h-4 w-4" />, title: "From my papers", desc: "Use library evidence" },
+  { id: "conversation", icon: <MessageCircle className="h-4 w-4" />, title: "From this conversation", desc: "Use recent chat context" },
+  { id: "web_search", icon: <Globe className="h-4 w-4" />, title: "Find data", desc: "Search and ground from the web" },
 ];
 
 const NODE_TYPES: Record<"flowchart" | "architecture" | "dfd", NodeType[]> = {
@@ -92,6 +70,15 @@ const NODE_TYPES: Record<"flowchart" | "architecture" | "dfd", NodeType[]> = {
   architecture: ["external", "process", "store"],
   dfd: ["process", "external", "store"],
 };
+
+const STUDIO_FLOW_SCHEMA = {
+  family: { label: "Visual Family", required: true },
+  description: { label: "Describe the visual", required: true },
+  source: { label: "Source", required: true },
+  chartType: { label: "Chart type", required: true, when: (family: VisualFamily) => family === "chart" },
+  manualChart: { label: "Manual chart data", when: (family: VisualFamily, source: StudioDraftSource) => family === "chart" && source === "manual" },
+  manualDiagram: { label: "Diagram builder", when: (family: VisualFamily, source: StudioDraftSource) => family !== "chart" && source === "manual" },
+} as const satisfies Record<StepKey, { label: string; required?: boolean; when?: (family: VisualFamily, source: StudioDraftSource) => boolean }>;
 
 function templateFor(family: "flowchart" | "architecture" | "dfd", dfdLevel: 0 | 1): { nodes: NodeDraft[]; edges: EdgeDraft[] } {
   if (family === "flowchart") {
@@ -105,15 +92,16 @@ function templateFor(family: "flowchart" | "architecture" | "dfd", dfdLevel: 0 |
         { id: "n6", label: "End", node_type: "terminal", layer: null },
       ],
       edges: [
-        { source: "n1", target: "n2", label: "" },
-        { source: "n2", target: "n3", label: "" },
-        { source: "n3", target: "n4", label: "" },
-        { source: "n4", target: "n5", label: "yes" },
-        { source: "n4", target: "n3", label: "no" },
-        { source: "n5", target: "n6", label: "" },
+        { id: "e1", source: "n1", target: "n2", label: "" },
+        { id: "e2", source: "n2", target: "n3", label: "" },
+        { id: "e3", source: "n3", target: "n4", label: "" },
+        { id: "e4", source: "n4", target: "n5", label: "yes" },
+        { id: "e5", source: "n4", target: "n3", label: "no" },
+        { id: "e6", source: "n5", target: "n6", label: "" },
       ],
     };
   }
+
   if (family === "architecture") {
     return {
       nodes: [
@@ -124,13 +112,14 @@ function templateFor(family: "flowchart" | "architecture" | "dfd", dfdLevel: 0 |
         { id: "a5", label: "Database", node_type: "store", layer: 3 },
       ],
       edges: [
-        { source: "a1", target: "a2", label: "requests" },
-        { source: "a2", target: "a3", label: "authn" },
-        { source: "a2", target: "a4", label: "route" },
-        { source: "a4", target: "a5", label: "read/write" },
+        { id: "ae1", source: "a1", target: "a2", label: "requests" },
+        { id: "ae2", source: "a2", target: "a3", label: "authn" },
+        { id: "ae3", source: "a2", target: "a4", label: "route" },
+        { id: "ae4", source: "a4", target: "a5", label: "read/write" },
       ],
     };
   }
+
   if (dfdLevel === 0) {
     return {
       nodes: [
@@ -139,12 +128,13 @@ function templateFor(family: "flowchart" | "architecture" | "dfd", dfdLevel: 0 |
         { id: "d3", label: "Records", node_type: "store", layer: null },
       ],
       edges: [
-        { source: "d1", target: "d2", label: "input" },
-        { source: "d2", target: "d1", label: "output" },
-        { source: "d2", target: "d3", label: "store" },
+        { id: "de1", source: "d1", target: "d2", label: "input" },
+        { id: "de2", source: "d2", target: "d1", label: "output" },
+        { id: "de3", source: "d2", target: "d3", label: "store" },
       ],
     };
   }
+
   return {
     nodes: [
       { id: "d1", label: "User", node_type: "external", layer: null },
@@ -153,16 +143,23 @@ function templateFor(family: "flowchart" | "architecture" | "dfd", dfdLevel: 0 |
       { id: "d4", label: "Records", node_type: "store", layer: null },
     ],
     edges: [
-      { source: "d1", target: "d2", label: "request" },
-      { source: "d2", target: "d4", label: "write" },
-      { source: "d4", target: "d3", label: "read" },
-      { source: "d3", target: "d1", label: "result" },
+      { id: "de1", source: "d1", target: "d2", label: "request" },
+      { id: "de2", source: "d2", target: "d4", label: "write" },
+      { id: "de3", source: "d4", target: "d3", label: "read" },
+      { id: "de4", source: "d3", target: "d1", label: "result" },
     ],
   };
 }
 
-let _uid = 0;
-const nextId = () => `n${++_uid}${Date.now().toString(36).slice(-3)}`;
+let nextEntityId = 0;
+const uniqueId = () => `n${Date.now().toString(36)}_${(++nextEntityId).toString(36)}`;
+
+const emptyNode = (family: VisualFamily): NodeDraft => ({
+  id: uniqueId(),
+  label: "",
+  node_type: NODE_TYPES[(family === "chart" ? "flowchart" : family) as "flowchart" | "architecture" | "dfd"][0] ?? "process",
+  layer: null,
+});
 
 export function DataInputPanel({
   sessionId,
@@ -177,574 +174,770 @@ export function DataInputPanel({
   getConversationContext?: () => StudioConversationContext | null;
   isGenerating: boolean;
 }) {
-    const [family, setFamily] = useState<VisualFamily>("chart");
-    const [prompt, setPrompt] = useState("");
-    const [draftSource, setDraftSource] = useState<StudioDraftSource>("manual");
-    const [showManualBuilder, setShowManualBuilder] = useState(false);
-    const [chartType, setChartType] = useState<StudioChartType>("bar");
+  const [family, setFamily] = useState<VisualFamily>("chart");
+  const [prompt, setPrompt] = useState("");
+  const [draftSource, setDraftSource] = useState<StudioDraftSource>("manual");
+  const [chartType, setChartType] = useState<StudioChartType>("bar");
   const [title, setTitle] = useState("");
-  const [categories, setCategories] = useState<string[]>(["Category A", "Category B", "Category C"]);
-  const [values, setValues] = useState<string[]>(["10", "25", "18"]);
+  const [categories, setCategories] = useState<string[]>(["A", "B", "C"]);
+  const [values, setValues] = useState<string[]>(["12", "18", "15"]);
   const [nodes, setNodes] = useState<NodeDraft[]>([]);
   const [edges, setEdges] = useState<EdgeDraft[]>([]);
   const [dfdLevel, setDfdLevel] = useState<0 | 1>(0);
   const [warn, setWarn] = useState<string | null>(null);
 
-    useEffect(() => {
-    setDraftSource(family === "chart" ? "manual" : "prompt");
-    }, [family]);
+  useEffect(() => {
+    const allowedSources = family === "chart"
+      ? DRAFT_SOURCES.map((source) => source.id)
+      : DRAFT_SOURCES.filter((source) => source.id !== "web_search").map((source) => source.id);
 
-    useEffect(() => {
-    if (family === "chart") return;
-    if (!showManualBuilder) return;
+    if (!allowedSources.includes(draftSource)) {
+      setDraftSource(family === "chart" ? "manual" : "prompt");
+    }
 
-    const t = templateFor(family, family === "dfd" ? dfdLevel : 0);
-    setNodes(t.nodes);
-    setEdges(t.edges);
-    }, [family, dfdLevel, showManualBuilder]);
+    if (family !== "chart" && draftSource === "manual" && nodes.length === 0 && edges.length === 0) {
+      const template = templateFor(family, dfdLevel);
+      setNodes(template.nodes);
+      setEdges(template.edges);
+    }
+  }, [draftSource, family, dfdLevel, nodes.length, edges.length]);
 
-  const patchNode = (id: string, patch: Partial<NodeDraft>) =>
-    setNodes((prev) => prev.map((n) => (n.id === id ? { ...n, ...patch } : n)));
-  const removeNode = (id: string) => {
-    setNodes((prev) => prev.filter((n) => n.id !== id));
-    setEdges((prev) => prev.filter((e) => e.source !== id && e.target !== id));
-  };
-  const addNode = () =>
-    setNodes((prev) => [...prev, { id: nextId(), label: "", node_type: NODE_TYPES[family as "flowchart" | "architecture" | "dfd"]?.[0] ?? "process", layer: null }]);
-  const patchEdge = (i: number, patch: Partial<EdgeDraft>) =>
-    setEdges((prev) => prev.map((e, idx) => (idx === i ? { ...e, ...patch } : e)));
-  const removeEdge = (i: number) => setEdges((prev) => prev.filter((_, idx) => idx !== i));
-  const addEdge = () => {
-    if (nodes.length < 2) { setWarn("Add at least two nodes before connecting flows."); return; }
+  const visibleSources = useMemo(() => {
+    const allowedSources = family === "chart"
+      ? DRAFT_SOURCES.map((source) => source.id)
+      : DRAFT_SOURCES.filter((source) => source.id !== "web_search").map((source) => source.id);
+    return DRAFT_SOURCES.filter((source) => allowedSources.includes(source.id));
+  }, [family]);
+
+  const validation = useMemo(() => {
+    const next: Record<string, string> = {};
+
+    if (!prompt.trim() && draftSource !== "manual") {
+      next.prompt = "Add a brief description so Sykra knows what to draft.";
+    }
+
+    if (draftSource === "conversation") {
+      const context = getConversationContext?.();
+      if (!context?.excerpt?.trim()) {
+        next.conversation = "No conversation context is available yet.";
+      }
+    }
+
+    if (family === "chart" && draftSource === "manual") {
+      const cleanCats = categories.map((c) => c.trim()).filter(Boolean);
+      const numbers = values.map((value) => Number(value));
+
+      if (!cleanCats.length) {
+        next.chartData = "Add at least one category and one value.";
+      }
+
+      if (cleanCats.length !== numbers.length) {
+        next.chartData = "Categories and values must match one-to-one.";
+      }
+
+      if (numbers.some((value) => Number.isNaN(value))) {
+        next.chartData = "Every value must be numeric.";
+      }
+    }
+
+    if (family !== "chart" && draftSource === "manual") {
+      const validNodes = nodes.filter((node) => node.label.trim());
+      const nodeIds = new Set(validNodes.map((node) => node.id));
+
+      if (validNodes.length < 2) {
+        next.diagramNodes = "Add at least two labeled nodes to create a diagram.";
+      }
+
+      const seen = new Set<string>();
+      for (const edge of edges) {
+        if (!edge.source || !edge.target) {
+          next.diagramEdges = "Every flow needs both a start and end node.";
+          break;
+        }
+        if (edge.source === edge.target) {
+          next.diagramEdges = "A flow cannot loop from a node to itself.";
+          break;
+        }
+        if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) {
+          next.diagramEdges = "Remove or fix flows that reference deleted nodes.";
+          break;
+        }
+        const signature = `${edge.source}|${edge.target}|${edge.label.trim().toLowerCase()}`;
+        if (seen.has(signature)) {
+          next.diagramEdges = "Duplicate flows are detected; each source-target-label combination should be unique.";
+          break;
+        }
+        seen.add(signature);
+      }
+    }
+
+    return next;
+  }, [categories, draftSource, edges, family, getConversationContext, nodes, prompt, values]);
+
+  const canDraft = !isGenerating && draftSource !== "manual" && !!prompt.trim() && !validation.prompt && !validation.conversation;
+
+  const patchNode = (id: string, patch: Partial<NodeDraft>) => {
+    setNodes((prev) => prev.map((node) => (node.id === id ? { ...node, ...patch } : node)));
     setWarn(null);
-    setEdges((prev) => [...prev, { source: nodes[0].id, target: nodes[1].id, label: "" }]);
   };
 
-const visibleSources =
-  family === "chart"
-    ? DRAFT_SOURCES
-    : DRAFT_SOURCES.filter((s) =>
-        ["prompt", "papers", "conversation"].includes(s.id)
-      );
+  const removeNode = (id: string) => {
+    const connectedEdgeCount = edges.filter((edge) => edge.source === id || edge.target === id).length;
+    const removed = nodes.filter((node) => node.id !== id);
+    setNodes(removed);
+    setEdges((prev) => prev.filter((edge) => edge.source !== id && edge.target !== id));
+    setWarn(
+      connectedEdgeCount > 0
+        ? `Node removed. ${connectedEdgeCount} connected flow${connectedEdgeCount === 1 ? "" : "s"} were cleared automatically.`
+        : "Node removed."
+    );
+  };
 
-const handleDraft = () => {
-  setWarn(null);
+  const addNode = () => {
+    setNodes((prev) => [...prev, emptyNode(family)]);
+    setWarn(null);
+  };
 
-  if (!prompt.trim()) {
-    setWarn("Describe what you want first.");
-    return;
-  }
+  const patchEdge = (index: number, patch: Partial<EdgeDraft>) => {
+    setEdges((prev) => prev.map((edge, idx) => (idx === index ? { ...edge, ...patch } : edge)));
+    setWarn(null);
+  };
 
-  let conversation_context: string | null = null;
+  const removeEdge = (index: number) => {
+    setEdges((prev) => prev.filter((_, idx) => idx !== index));
+    setWarn(null);
+  };
 
-  if (draftSource === "conversation") {
-    const ctx = getConversationContext?.();
+  const addEdge = () => {
+    setEdges((prev) => [...prev, { id: uniqueId(), source: "", target: "", label: "" }]);
+    setWarn(null);
+  };
 
-    if (!ctx?.excerpt?.trim()) {
-      setWarn("No conversation context available yet.");
+  const handleDraft = () => {
+    if (!canDraft) {
+      setWarn(validation.prompt ?? validation.conversation ?? "Complete the required fields before drafting.");
       return;
     }
 
-    conversation_context = ctx.excerpt;
-  }
+    let conversationContext: string | null = null;
+    if (draftSource === "conversation") {
+      const ctx = getConversationContext?.();
+      if (!ctx?.excerpt?.trim()) {
+        setWarn("No conversation context is available for this step.");
+        return;
+      }
+      conversationContext = ctx.excerpt;
+    }
 
-  onDraft({
-    family,
-    prompt: prompt.trim(),
-    source: draftSource,
-    chart_type: chartType,
-    dfd_level: family === "dfd" ? dfdLevel : null,
-    conversation_context,
-    selected_paper_links: null,
-  });
-};
+    onDraft({
+      family,
+      prompt: prompt.trim(),
+      source: draftSource,
+      chart_type: chartType,
+      dfd_level: family === "dfd" ? dfdLevel : null,
+      conversation_context: conversationContext,
+      selected_paper_links: null,
+    });
+  };
 
-const handleManualGenerate = () => {
-  setWarn(null);
+  const handleManualGenerate = () => {
+    setWarn(null);
 
-  if (family === "chart") {
-    const parsedValues = values.map((v) => parseFloat(v) || 0);
-    const cleanCats = categories.map((c) => c.trim()).filter(Boolean);
+    if (family === "chart") {
+      const cleanCats = categories.map((category) => category.trim()).filter(Boolean);
+      const numbers = values.map((value) => Number(value));
 
-    if (cleanCats.length !== parsedValues.length) {
-      setWarn("Categories and values must have the same count.");
+      if (!cleanCats.length || cleanCats.length !== numbers.length || numbers.some((value) => Number.isNaN(value))) {
+        setWarn("Fix the chart data before generating: categories must match the numeric values exactly.");
+        return;
+      }
+
+      const series: StudioChartSeries[] = [{
+        label: title.trim() || "Data",
+        values: numbers,
+        provenance: numbers.map(() => ({ kind: "user_provided" as const })),
+      }];
+
+      onGenerate({
+        spec_version: 1,
+        visual_id: crypto.randomUUID(),
+        session_id: sessionId,
+        revision: 1,
+        title: title.trim() || "Untitled Chart",
+        grounding: {
+          level: "user_provided",
+          grounded_count: 0,
+          user_provided_count: numbers.length,
+          illustrative_count: 0,
+          citations: [],
+        },
+        payload: {
+          kind: "chart",
+          chart_type: chartType,
+          categories: cleanCats,
+          series,
+        },
+        created_at: new Date().toISOString(),
+      });
       return;
     }
 
-    const series: StudioChartSeries[] = [
-      {
-        label: title || "Data",
-        values: parsedValues,
-        provenance: parsedValues.map(() => ({ kind: "user_provided" as const })),
-      },
-    ];
+    const validNodes = nodes.filter((node) => node.label.trim());
+    if (validNodes.length < 2) {
+      setWarn("Add at least two labeled nodes before generating a diagram.");
+      return;
+    }
+
+    const nodeIds = new Set(validNodes.map((node) => node.id));
+    const flowErrors = edges.find((edge) => !edge.source || !edge.target || edge.source === edge.target || !nodeIds.has(edge.source) || !nodeIds.has(edge.target));
+
+    if (flowErrors) {
+      setWarn("Fix invalid flows so every edge connects two valid nodes.");
+      return;
+    }
+
+    const duplicateSignature = new Set<string>();
+    for (const edge of edges) {
+      const signature = `${edge.source}|${edge.target}|${edge.label.trim().toLowerCase()}`;
+      if (duplicateSignature.has(signature)) {
+        setWarn("Duplicate edge values were detected. Each flow should be unique.");
+        return;
+      }
+      duplicateSignature.add(signature);
+    }
 
     onGenerate({
       spec_version: 1,
       visual_id: crypto.randomUUID(),
       session_id: sessionId,
       revision: 1,
-      title: title || "Untitled Chart",
+      title: title.trim() || (family === "dfd" ? `DFD Level ${dfdLevel}` : family === "flowchart" ? "Process Flowchart" : "System Architecture"),
       grounding: {
         level: "user_provided",
         grounded_count: 0,
-        user_provided_count: parsedValues.length,
+        user_provided_count: validNodes.length,
         illustrative_count: 0,
         citations: [],
       },
       payload: {
-        kind: "chart",
-        chart_type: chartType,
-        categories: cleanCats,
-        series,
+        kind: family,
+        layout: family === "architecture" ? "layered" : "top_down",
+        nodes: validNodes.map((node) => ({ id: node.id, label: node.label.trim(), node_type: node.node_type, layer: node.layer })),
+        edges: edges
+          .filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target) && edge.source !== edge.target)
+          .map((edge) => ({ source: edge.source, target: edge.target, label: edge.label.trim() || null })),
+        dfd_level: family === "dfd" ? dfdLevel : null,
       },
       created_at: new Date().toISOString(),
     });
-
-    return;
-  }
-
-  const validNodes = nodes.filter((n) => n.label.trim());
-
-  if (validNodes.length < 2) {
-    setWarn("Add at least two labeled nodes.");
-    return;
-  }
-
-  const ids = new Set(validNodes.map((n) => n.id));
-
-  const validEdges = edges.filter(
-    (e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target
-  );
-
-  onGenerate({
-    spec_version: 1,
-    visual_id: crypto.randomUUID(),
-    session_id: sessionId,
-    revision: 1,
-    title:
-      title ||
-      (family === "dfd"
-        ? `DFD Level ${dfdLevel}`
-        : family === "flowchart"
-        ? "Process Flowchart"
-        : "System Architecture"),
-    grounding: {
-      level: "user_provided",
-      grounded_count: 0,
-      user_provided_count: validNodes.length,
-      illustrative_count: 0,
-      citations: [],
-    },
-    payload: {
-      kind: family,
-      layout: family === "architecture" ? "layered" : "top_down",
-      nodes: validNodes.map((n) => ({
-        id: n.id,
-        label: n.label.trim(),
-        node_type: n.node_type,
-        layer: n.layer,
-      })),
-      edges: validEdges.map((e) => ({
-        source: e.source,
-        target: e.target,
-        label: e.label.trim() || null,
-      })),
-      dfd_level: family === "dfd" ? dfdLevel : null,
-    },
-    created_at: new Date().toISOString(),
-  });
-};
+  };
 
   const inputCls = "w-full rounded-lg border border-line bg-paper px-3 py-2 text-[12.5px] text-ink placeholder:text-ink-soft/50 focus:border-indigo/50 focus:outline-none focus:ring-2 focus:ring-indigo/10";
 
+  const showManualBuilder = draftSource === "manual";
+  const diagramNodeTypes = family === "chart" ? NODE_TYPES.flowchart : NODE_TYPES[family as Exclude<VisualFamily, "chart">];
+
+  const chartPreview = useMemo(() => {
+    const safeCategories = categories.length ? categories : ["A", "B", "C"];
+    const safeValues = values.length ? values.map((value) => Number(value) || 0) : [12, 18, 15];
+    const maxValue = Math.max(...safeValues, 1);
+
+    return {
+      categories: safeCategories,
+      values: safeValues,
+      maxValue,
+    };
+  }, [categories, values]);
+
   return (
-    <div className="mx-auto max-w-3xl px-6 py-8">
-      <SectionLabel step={1} title="Visual Family" />
+    <div className="mx-auto max-w-4xl px-6 py-8">
+      <SectionLabel title="Visual Family" />
       <div className="mb-8 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        {FAMILIES.map((f) => (
+        {FAMILIES.map((item) => (
           <motion.button
-            key={f.id}
-            onClick={() => setFamily(f.id)}
+            key={item.id}
+            onClick={() => setFamily(item.id)}
             whileHover={{ y: -2 }}
             whileTap={{ scale: 0.98 }}
-            className={`relative flex flex-col items-start gap-2 rounded-xl border p-3.5 text-left transition-all ${
-              family === f.id
-                ? "border-indigo/50 bg-indigo-tint/50 shadow-md shadow-indigo/10"
-                : "border-line bg-paper hover:border-indigo/30 hover:shadow-sm"
+            className={`flex flex-col items-start gap-2 rounded-xl border p-3.5 text-left transition-all ${
+              family === item.id ? "border-indigo/50 bg-indigo-tint/50 shadow-md shadow-indigo/10" : "border-line bg-paper hover:border-indigo/30 hover:shadow-sm"
             }`}
           >
-            <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${family === f.id ? "bg-indigo text-white" : "bg-paper-dim text-ink-soft"}`}>
-              {f.icon}
+            <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${family === item.id ? "bg-indigo text-white" : "bg-paper-dim text-ink-soft"}`}>
+              {item.icon}
             </div>
             <div>
-              <p className="text-[12.5px] font-semibold text-ink">{f.label}</p>
-              <p className="text-[10.5px] text-ink-soft mt-0.5">{f.desc}</p>
+              <p className="text-[12.5px] font-semibold text-ink">{item.label}</p>
+              <p className="text-[10.5px] text-ink-soft mt-0.5">{item.desc}</p>
             </div>
           </motion.button>
         ))}
       </div>
 
-        <SectionLabel step={2} title="Describe the visual" />
-
-        <div className="mb-6">
+      <SectionLabel title="Describe the visual" />
+      <div className="mb-6">
+        <label className="mb-1.5 block text-[11.5px] font-medium text-ink-soft" htmlFor="visual-description">
+          What should Sykra generate?
+        </label>
         <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            rows={4}
-            placeholder={
+          id="visual-description"
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          rows={4}
+          placeholder={
             family === "chart"
-                ? "e.g., Bar chart comparing accuracy across BERT, GPT-2, and T5"
-                : family === "flowchart"
-                ? "e.g., Flowchart for user login with 2FA fallback"
+              ? "e.g., Bar chart comparing accuracy across BERT, GPT-2, and T5"
+              : family === "flowchart"
+                ? "e.g., Login flow with MFA fallback and secure token validation"
                 : family === "architecture"
-                ? "e.g., Architecture diagram for a RAG pipeline with retrieval and generation"
-                : "e.g., DFD level 0 for the paper's proposed system"
-            }
-            className={`${inputCls} resize-none`}
+                  ? "e.g., RAG architecture with retrieval, ranking, and generation layers"
+                  : "e.g., Data flow for intake, validation, storage, and reporting"
+          }
+          aria-invalid={Boolean(validation.prompt)}
+          className={`${inputCls} resize-none ${validation.prompt ? "border-danger/40 focus:border-danger/60" : ""}`}
         />
-
         <p className="mt-2 text-[11px] text-ink-soft leading-relaxed">
-            Sykra will draft the structure first. You can refine it after generation.
+          Required for prompt-based drafting. If you already know the data, use “Use my data.”
         </p>
-        </div>
+        {validation.prompt && <p className="mt-2 text-[11px] text-danger">{validation.prompt}</p>}
+      </div>
 
-        <SectionLabel step={3} title="Source" />
-
-        <div className="mb-8 grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <SectionLabel title="Source" />
+      <div className="mb-8 grid grid-cols-2 gap-3 lg:grid-cols-5">
         {visibleSources.map((source) => (
-            <button
+          <button
             key={source.id}
+            type="button"
             onClick={() => setDraftSource(source.id)}
             className={`flex flex-col items-start gap-2 rounded-xl border p-4 text-left transition-all ${
-                draftSource === source.id
-                ? "border-indigo/50 bg-indigo-tint/50 shadow-md shadow-indigo/10"
-                : "border-line bg-paper hover:border-indigo/30 hover:shadow-sm"
+              draftSource === source.id ? "border-indigo/50 bg-indigo-tint/50 shadow-md shadow-indigo/10" : "border-line bg-paper hover:border-indigo/30 hover:shadow-sm"
             }`}
-            >
-            <div
-                className={`flex h-8 w-8 items-center justify-center rounded-lg ${
-                draftSource === source.id
-                    ? "bg-indigo text-white"
-                    : "bg-paper-dim text-ink-soft"
-                }`}
-            >
-                {source.icon}
+          >
+            <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${draftSource === source.id ? "bg-indigo text-white" : "bg-paper-dim text-ink-soft"}`}>
+              {source.icon}
             </div>
-
             <div>
-                <p className="text-[12.5px] font-semibold text-ink">
-                {source.title}
-                </p>
-                <p className="text-[11px] text-ink-soft mt-0.5">
-                {source.desc}
-                </p>
+              <p className="text-[12.5px] font-semibold text-ink">{source.title}</p>
+              <p className="text-[11px] text-ink-soft mt-0.5">{source.desc}</p>
             </div>
-            </button>
+          </button>
         ))}
-        </div>
+      </div>
 
-        {family === "chart" && (
+      {family === "chart" && (
         <>
-            <SectionLabel step={4} title="Chart Type" />
-
-            <div className="flex gap-2 mb-8">
-            {CHART_TYPES.map((ct) => (
-                <button
-                key={ct.id}
-                onClick={() => setChartType(ct.id)}
+          <SectionLabel title="Chart Type" />
+          <div className="mb-8 flex flex-wrap gap-2">
+            {CHART_TYPES.map((chart) => (
+              <button
+                key={chart.id}
+                type="button"
+                onClick={() => setChartType(chart.id)}
                 className={`flex items-center gap-2 rounded-lg border px-4 py-2.5 text-[12px] font-medium transition-all ${
-                    chartType === ct.id
-                    ? "border-indigo/50 bg-indigo text-white shadow-md shadow-indigo/20"
-                    : "border-line bg-paper text-ink-soft hover:border-indigo/30 hover:text-ink"
+                  chartType === chart.id ? "border-indigo/50 bg-indigo text-white shadow-md shadow-indigo/20" : "border-line bg-paper text-ink-soft hover:border-indigo/30 hover:text-ink"
                 }`}
-                >
-                {ct.icon}
-                {ct.label}
-                </button>
+              >
+                {chart.icon}
+                {chart.label}
+              </button>
             ))}
-            </div>
+          </div>
         </>
-        )}
+      )}
 
-        {family === "dfd" && (
+      {family === "dfd" && (
         <>
-            <SectionLabel step={4} title="DFD Level" />
-
-            <div className="flex items-center gap-1 rounded-lg bg-paper-dim p-1 mb-8 w-fit">
-            {([0, 1] as const).map((lv) => (
-                <button
-                key={lv}
-                onClick={() => setDfdLevel(lv)}
+          <SectionLabel title="DFD Level" />
+          <div className="mb-8 flex items-center gap-1 rounded-lg bg-paper-dim p-1 w-fit">
+            {[0, 1].map((level) => (
+              <button
+                key={level}
+                type="button"
+                onClick={() => setDfdLevel(level as 0 | 1)}
                 className={`rounded-md px-3 py-1.5 text-[11.5px] font-medium transition-all ${
-                    dfdLevel === lv
-                    ? "bg-paper text-ink shadow-sm"
-                    : "text-ink-soft hover:text-ink"
+                  dfdLevel === level ? "bg-paper text-ink shadow-sm" : "text-ink-soft hover:text-ink"
                 }`}
-                >
-                Level {lv}
-                </button>
+              >
+                Level {level}
+              </button>
             ))}
-            </div>
+          </div>
         </>
-        )}
+      )}
 
-        <div className="mb-6">
-        <button
-            onClick={() => setShowManualBuilder((v) => !v)}
-            className="flex items-center gap-2 rounded-lg border border-line px-3 py-2 text-[12px] font-medium text-ink-soft hover:text-ink"
-        >
-            <Settings2 className="h-3.5 w-3.5" />
-            {showManualBuilder ? "Hide manual builder" : "Manual builder / advanced"}
-        </button>
-        </div>
-
-        {showManualBuilder && (
+      {showManualBuilder && (
         <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="mb-8 space-y-6 rounded-xl border border-line bg-paper p-4"
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mb-8 space-y-6 rounded-xl border border-line bg-paper p-4"
         >
-            {family === "chart" ? (
+          {family === "chart" ? (
             <>
-                <SectionLabel step={5} title="Manual Chart Data" />
+              <SectionLabel title="Manual Chart Data" />
 
-                <div className="space-y-4">
-                <div>
-                    <label className="block text-[11.5px] font-medium text-ink-soft mb-1.5">
-                    Chart Title
-                    </label>
-                    <input
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="md:col-span-2">
+                  <label className="mb-1.5 block text-[11.5px] font-medium text-ink-soft" htmlFor="chart-title">
+                    Chart title <span className="text-ink-soft/60">(optional)</span>
+                  </label>
+                  <input
+                    id="chart-title"
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
                     placeholder="e.g., Model Accuracy Comparison"
                     className={inputCls}
-                    />
+                  />
                 </div>
 
-                <div>
-                    <label className="block text-[11.5px] font-medium text-ink-soft mb-1.5">
-                    Categories (comma-separated)
-                    </label>
-                    <input
+                <div className="md:col-span-2">
+                  <label className="mb-1.5 block text-[11.5px] font-medium text-ink-soft" htmlFor="chart-categories">
+                    Categories <span className="text-ink-soft/60">1 per item</span>
+                  </label>
+                  <input
+                    id="chart-categories"
                     value={categories.join(", ")}
-                    onChange={(e) =>
-                        setCategories(e.target.value.split(",").map((s) => s.trim()))
-                    }
-                    placeholder="e.g., BERT, GPT-2, T5"
+                    onChange={(e) => setCategories(e.target.value.split(",").map((category) => category.trim()).filter(Boolean))}
+                    placeholder="BERT, GPT-2, T5"
                     className={inputCls}
-                    />
+                  />
                 </div>
 
-                <div>
-                    <label className="block text-[11.5px] font-medium text-ink-soft mb-1.5">
-                    Values (comma-separated, matching categories)
-                    </label>
-                    <input
+                <div className="md:col-span-2">
+                  <label className="mb-1.5 block text-[11.5px] font-medium text-ink-soft" htmlFor="chart-values">
+                    Values <span className="text-ink-soft/60">must match the category count</span>
+                  </label>
+                  <input
+                    id="chart-values"
                     value={values.join(", ")}
-                    onChange={(e) =>
-                        setValues(e.target.value.split(",").map((s) => s.trim()))
-                    }
-                    placeholder="e.g., 88.5, 91.2, 94.7"
+                    onChange={(e) => setValues(e.target.value.split(",").map((value) => value.trim()))}
+                    placeholder="88.5, 91.2, 94.7"
                     className={inputCls}
-                    />
+                  />
                 </div>
+              </div>
+
+              <div className="rounded-xl border border-line bg-paper-dim/30 p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-ink-soft">Live preview</p>
+                  <span className="text-[10.5px] text-ink-soft">{chartType}</span>
                 </div>
+                <SimpleChartPreview categories={chartPreview.categories} values={chartPreview.values} maxValue={chartPreview.maxValue} />
+              </div>
             </>
-            ) : (
+          ) : (
             <>
-                <div className="flex flex-wrap items-center gap-2">
-                <input
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="min-w-[220px] flex-1">
+                  <label className="mb-1.5 block text-[11.5px] font-medium text-ink-soft" htmlFor="diagram-title">
+                    Diagram title <span className="text-ink-soft/60">(optional)</span>
+                  </label>
+                  <input
+                    id="diagram-title"
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
-                    placeholder={
-                    family === "dfd"
-                        ? `DFD Level ${dfdLevel} — title`
-                        : "Diagram title"
-                    }
-                    className={`${inputCls} min-w-[220px] flex-1`}
-                />
+                    placeholder={family === "dfd" ? `DFD Level ${dfdLevel} — title` : "Diagram title"}
+                    className={inputCls}
+                  />
+                </div>
 
                 {family === "dfd" && (
-                    <div className="flex items-center gap-1 rounded-lg bg-paper-dim p-1">
-                    {([0, 1] as const).map((lv) => (
-                        <button
-                        key={lv}
-                        onClick={() => setDfdLevel(lv)}
+                  <div className="flex items-center gap-1 rounded-lg bg-paper-dim p-1">
+                    {[0, 1].map((level) => (
+                      <button
+                        key={level}
+                        type="button"
+                        onClick={() => setDfdLevel(level as 0 | 1)}
                         className={`rounded-md px-3 py-1.5 text-[11.5px] font-medium transition-all ${
-                            dfdLevel === lv
-                            ? "bg-paper text-ink shadow-sm"
-                            : "text-ink-soft hover:text-ink"
+                          dfdLevel === level ? "bg-paper text-ink shadow-sm" : "text-ink-soft hover:text-ink"
                         }`}
-                        >
-                        Level {lv}
-                        </button>
+                      >
+                        Level {level}
+                      </button>
                     ))}
-                    </div>
+                  </div>
                 )}
 
                 <button
-                    onClick={() => {
-                    const t = templateFor(family, dfdLevel);
-                    setNodes(t.nodes);
-                    setEdges(t.edges);
-                    }}
-                    className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-[11.5px] font-medium text-ink-soft hover:text-ink"
+                  type="button"
+                  onClick={() => {
+                    const template = templateFor(family, dfdLevel);
+                    setNodes(template.nodes);
+                    setEdges(template.edges);
+                  }}
+                  className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-[11.5px] font-medium text-ink-soft hover:text-ink"
                 >
-                    <RotateCcw className="h-3.5 w-3.5" />
-                    Reset template
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Reset template
                 </button>
-                </div>
+              </div>
 
-                <SectionLabel step={6} title={`Nodes (${nodes.length})`} />
+              <div className="grid gap-5 lg:grid-cols-[1.2fr_0.8fr]">
+                <div className="space-y-4">
+                  <SectionLabel title={`Nodes (${nodes.length})`} />
+                  <div className="space-y-2">
+                    {nodes.map((node) => (
+                      <div key={node.id} className="flex items-center gap-2">
+                        <div className="flex-1">
+                          <label className="mb-1 block text-[10.5px] font-medium uppercase tracking-[0.08em] text-ink-soft">Label</label>
+                          <input
+                            value={node.label}
+                            onChange={(event) => patchNode(node.id, { label: event.target.value })}
+                            placeholder="e.g., Payment Service"
+                            className={inputCls}
+                          />
+                        </div>
 
-                <div className="space-y-1.5">
-                {nodes.map((n) => (
-                    <div key={n.id} className="flex items-center gap-2">
-                    <input
-                        value={n.label}
-                        onChange={(e) => patchNode(n.id, { label: e.target.value })}
-                        placeholder="Label (e.g., Payment Service)"
-                        className={inputCls}
-                    />
+                        <div className="w-28 shrink-0">
+                          <label className="mb-1 block text-[10.5px] font-medium uppercase tracking-[0.08em] text-ink-soft">Type</label>
+                          <select
+                            value={node.node_type}
+                            onChange={(event) => patchNode(node.id, { node_type: event.target.value as NodeType })}
+                            className="w-full rounded-lg border border-line bg-paper px-2 py-2 text-[12px] text-ink focus:border-indigo/50 focus:outline-none"
+                          >
+                            {diagramNodeTypes.map((type) => (
+                              <option key={type} value={type}>{type}</option>
+                            ))}
+                          </select>
+                        </div>
 
-                    <select
-                        value={n.node_type}
-                        onChange={(e) =>
-                        patchNode(n.id, { node_type: e.target.value as NodeType })
-                        }
-                        className="w-28 shrink-0 rounded-lg border border-line bg-paper px-2 py-2 text-[12px] text-ink focus:border-indigo/50 focus:outline-none"
-                    >
-                        {NODE_TYPES[family as "flowchart" | "architecture" | "dfd"].map((t) => (
-                        <option key={t} value={t}>
-                            {t}
-                        </option>
-                        ))}
-                    </select>
+                        <button
+                          type="button"
+                          onClick={() => removeNode(node.id)}
+                          className="mt-5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-ink-soft hover:bg-danger/10 hover:text-danger"
+                          aria-label={`Delete node ${node.label || "unnamed"}`}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
 
                     <button
-                        onClick={() => removeNode(n.id)}
-                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-ink-soft hover:bg-danger/10 hover:text-danger"
+                      type="button"
+                      onClick={addNode}
+                      className="flex items-center gap-1 text-[11.5px] font-medium text-indigo hover:text-indigo-dark"
                     >
-                        <Trash2 className="h-3.5 w-3.5" />
+                      <Plus className="h-3.5 w-3.5" />
+                      Add node
                     </button>
-                    </div>
-                ))}
-
-                <button
-                    onClick={addNode}
-                    className="flex items-center gap-1 text-[11.5px] font-medium text-indigo hover:text-indigo-dark"
-                >
-                    <Plus className="h-3.5 w-3.5" />
-                    Add node
-                </button>
+                  </div>
                 </div>
 
-                <SectionLabel step={7} title={`Flows / Edges (${edges.length})`} />
+                <div className="rounded-xl border border-line bg-paper-dim/30 p-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-ink-soft">Live preview</p>
+                    <span className="text-[10.5px] text-ink-soft">{nodes.length} nodes</span>
+                  </div>
+                  <SimpleDiagramPreview nodes={nodes} edges={edges} />
+                </div>
+              </div>
 
-                <div className="space-y-1.5">
-                {edges.map((e, i) => (
-                    <div key={i} className="flex items-center gap-2">
-                    <select
-                        value={e.source}
-                        onChange={(ev) => patchEdge(i, { source: ev.target.value })}
-                        className="flex-1 rounded-lg border border-line bg-paper px-2 py-2 text-[12px] text-ink focus:border-indigo/50 focus:outline-none"
-                    >
-                        {nodes.map((n) => (
-                        <option key={n.id} value={n.id}>
-                            {n.label || n.id}
-                        </option>
-                        ))}
-                    </select>
+              <div className="mt-6 space-y-3">
+                <SectionLabel title={`Flows / Edges (${edges.length})`} />
+                <div className="space-y-2">
+                  {edges.map((edge, index) => (
+                    <div key={edge.id} className="flex items-center gap-2">
+                      <div className="flex-1">
+                        <label className="mb-1 block text-[10.5px] font-medium uppercase tracking-[0.08em] text-ink-soft">From</label>
+                        <select
+                          value={edge.source}
+                          onChange={(event) => patchEdge(index, { source: event.target.value })}
+                          className="w-full rounded-lg border border-line bg-paper px-2 py-2 text-[12px] text-ink focus:border-indigo/50 focus:outline-none"
+                        >
+                          <option value="">Select source</option>
+                          {nodes.map((node) => (
+                            <option key={node.id} value={node.id}>{node.label || node.id}</option>
+                          ))}
+                        </select>
+                      </div>
 
-                    <ArrowRight className="h-3.5 w-3.5 shrink-0 text-ink-soft" />
+                      <div className="pt-5">
+                        <ArrowRight className="h-3.5 w-3.5 shrink-0 text-ink-soft" />
+                      </div>
 
-                    <select
-                        value={e.target}
-                        onChange={(ev) => patchEdge(i, { target: ev.target.value })}
-                        className="flex-1 rounded-lg border border-line bg-paper px-2 py-2 text-[12px] text-ink focus:border-indigo/50 focus:outline-none"
-                    >
-                        {nodes.map((n) => (
-                        <option key={n.id} value={n.id}>
-                            {n.label || n.id}
-                        </option>
-                        ))}
-                    </select>
+                      <div className="flex-1">
+                        <label className="mb-1 block text-[10.5px] font-medium uppercase tracking-[0.08em] text-ink-soft">To</label>
+                        <select
+                          value={edge.target}
+                          onChange={(event) => patchEdge(index, { target: event.target.value })}
+                          className="w-full rounded-lg border border-line bg-paper px-2 py-2 text-[12px] text-ink focus:border-indigo/50 focus:outline-none"
+                        >
+                          <option value="">Select target</option>
+                          {nodes.map((node) => (
+                            <option key={node.id} value={node.id}>{node.label || node.id}</option>
+                          ))}
+                        </select>
+                      </div>
 
-                    <input
-                        value={e.label}
-                        onChange={(ev) => patchEdge(i, { label: ev.target.value })}
-                        placeholder="label"
-                        className="w-24 shrink-0 rounded-lg border border-line bg-paper px-2 py-2 text-[12px] text-ink focus:border-indigo/50 focus:outline-none"
-                    />
+                      <div className="w-28 shrink-0">
+                        <label className="mb-1 block text-[10.5px] font-medium uppercase tracking-[0.08em] text-ink-soft">Label</label>
+                        <input
+                          value={edge.label}
+                          onChange={(event) => patchEdge(index, { label: event.target.value })}
+                          placeholder="optional"
+                          className="w-full rounded-lg border border-line bg-paper px-2 py-2 text-[12px] text-ink focus:border-indigo/50 focus:outline-none"
+                        />
+                      </div>
 
-                    <button
-                        onClick={() => removeEdge(i)}
-                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-ink-soft hover:bg-danger/10 hover:text-danger"
-                    >
+                      <button
+                        type="button"
+                        onClick={() => removeEdge(index)}
+                        className="mt-5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-ink-soft hover:bg-danger/10 hover:text-danger"
+                        aria-label={`Delete edge ${index + 1}`}
+                      >
                         <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                      </button>
                     </div>
-                ))}
+                  ))}
+                </div>
 
                 <button
-                    onClick={addEdge}
-                    className="flex items-center gap-1 text-[11.5px] font-medium text-indigo hover:text-indigo-dark"
+                  type="button"
+                  onClick={addEdge}
+                  className="flex items-center gap-1 text-[11.5px] font-medium text-indigo hover:text-indigo-dark"
                 >
-                    <Plus className="h-3.5 w-3.5" />
-                    Add flow
+                  <Plus className="h-3.5 w-3.5" />
+                  Add flow
                 </button>
-                </div>
+              </div>
             </>
-            )}
-
-            <div className="flex justify-end pt-2">
-            <button
-                onClick={handleManualGenerate}
-                disabled={isGenerating}
-                className="rounded-lg border border-line bg-paper px-4 py-2.5 text-[12.5px] font-medium text-ink hover:bg-paper-dim disabled:opacity-50"
-            >
-                Generate manual visual
-            </button>
-            </div>
+          )}
         </motion.div>
-        )}
+      )}
+
+      {validation.conversation && (
+        <p className="mb-3 text-[11px] text-danger">{validation.conversation}</p>
+      )}
 
       {warn && (
-        <div className="mt-6 rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-[12px] text-danger animate-fade-up">
+        <div
+          role="status"
+          aria-live="polite"
+          className="mt-6 rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-[12px] text-danger animate-fade-up"
+        >
           {warn}
         </div>
       )}
-      <div className="mt-8 flex justify-end">
-        <motion.button
-          onClick={handleDraft}
-          disabled={isGenerating || !prompt.trim()}
-          whileHover={{ scale: 1.02 }}
-          whileTap={{ scale: 0.98 }}
-          className="flex items-center gap-2 rounded-xl bg-indigo px-6 py-3 text-[13px] font-semibold text-white shadow-lg shadow-indigo/25 transition-all hover:bg-indigo-dark disabled:opacity-50"
-        >
-          {isGenerating ? (
-            <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Drafting...
-            </>
-            ) : (
-            <>
-                Draft visual
-                <ArrowRight className="h-4 w-4" />
-            </>
-            )}
-        </motion.button>
+
+      <div className="mt-8 flex items-center justify-between gap-4 rounded-2xl border border-line bg-paper-dim/40 px-4 py-3">
+        <div className="text-[11px] text-ink-soft">
+          {draftSource === "manual"
+            ? "Manual mode uses a direct spec builder and live preview."
+            : canDraft
+              ? "Ready to draft a visual from your prompt."
+              : "Add the required description before drafting."}
+        </div>
+
+        <div className="flex items-center gap-3">
+          {draftSource === "manual" && (
+            <motion.button
+              type="button"
+              onClick={handleManualGenerate}
+              disabled={isGenerating}
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              className="rounded-xl bg-indigo px-5 py-2.5 text-[12.5px] font-semibold text-white shadow-lg shadow-indigo/25 transition-all hover:bg-indigo-dark disabled:opacity-50"
+            >
+              {isGenerating ? "Generating..." : "Generate manual visual"}
+            </motion.button>
+          )}
+
+          {draftSource !== "manual" && (
+            <motion.button
+              type="button"
+              onClick={handleDraft}
+              disabled={!canDraft}
+              whileHover={{ scale: canDraft ? 1.02 : 1 }}
+              whileTap={{ scale: canDraft ? 0.98 : 1 }}
+              className="flex items-center gap-2 rounded-xl bg-indigo px-5 py-2.5 text-[12.5px] font-semibold text-white shadow-lg shadow-indigo/25 transition-all hover:bg-indigo-dark disabled:opacity-50"
+            >
+              {isGenerating ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Drafting...
+                </>
+              ) : (
+                <>
+                  Draft visual
+                  <ArrowRight className="h-4 w-4" />
+                </>
+              )}
+            </motion.button>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-function SectionLabel({ step, title }: { step: number; title: string }) {
+function SectionLabel({ title }: { title: string }) {
   return (
-    <div className="flex items-center gap-2.5 mb-3">
-      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-indigo/10 text-[10px] font-bold text-indigo">{step}</span>
-      <span className="text-[12px] font-semibold uppercase tracking-wide text-ink-soft">{title}</span>
+    <div className="mb-3">
+      <span className="text-[12px] font-semibold uppercase tracking-[0.14em] text-ink-soft">{title}</span>
     </div>
+  );
+}
+
+function SimpleChartPreview({ categories, values, maxValue }: { categories: string[]; values: number[]; maxValue: number }) {
+  return (
+    <div className="flex h-32 items-end gap-2 pt-4">
+      {values.map((value, index) => (
+        <div key={`${categories[index] ?? "cat"}-${index}`} className="flex flex-1 flex-col items-center gap-2">
+          <div
+            className="w-full rounded-t-lg bg-indigo/80 shadow-inner shadow-white/10"
+            style={{ height: `${Math.max(18, (value / maxValue) * 100)}%` }}
+            title={`${categories[index] ?? "Series"}: ${value}`}
+          />
+          <span className="text-[9px] text-ink-soft">{categories[index]?.slice(0, 6) ?? ""}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SimpleDiagramPreview({ nodes, edges }: { nodes: NodeDraft[]; edges: EdgeDraft[] }) {
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  const canvas = { width: 280, height: 180 };
+  const positions = new Map<string, { x: number; y: number }>();
+
+  nodes.forEach((node, index) => {
+    const column = Math.min(index % 3, 2);
+    const row = Math.floor(index / 3);
+    positions.set(node.id, {
+      x: 36 + column * 90,
+      y: 32 + row * 58,
+    });
+  });
+
+  return (
+    <svg width="100%" height="180" viewBox={`0 0 ${canvas.width} ${canvas.height}`} className="block rounded-lg bg-paper">
+      {edges.map((edge) => {
+        const source = positions.get(edge.source);
+        const target = positions.get(edge.target);
+        if (!source || !target) return null;
+
+        return (
+          <g key={edge.id}>
+            <line x1={source.x} y1={source.y} x2={target.x} y2={target.y} stroke="#7a9e8e" strokeWidth="1.5" strokeDasharray="6 4" />
+            {edge.label && (
+              <text x={(source.x + target.x) / 2} y={(source.y + target.y) / 2 - 6} fontSize="8" fill="#3a3d3a" textAnchor="middle">
+                {edge.label}
+              </text>
+            )}
+          </g>
+        );
+      })}
+
+      {nodes.map((node) => {
+        const pos = positions.get(node.id) ?? { x: 40, y: 40 };
+        return (
+          <g key={node.id}>
+            <circle cx={pos.x} cy={pos.y} r={18} fill={node.node_type === "decision" ? "#cd846b" : node.node_type === "store" ? "#a9b8aa" : "#7a9e8e"} opacity={0.85} />
+            <text x={pos.x} y={pos.y + 2} textAnchor="middle" fontSize="7.5" fill="#ffffff">
+              {node.label.slice(0, 10) || "Node"}
+            </text>
+          </g>
+        );
+      })}
+    </svg>
   );
 }

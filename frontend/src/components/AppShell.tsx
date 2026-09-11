@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useRef, useState, useMemo } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import {
   ChevronsLeft,
   ChevronsRight,
@@ -57,7 +57,7 @@ const PDF_WIDTH_MAX = 70;
 
 export function AppShell() {
   const [papers, setPapers] = useState<Paper[]>([]);
-  const [sessionId, setSessionId] = useState(() => crypto.randomUUID());
+  const [sessionId, setSessionId] = useState("");
   const [uploadedFilename, setUploadedFilename] = useState<string | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [railOpen, setRailOpen] = useState(true);
@@ -71,6 +71,10 @@ export function AppShell() {
   const [draggingPdf, setDraggingPdf] = useState(false);
 
   const [showStudio, setShowStudio] = useState(false);
+
+  useEffect(() => {
+    setSessionId(crypto.randomUUID());
+  }, []);
 
   const [uploadState, setUploadState] = useState({
     status: "idle" as "idle" | "uploading" | "processing" | "done" | "error",

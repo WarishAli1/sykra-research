@@ -128,8 +128,6 @@ export function StudioView({
     setShowEditor(true);
   }, []);
 
-  const groundingBadge = currentSpec?.grounding?.level;
-
   return (
     <div className="flex h-full flex-col bg-paper overflow-hidden">
       <div className="shrink-0 border-b border-line bg-paper/80 backdrop-blur-sm">
@@ -139,25 +137,8 @@ export function StudioView({
               <h1 className="font-serif text-[18px] font-semibold text-ink tracking-tight">
                 Sykra Studio
               </h1>
-              <p className="text-[11px] text-ink-soft">
-                Research-grade visuals, grounded in evidence
-              </p>
             </div>
           </div>
-
-          {/* Grounding Badge */}
-          <AnimatePresence>
-            {groundingBadge && (
-              <motion.div
-                initial={{ opacity: 0, y: -8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                className="flex items-center gap-1.5"
-              >
-                <GroundingBadge level={groundingBadge} />
-              </motion.div>
-            )}
-          </AnimatePresence>
 
           {/* Mode Toggle */}
           <div className="flex items-center gap-1 rounded-lg bg-paper-dim p-1">
@@ -338,42 +319,5 @@ function ModeButton({
       {icon}
       {label}
     </button>
-  );
-}
-
-function GroundingBadge({ level }: { level: string }) {
-  const config = {
-    user_provided: {
-      icon: <Shield className="h-3 w-3" />,
-      label: "User data",
-      color: "text-gold border-gold/30 bg-gold-tint",
-    },
-    grounded: {
-      icon: <ShieldCheck className="h-3 w-3" />,
-      label: "Grounded",
-      color: "text-indigo border-indigo/30 bg-indigo-tint",
-    },
-    mixed: {
-      icon: <Shield className="h-3 w-3" />,
-      label: "Mixed",
-      color: "text-gold border-gold/30 bg-gold-tint",
-    },
-    illustrative: {
-      icon: <AlertTriangle className="h-3 w-3" />,
-      label: "Illustrative",
-      color: "text-danger border-danger/30 bg-danger/5",
-    },
-    draft: {
-      icon: <Shield className="h-3 w-3" />,
-      label: "AI draft",
-      color: "text-indigo border-indigo/30 bg-indigo-tint",
-    },
-  }[level] ?? { icon: <Shield className="h-3 w-3" />, label: level, color: "text-ink-soft border-line bg-paper-dim" };
-
-  return (
-    <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[10.5px] font-medium ${config.color}`}>
-      {config.icon}
-      {config.label}
-    </span>
   );
 }
