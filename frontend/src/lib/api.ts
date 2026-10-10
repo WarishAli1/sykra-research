@@ -64,6 +64,7 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       ...init,
+      credentials: "include",
     });
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") {
@@ -92,7 +93,7 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
 }
 
 async function requestBlob(path: string, init: RequestInit): Promise<Blob> {
-  const response = await fetch(`${API_BASE_URL}${path}`, { ...init });
+  const response = await fetch(`${API_BASE_URL}${path}`, { ...init, credentials: "include" });
   if (!response.ok) {
     let message = `Request failed with status ${response.status}`;
     try {
@@ -121,7 +122,7 @@ async function streamRequest<T>(
 ): Promise<void> {
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, { ...init });
+    response = await fetch(`${API_BASE_URL}${path}`, { ...init, credentials: "include" });
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") {
       throw new ApiAbortError();
@@ -177,6 +178,16 @@ async function streamRequest<T>(
 }
 
 export const api = {
+  me(): Promise<{ id: string; email: string; name: string | null }> {
+    return request("/auth/me", { method: "GET" });
+  },
+  listChats(before?: string): Promise<{ id: string; title: string; created_at: string; updated_at: string }[]> {
+    const query = before ? `?before=${encodeURIComponent(before)}` : "";
+    return request(`/chats${query}`, { method: "GET" });
+  },
+  getChat(chatId: string): Promise<{ id: string; role: string; content: string; citations: Record<string, unknown>; status: string; created_at: string }[]> {
+    return request(`/chats/${encodeURIComponent(chatId)}`, { method: "GET" });
+  },
   chat(payload: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
     return request<ChatResponse>("/chat", {
       method: "POST",

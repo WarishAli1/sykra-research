@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useRef, useState, useMemo } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ChevronsLeft,
   ChevronsRight,
@@ -9,8 +9,11 @@ import {
   PanelLeftOpen,
   Plus,
   Shapes,
+  LogOut,
+  UserRound,
 } from "lucide-react";
 import Image from "next/image";
+import Link from "next/link";
 import { RightRail } from "./RightRail";
 import { ChatPanel } from "./ChatPanel";
 import { GraphView } from "./GraphView";
@@ -55,7 +58,30 @@ const PDF_WIDTH_DEFAULT = 50;
 const PDF_WIDTH_MIN = 30;
 const PDF_WIDTH_MAX = 70;
 
+type ChatSummary = { id: string; title: string; created_at: string; updated_at: string };
+
+function groupChats(chats: ChatSummary[]): [string, ChatSummary[]][] {
+  const now = new Date();
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const groups: Record<string, ChatSummary[]> = {
+    Today: [],
+    Yesterday: [],
+    "Previous 7 days": [],
+    Older: [],
+  };
+  for (const chat of chats) {
+    const days = Math.floor((startToday - new Date(new Date(chat.updated_at).getFullYear(), new Date(chat.updated_at).getMonth(), new Date(chat.updated_at).getDate()).getTime()) / 86400000);
+    if (days <= 0) groups.Today.push(chat);
+    else if (days === 1) groups.Yesterday.push(chat);
+    else if (days < 7) groups["Previous 7 days"].push(chat);
+    else groups.Older.push(chat);
+  }
+  return Object.entries(groups).filter(([, items]) => items.length > 0);
+}
+
 export function AppShell() {
+  const [currentUser, setCurrentUser] = useState<{ name: string | null; email: string } | null>(null);
+  const [recentChats, setRecentChats] = useState<ChatSummary[]>([]);
   const [papers, setPapers] = useState<Paper[]>([]);
   const [sessionId, setSessionId] = useState("");
   const [uploadedFilename, setUploadedFilename] = useState<string | null>(null);
@@ -72,9 +98,30 @@ export function AppShell() {
 
   const [showStudio, setShowStudio] = useState(false);
 
+  // Session IDs are client-only so the app can keep server and client markup aligned.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSessionId(crypto.randomUUID());
   }, []);
+
+  useEffect(() => {
+    fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000/api"}/auth/me`, { credentials: "include" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((user: { name: string | null; email: string } | null) => {
+        setCurrentUser(user);
+        if (user) api.listChats().then(setRecentChats).catch(() => setRecentChats([]));
+      })
+      .catch(() => setCurrentUser(null));
+  }, []);
+
+  const handleLogout = async () => {
+    await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000/api"}/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "X-Requested-With": "XMLHttpRequest" },
+    });
+    window.location.href = "/login";
+  };
 
   const [uploadState, setUploadState] = useState({
     status: "idle" as "idle" | "uploading" | "processing" | "done" | "error",
@@ -276,14 +323,16 @@ export function AppShell() {
         {sidebarOpen ? (
           <div className="flex h-full flex-col" style={{ width: SIDEBAR_WIDTH }}>
             <div className="flex items-center gap-2.5 px-4 py-4 shrink-0">
-              <Image
-                src="/sykra-icon.png"
-                alt="Sykra Research"
-                width={789}
-                height={146}
-                className="w-[150px] h-auto shrink-0 -mt-3"
-                priority
-              />
+              <Link href="/" aria-label="Back to Sykra Research home" className="shrink-0 rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo">
+                <Image
+                  src="/sykra-logo.svg"
+                  alt="Sykra Research"
+                  width={180}
+                  height={32}
+                  className="w-[150px] h-auto shrink-0 -mt-3"
+                  priority
+                />
+              </Link>
               <button
                 onClick={() => setSidebarOpen(false)}
                 aria-label="Collapse sidebar"
@@ -329,6 +378,7 @@ export function AppShell() {
                   </span>
                 )}
               </button>
+              {recentChats.length > 0 && <div className="mt-5"><p className="px-1.5 pb-1.5 text-label text-ink-soft/70">Recent chats</p>{groupChats(recentChats).map(([group, chats]) => <div key={group} className="mb-3"><p className="px-1.5 pb-1 text-micro font-semibold uppercase tracking-wide text-ink-soft/60">{group}</p><div className="space-y-0.5">{chats.map((chat) => <Link key={chat.id} href={`/app/c/${chat.id}`} className="block truncate rounded-md px-2.5 py-1.5 text-caption text-ink-soft hover:bg-paper hover:text-ink">{chat.title}</Link>)}</div></div>)}</div>}
 
               <button
                 onClick={handleOpenGraph}
@@ -355,8 +405,13 @@ export function AppShell() {
               </button>
             </div>
 
-            <div className="mt-auto px-4 py-3 text-micro text-ink-soft/50 shrink-0">
-              AI Research Assistant
+            <div className="mt-auto border-t border-line px-3 py-3 shrink-0">
+              <div className="flex items-center gap-2 rounded-lg px-2 py-2">
+                <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-indigo-tint text-indigo"><UserRound className="h-3.5 w-3.5" /></span>
+                <div className="min-w-0 flex-1"><p className="truncate text-caption font-medium text-ink">{currentUser?.name || "Researcher"}</p><p className="truncate text-micro text-ink-soft">{currentUser?.email || "Signed in"}</p></div>
+                <button onClick={handleLogout} aria-label="Log out" title="Log out" className="rounded-md p-1.5 text-ink-soft hover:bg-paper hover:text-ink"><LogOut className="h-3.5 w-3.5" /></button>
+              </div>
+              <Link href="/app/settings" className="mt-1 block px-2 text-micro text-ink-soft hover:text-ink">Settings</Link>
             </div>
           </div>
         ) : (
