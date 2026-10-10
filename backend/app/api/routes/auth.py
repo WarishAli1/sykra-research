@@ -4,6 +4,8 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import RedirectResponse
+from authlib.integrations.httpx_client import AsyncOAuth2Client
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session as DBSession
@@ -70,6 +72,10 @@ async def _send_verification(user: User, token: str) -> None:
 
 def public_user(user: User) -> UserRead:
     return UserRead(id=str(user.id), email=user.email, name=user.name)
+
+
+def _google_configured() -> bool:
+    return bool(settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET)
 
 
 @router.post("/signup", response_model=UserRead, status_code=201)
@@ -242,3 +248,72 @@ def change_password(
     )
     db.commit()
     return {"status": "password_changed"}
+
+
+@router.get("/google/start")
+def google_start(response: Response):
+    if not _google_configured():
+        raise HTTPException(status_code=404, detail="Google sign-in is not configured.")
+    state = secrets.token_urlsafe(32)
+    redirect = RedirectResponse(
+        "https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={settings.GOOGLE_CLIENT_ID}"
+        f"&redirect_uri={settings.GOOGLE_REDIRECT_URI}"
+        "&response_type=code&scope=openid%20email%20profile"
+        f"&state={state}"
+    )
+    redirect.set_cookie(
+        "sykra_oauth_state",
+        state,
+        max_age=600,
+        httponly=True,
+        secure=settings.SECURE_COOKIES,
+        samesite="lax",
+        path="/api/auth/google",
+    )
+    return redirect
+
+
+@router.get("/google/callback")
+async def google_callback(request: Request, response: Response, code: str = "", state: str = "", db: DBSession = Depends(get_db)):
+    expected_state = request.cookies.get("sykra_oauth_state")
+    if not _google_configured() or not code or not state or not expected_state or not secrets.compare_digest(state, expected_state):
+        raise HTTPException(status_code=400, detail="Google sign-in could not be validated.")
+
+    async with AsyncOAuth2Client(
+        client_id=settings.GOOGLE_CLIENT_ID,
+        client_secret=settings.GOOGLE_CLIENT_SECRET,
+        scope="openid email profile",
+    ) as client:
+        token = await client.fetch_token(
+            "https://oauth2.googleapis.com/token",
+            code=code,
+            redirect_uri=settings.GOOGLE_REDIRECT_URI,
+        )
+        userinfo = await client.get("https://openidconnect.googleapis.com/v1/userinfo", token=token)
+        userinfo.raise_for_status()
+        profile = userinfo.json()
+
+    if not profile.get("email") or profile.get("email_verified") is not True:
+        raise HTTPException(status_code=400, detail="Google account email could not be verified.")
+
+    email = normalize_email(profile["email"])
+    user = db.scalar(select(User).where(User.email == email))
+    if not user:
+        user = User(
+            email=email,
+            name=profile.get("name"),
+            password_hash=password_hash.hash(secrets.token_urlsafe(32)),
+            email_verified_at=datetime.now(timezone.utc),
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    elif not user.email_verified_at:
+        user.email_verified_at = datetime.now(timezone.utc)
+        db.commit()
+
+    redirect = RedirectResponse(f"{settings.FRONTEND_PUBLIC_URL}/app")
+    create_session(db, user, request, redirect)
+    redirect.delete_cookie("sykra_oauth_state", path="/api/auth/google")
+    return redirect

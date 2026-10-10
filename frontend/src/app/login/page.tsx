@@ -67,6 +67,7 @@ export default function LoginPage() {
               {error && <p role="alert" className="rounded-xl border border-danger/30 bg-danger/5 px-3 py-2 text-sm text-danger">{error}</p>}
               <button type="submit" disabled={pending} className="button-primary w-full justify-center disabled:opacity-60">{pending ? "Please wait…" : mode === "login" ? "Sign in" : "Create account"} <ArrowRight className="h-4 w-4" /></button>
             </form>
+            {mode === "login" && process.env.NEXT_PUBLIC_GOOGLE_AUTH_ENABLED === "true" && <a href={`${(process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000/api").replace(/\/$/, "")}/auth/google/start`} className="mt-4 flex w-full items-center justify-center rounded-full border border-line px-4 py-3 text-sm font-semibold text-ink hover:bg-paper-dim">Continue with Google</a>}
             {mode === "login" && <Link href="/forgot-password" className="mt-4 block text-center text-sm font-semibold text-forest hover:underline">Forgot your password?</Link>}
             <div className="mt-6 flex items-center justify-center gap-2 text-xs text-ink-muted"><LockKeyhole className="h-3.5 w-3.5" /> Secure access to your workspace</div>
             <p className="mt-8 text-center text-sm text-ink-muted">{mode === "login" ? "New to Sykra?" : "Already have an account?"}{" "}<button type="button" onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); }} className="font-semibold text-forest hover:underline">{mode === "login" ? "Create an account" : "Sign in"}</button></p>

@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     RESEND_API_KEY: str = ""
     FRONTEND_PUBLIC_URL: str = "http://localhost:3000"
     HIBP_CHECK_ENABLED: bool = True
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/auth/google/callback"
     GROQ_API_KEY: str = ""
     GROQ_API_KEY_2: str = ""
 
