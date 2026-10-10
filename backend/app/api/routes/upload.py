@@ -20,6 +20,7 @@ from app.db.models import UploadedFile, User
 from app.services.ownership import require_research_session
 from app.services.storage import LocalPrivateStorage
 from app.services.upload_validation import read_pdf_content
+from app.services.malware_scanner import scanner
 from sqlalchemy.orm import Session as DBSession
 from sqlalchemy import select
 
@@ -109,6 +110,12 @@ async def upload_pdf(
     research_session = require_research_session(db, user, session_id, create=True)
 
     content = read_pdf_content(await file.read(settings.MAX_UPLOAD_BYTES + 1))
+    try:
+        await asyncio.to_thread(scanner.scan_bytes, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     result = extract_text_from_pdf(content)
     text = result["text"]
@@ -269,6 +276,12 @@ async def upload_pdf_stream(
     research_session = require_research_session(db, user, session_id, create=True)
 
     content = read_pdf_content(await file.read(settings.MAX_UPLOAD_BYTES + 1))
+    try:
+        await asyncio.to_thread(scanner.scan_bytes, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     async def event_stream():
         if request_id:

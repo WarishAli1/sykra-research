@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     MAX_MESSAGE_LENGTH: int = 12000
     MAX_UPLOAD_BYTES: int = 25 * 1024 * 1024
     STORAGE_ROOT: str = str(_BACKEND_DIR / "uploads")
+    CLAMAV_ENABLED: bool = False
+    CLAMAV_HOST: str = "clamav"
+    CLAMAV_PORT: int = 3310
     GROQ_API_KEY: str = ""
     GROQ_API_KEY_2: str = ""
 
