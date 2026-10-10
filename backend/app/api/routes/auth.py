@@ -15,6 +15,7 @@ from app.config import settings
 from app.db.database import get_db
 from app.db.models import EmailToken, Session, User
 from app.services.email import password_reset_email, send_email, verification_email
+from app.services.breached_password import ensure_not_breached
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 limiter = Limiter(key_func=get_remote_address)
@@ -74,6 +75,10 @@ def public_user(user: User) -> UserRead:
 @router.post("/signup", response_model=UserRead, status_code=201)
 @limiter.limit("5/minute")
 async def signup(request: Request, payload: Credentials, response: Response, db: DBSession = Depends(get_db)):
+    try:
+        ensure_not_breached(payload.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     email = normalize_email(str(payload.email))
     if db.scalar(select(User).where(User.email == email)):
         raise HTTPException(status_code=400, detail="Unable to create account with those details.")
@@ -181,7 +186,11 @@ async def forgot_password(
 
 @router.post("/reset-password")
 @limiter.limit("3/minute")
-def reset_password(request: Request, payload: ResetPayload, response: Response, db: DBSession = Depends(get_db)):
+async def reset_password(request: Request, payload: ResetPayload, response: Response, db: DBSession = Depends(get_db)):
+    try:
+        ensure_not_breached(payload.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     record = db.scalar(
         select(EmailToken).where(
             EmailToken.token_hash == hash_token(payload.token),
@@ -210,6 +219,10 @@ def change_password(
     user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
+    try:
+        ensure_not_breached(payload.new_password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not password_hash.verify(payload.current_password, user.password_hash):
         raise HTTPException(status_code=400, detail="Current password is incorrect.")
 

@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     EMAIL_FROM: str = ""
     RESEND_API_KEY: str = ""
     FRONTEND_PUBLIC_URL: str = "http://localhost:3000"
+    HIBP_CHECK_ENABLED: bool = True
     GROQ_API_KEY: str = ""
     GROQ_API_KEY_2: str = ""
 
