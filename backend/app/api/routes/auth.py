@@ -42,6 +42,11 @@ class ResetPayload(BaseModel):
     password: str = Field(min_length=12, max_length=128)
 
 
+class ChangePasswordPayload(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=12, max_length=128)
+
+
 def _new_token(db: DBSession, user: User, purpose: str, ttl: timedelta) -> str:
     raw = secrets.token_urlsafe(32)
     db.add(
@@ -196,3 +201,31 @@ def reset_password(request: Request, payload: ResetPayload, response: Response, 
     db.commit()
     response.delete_cookie(settings.SESSION_COOKIE_NAME, path="/")
     return {"status": "password_reset"}
+
+
+@router.post("/change-password")
+def change_password(
+    request: Request,
+    payload: ChangePasswordPayload,
+    user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
+    if not password_hash.verify(payload.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+
+    raw_token = request.cookies.get(settings.SESSION_COOKIE_NAME)
+    current_session = db.scalar(
+        select(Session).where(Session.token_hash == hash_token(raw_token or ""))
+    )
+    if not current_session:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    user.password_hash = password_hash.hash(payload.new_password)
+    db.execute(
+        delete(Session).where(
+            Session.user_id == user.id,
+            Session.id != current_session.id,
+        )
+    )
+    db.commit()
+    return {"status": "password_changed"}
