@@ -1,8 +1,9 @@
 import asyncio
+import datetime
 import time
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.models.schemas import (
@@ -36,9 +37,76 @@ from app.services.reference_builder import (
     paper_id_to_ref_id_map,
     rewrite_inline_citations,
 )
+from app.auth import get_current_user
+from app.db.database import get_db
+from app.db.models import Chat, Message, User
+from sqlalchemy import select
+from sqlalchemy.orm import Session as DBSession
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 
 router = APIRouter()
+limiter = Limiter(key_func=get_remote_address)
+
+
+def _get_or_create_chat(db: DBSession, user: User, session_id: str, query: str) -> Chat:
+    try:
+        chat_id = uuid.UUID(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid chat identifier.") from exc
+    chat = db.scalar(select(Chat).where(Chat.id == chat_id, Chat.deleted_at.is_(None)))
+    if chat and chat.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Chat not found.")
+    if not chat:
+        chat = Chat(id=chat_id, user_id=user.id, title=query.strip()[:200] or "New chat")
+        db.add(chat)
+        db.flush()
+    return chat
+
+
+def _persist_message(db: DBSession, chat: Chat, role: str, content: str, citations: dict | None = None, status: str = "complete") -> None:
+    chat.updated_at = datetime.datetime.now(datetime.timezone.utc)
+    db.add(Message(chat_id=chat.id, role=role, content=content[:12000], citations=citations or {}, status=status))
+    db.commit()
+
+
+def _create_message(
+    db: DBSession,
+    chat: Chat,
+    role: str,
+    content: str = "",
+    citations: dict | None = None,
+    status: str = "streaming",
+) -> Message:
+    chat.updated_at = datetime.datetime.now(datetime.timezone.utc)
+    message = Message(
+        chat_id=chat.id,
+        role=role,
+        content=content[:12000],
+        citations=citations or {},
+        status=status,
+    )
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+    return message
+
+
+def _update_message(
+    db: DBSession,
+    message: Message,
+    content: str,
+    *,
+    status: str | None = None,
+    citations: dict | None = None,
+) -> None:
+    message.content = content[:12000]
+    if status:
+        message.status = status
+    if citations is not None:
+        message.citations = citations
+    db.commit()
 
 
 def _build_initial_state(req: ChatRequest, session_id: str, turn_id: str) -> dict:
@@ -312,9 +380,12 @@ def _background_persist_and_filename(
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     session_id = req.session_id or str(uuid.uuid4())
     turn_id = req.turn_id or str(uuid.uuid4())
+    chat_record = _get_or_create_chat(db, user, session_id, req.query)
+    _persist_message(db, chat_record, "user", req.query, status="complete")
+    assistant_message = _create_message(db, chat_record, "assistant")
 
     initial_state = _build_initial_state(req, session_id, turn_id)
 
@@ -326,17 +397,20 @@ async def chat(req: ChatRequest):
     elapsed = round(time.time() - t0, 1)
     print(f"[timing] {elapsed}s | mode={req.response_mode} | query='{req.query}'")
 
-    return await asyncio.to_thread(
+    response = await asyncio.to_thread(
         _finalize_chat_response_blocking,
         req,
         session_id,
         turn_id,
         final_state,
     )
+    _persist_message(db, chat_record, "assistant", response.answer, {"references": [r.model_dump() for r in response.references]})
+    return response
 
 
 @router.post("/chat/stream")
-async def chat_stream(req: ChatRequest):
+@limiter.limit("30/minute")
+async def chat_stream(req: ChatRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     if not req.request_id:
         raise HTTPException(
             status_code=400,
@@ -346,9 +420,13 @@ async def chat_stream(req: ChatRequest):
     request_id = req.request_id
     session_id = req.session_id or str(uuid.uuid4())
     turn_id = req.turn_id or str(uuid.uuid4())
+    chat_record = _get_or_create_chat(db, user, session_id, req.query)
+    _persist_message(db, chat_record, "user", req.query, status="complete")
 
     async def event_stream():
         cancellation.register(request_id)
+        assistant_content = ""
+        finished = False
 
         try:
             if req.response_mode == "graph_research":
@@ -449,11 +527,15 @@ async def chat_stream(req: ChatRequest):
 
                 elif etype == "llm_token":
                     sections_streamed = True
+                    assistant_content += event[1]
+                    _update_message(db, assistant_message, assistant_content)
                     yield sse_event("token", text=event[1], kind="final")
 
                 elif etype == "section":
                     _mid, content = event[1], event[2]
                     sections_streamed = True
+                    assistant_content += content
+                    _update_message(db, assistant_message, assistant_content)
 
                     async for evt in stream_section_words(
                         content,
@@ -507,11 +589,22 @@ async def chat_stream(req: ChatRequest):
                     yield evt
 
                 if final_status.get("completed") is False:
+                    _update_message(db, assistant_message, final_answer, status="stopped")
                     yield sse_event("cancelled")
                     return
+                assistant_content = final_answer
 
             response = _build_stream_response(req, session_id, turn_id, state)
             yield sse_event("result", payload=response.model_dump())
+            assistant_content = response.answer
+            _update_message(
+                db,
+                assistant_message,
+                assistant_content,
+                status="complete",
+                citations={"references": [r.model_dump() for r in response.references]},
+            )
+            finished = True
 
             if not cancellation.is_cancelled(request_id):
                 enriched_state = await asyncio.to_thread(run_enrichment, dict(state))
@@ -555,6 +648,8 @@ async def chat_stream(req: ChatRequest):
             yield sse_event("done")
 
         finally:
+            if not finished and assistant_message.status == "streaming":
+                _update_message(db, assistant_message, assistant_content, status="stopped")
             bridge_cleanup(request_id)
             cancellation.cleanup(request_id)
 
@@ -579,7 +674,7 @@ def chat_cancel(request_id: str):
 
 
 @router.post("/chat/regenerate", response_model=ChatResponse)
-async def regenerate(req: RegenerateRequest):
+async def regenerate(req: RegenerateRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     turn_id = req.turn_id or str(uuid.uuid4())
 
     if req.is_followup:
@@ -616,16 +711,19 @@ async def regenerate(req: RegenerateRequest):
         evidence_mode=req.evidence_mode,
         response_mode=req.response_mode,
     )
+    chat_record = _get_or_create_chat(db, user, req.session_id, req.query)
 
     initial_state = _build_initial_state(chat_req, req.session_id, turn_id)
 
     final_state = await research_graph.ainvoke(initial_state)
     final_state = await asyncio.to_thread(run_enrichment, final_state)
 
-    return await asyncio.to_thread(
+    response = await asyncio.to_thread(
         _finalize_chat_response_blocking,
         chat_req,
         req.session_id,
         turn_id,
         final_state,
     )
+    _persist_message(db, chat_record, "assistant", response.answer, {"references": [r.model_dump() for r in response.references]})
+    return response
