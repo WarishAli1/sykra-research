@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from app.api.routes import (
     chat,
     auth,
+    account,
     chats,
     library,
     upload,
@@ -98,6 +99,7 @@ async def security_middleware(request: Request, call_next):
     return response
 
 app.include_router(auth.router, prefix="/api")
+app.include_router(account.router, prefix="/api")
 app.include_router(chats.router, prefix="/api")
 app.include_router(library.router, prefix="/api")
 protected = [Depends(get_current_user)]
