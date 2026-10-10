@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     CLAMAV_ENABLED: bool = False
     CLAMAV_HOST: str = "clamav"
     CLAMAV_PORT: int = 3310
+    EMAIL_PROVIDER: str = "console"
+    EMAIL_FROM: str = ""
+    RESEND_API_KEY: str = ""
+    FRONTEND_PUBLIC_URL: str = "http://localhost:3000"
     GROQ_API_KEY: str = ""
     GROQ_API_KEY_2: str = ""
 
