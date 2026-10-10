@@ -37,6 +37,7 @@ from app.services.reference_builder import (
     paper_id_to_ref_id_map,
     rewrite_inline_citations,
 )
+from app.services.chat_titles import schedule_title_generation
 from app.auth import get_current_user
 from app.db.database import get_db
 from app.db.models import Chat, Message, User
@@ -384,6 +385,7 @@ async def chat(req: ChatRequest, user: User = Depends(get_current_user), db: DBS
     session_id = req.session_id or str(uuid.uuid4())
     turn_id = req.turn_id or str(uuid.uuid4())
     chat_record = _get_or_create_chat(db, user, session_id, req.query)
+    schedule_title_generation(chat_record.id, req.query)
     _persist_message(db, chat_record, "user", req.query, status="complete")
     assistant_message = _create_message(db, chat_record, "assistant")
 
@@ -421,6 +423,7 @@ async def chat_stream(req: ChatRequest, user: User = Depends(get_current_user), 
     session_id = req.session_id or str(uuid.uuid4())
     turn_id = req.turn_id or str(uuid.uuid4())
     chat_record = _get_or_create_chat(db, user, session_id, req.query)
+    schedule_title_generation(chat_record.id, req.query)
     _persist_message(db, chat_record, "user", req.query, status="complete")
 
     async def event_stream():
@@ -716,6 +719,7 @@ async def regenerate(req: RegenerateRequest, user: User = Depends(get_current_us
         response_mode=req.response_mode,
     )
     chat_record = _get_or_create_chat(db, user, req.session_id, req.query)
+    schedule_title_generation(chat_record.id, req.query)
     _persist_message(db, chat_record, "user", req.query, status="complete")
 
     initial_state = _build_initial_state(chat_req, req.session_id, turn_id)
