@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session as DBSession
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from app.models.schemas import FollowupRequest, FollowupResponse
@@ -11,6 +12,10 @@ from app.services.reference_builder import build_references, format_reference_bl
 from app.services import cancellation
 from app.services.sse import sse_event, stream_text_chunks
 from app.utils.text_sanitizer import sanitize_for_web
+from app.auth import get_current_user
+from app.db.database import get_db
+from app.db.models import User
+from app.services.ownership import require_research_session
 
 router = APIRouter()
 
@@ -26,8 +31,9 @@ def _build_state(req: FollowupRequest, context_text: str):
 
 
 @router.post("/followup", response_model=FollowupResponse)
-def followup(req: FollowupRequest):
+def followup(req: FollowupRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     session_id = req.session_id
+    require_research_session(db, user, session_id)
     question = req.question
 
     history = vector_store.get_session_history(session_id)
@@ -65,11 +71,12 @@ def followup(req: FollowupRequest):
 
 
 @router.post("/followup/stream")
-def followup_stream(req: FollowupRequest):
+def followup_stream(req: FollowupRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     if not req.request_id:
         raise HTTPException(status_code=400, detail="request_id is required.")
 
     session_id = req.session_id
+    require_research_session(db, user, session_id)
     question = req.question
     request_id = req.request_id
 

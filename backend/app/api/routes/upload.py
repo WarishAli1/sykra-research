@@ -4,7 +4,7 @@ import asyncio
 import fitz
 from PIL import Image
 import pytesseract
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from app.services.sse import sse_event
@@ -14,6 +14,12 @@ from app.models.schemas import UploadResponse
 from app.services.vector_store import vector_store
 from app.services.graph_store import graph_store
 from app.config import settings
+from app.auth import get_current_user
+from app.db.database import get_db
+from app.db.models import UploadedFile, User
+from app.services.ownership import require_research_session
+from sqlalchemy.orm import Session as DBSession
+from sqlalchemy import select
 
 router = APIRouter()
 UPLOAD_DIR = "uploads"
@@ -91,11 +97,17 @@ def _safe_filename(filename: str) -> str:
 
 
 @router.post("/upload", response_model=UploadResponse)
-async def upload_pdf(file: UploadFile = File(...), session_id: str = "default"):
+async def upload_pdf(
+    file: UploadFile = File(...),
+    session_id: str = "default",
+    user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
     safe_name = _safe_filename(file.filename)
+    research_session = require_research_session(db, user, session_id, create=True)
     print(f"[upload] Processing file: {safe_name} for session: {session_id}")
 
     content = await file.read()
@@ -116,6 +128,16 @@ async def upload_pdf(file: UploadFile = File(...), session_id: str = "default"):
     file_path = os.path.join(session_dir, safe_name)
     with open(file_path, "wb") as f:
         f.write(content)
+    db.add(
+        UploadedFile(
+            session_id=research_session.id,
+            user_id=user.id,
+            original_filename=file.filename or "upload.pdf",
+            stored_filename=safe_name,
+            size_bytes=len(content),
+        )
+    )
+    db.commit()
 
     file_url = f"{_BACKEND_PUBLIC_URL}/api/uploads/{session_id}/{safe_name}"
 
@@ -148,11 +170,26 @@ async def upload_pdf(file: UploadFile = File(...), session_id: str = "default"):
 
 
 @router.get("/uploads/{session_id}/{filename}")
-async def serve_uploaded_pdf(session_id: str, filename: str):
+async def serve_uploaded_pdf(
+    session_id: str,
+    filename: str,
+    user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
     """This route did not previously exist — file_url pointed at it but nothing
     served it, so 'open PDF' from the Library always 404'd. Path components are
     taken as-is from the URL; combined with _safe_filename() at write time, and
     os.path.basename() here, this blocks '../' traversal on read."""
+    research_session = require_research_session(db, user, session_id)
+    uploaded = db.scalar(
+        select(UploadedFile).where(
+            UploadedFile.session_id == research_session.id,
+            UploadedFile.user_id == user.id,
+            UploadedFile.stored_filename == os.path.basename(filename),
+        )
+    )
+    if not uploaded:
+        raise HTTPException(status_code=404, detail="File not found.")
     safe_session = os.path.basename(session_id)
     safe_name = os.path.basename(filename)
     file_path = os.path.join(UPLOAD_DIR, safe_session, safe_name)
@@ -166,7 +203,20 @@ async def serve_uploaded_pdf(session_id: str, filename: str):
 async def delete_uploaded_pdf(
     session_id: str,
     link: str,
+    user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
 ):
+    research_session = require_research_session(db, user, session_id)
+    filename = os.path.basename(link)
+    uploaded = db.scalar(
+        select(UploadedFile).where(
+            UploadedFile.session_id == research_session.id,
+            UploadedFile.user_id == user.id,
+            UploadedFile.stored_filename == filename,
+        )
+    )
+    if not uploaded:
+        raise HTTPException(status_code=404, detail="File not found.")
     try:
         vector_store.delete_paper(link, session_id)
     except Exception as exc:
@@ -177,7 +227,6 @@ async def delete_uploaded_pdf(
     except Exception as exc:
         print(f"[upload] graph_store.delete_paper failed: {exc}; continuing")
 
-    filename = os.path.basename(link)
     file_path = os.path.join(UPLOAD_DIR, session_id, filename)
 
     try:
@@ -214,11 +263,18 @@ async def _await_with_cancel_watch(task: "asyncio.Task", request_id: str, sentin
 
 
 @router.post("/upload/stream")
-async def upload_pdf_stream(file: UploadFile = File(...), session_id: str = "default", request_id: str = ""):
+async def upload_pdf_stream(
+    file: UploadFile = File(...),
+    session_id: str = "default",
+    request_id: str = "",
+    user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
     safe_name = _safe_filename(file.filename)
+    research_session = require_research_session(db, user, session_id, create=True)
 
     content = await file.read()
 
@@ -281,6 +337,16 @@ async def upload_pdf_stream(file: UploadFile = File(...), session_id: str = "def
                 file_path = os.path.join(session_dir, safe_name)
                 with open(file_path, "wb") as f:
                     f.write(content)
+                db.add(
+                    UploadedFile(
+                        session_id=research_session.id,
+                        user_id=user.id,
+                        original_filename=file.filename or "upload.pdf",
+                        stored_filename=safe_name,
+                        size_bytes=len(content),
+                    )
+                )
+                db.commit()
 
                 file_url = f"{_BACKEND_PUBLIC_URL}/api/uploads/{session_id}/{safe_name}"
 
