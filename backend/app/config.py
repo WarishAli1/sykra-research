@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+psycopg://sykra:change-me@localhost:5432/sykra"
     SESSION_COOKIE_NAME: str = "sykra_session"
     SESSION_TTL_SECONDS: int = 60 * 60 * 24 * 30
-    SECURE_COOKIES: bool = False
+    SECURE_COOKIES: bool = True
     TRUSTED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
     LOGIN_RATE_LIMIT: str = "5/minute"
     LLM_RATE_LIMIT: str = "30/minute"

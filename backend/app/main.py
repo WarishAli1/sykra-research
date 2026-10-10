@@ -8,7 +8,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.api.routes import (
     chat,
@@ -66,12 +66,7 @@ app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=[item.strip() for item in settings.TRUSTED_ORIGINS.split(",") if item.strip()],
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "X-Requested-With"],
     allow_credentials=True,
@@ -80,6 +75,9 @@ app.add_middleware(
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
+    if settings.ENVIRONMENT == "production" and request.url.scheme != "https":
+        secure_url = request.url.replace(scheme="https")
+        return RedirectResponse(str(secure_url), status_code=307)
     origin = request.headers.get("origin")
     trusted = {item.strip() for item in settings.TRUSTED_ORIGINS.split(",") if item.strip()}
     if origin and origin not in trusted:
@@ -94,7 +92,7 @@ async def security_middleware(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'; object-src 'none'"
-    if settings.SECURE_COOKIES:
+    if settings.ENVIRONMENT == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
