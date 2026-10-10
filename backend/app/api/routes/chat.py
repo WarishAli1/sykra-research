@@ -550,6 +550,7 @@ async def chat_stream(req: ChatRequest, user: User = Depends(get_current_user), 
             await graph_task
 
             if graph_error:
+                _update_message(db, assistant_message, assistant_content, status="failed")
                 yield sse_event(
                     "error",
                     message="Something went wrong while generating this answer.",
@@ -674,6 +675,7 @@ def chat_cancel(request_id: str):
 
 
 @router.post("/chat/regenerate", response_model=ChatResponse)
+@router.post("/chat/retry", response_model=ChatResponse, include_in_schema=False)
 async def regenerate(req: RegenerateRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     turn_id = req.turn_id or str(uuid.uuid4())
 
@@ -690,6 +692,8 @@ async def regenerate(req: RegenerateRequest, user: User = Depends(get_current_us
         result: FollowupResponse = await asyncio.to_thread(
             run_followup,
             followup_req,
+            user,
+            db,
         )
 
         return ChatResponse(
@@ -712,6 +716,7 @@ async def regenerate(req: RegenerateRequest, user: User = Depends(get_current_us
         response_mode=req.response_mode,
     )
     chat_record = _get_or_create_chat(db, user, req.session_id, req.query)
+    _persist_message(db, chat_record, "user", req.query, status="complete")
 
     initial_state = _build_initial_state(chat_req, req.session_id, turn_id)
 
