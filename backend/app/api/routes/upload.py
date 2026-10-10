@@ -18,12 +18,14 @@ from app.auth import get_current_user
 from app.db.database import get_db
 from app.db.models import UploadedFile, User
 from app.services.ownership import require_research_session
+from app.services.storage import LocalPrivateStorage
+from app.services.upload_validation import read_pdf_content
 from sqlalchemy.orm import Session as DBSession
 from sqlalchemy import select
 
 router = APIRouter()
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+UPLOAD_DIR = settings.STORAGE_ROOT
+storage = LocalPrivateStorage(UPLOAD_DIR)
 
 _SCANNED_PAGE_CHAR_THRESHOLD = 50
 _DPI = 150
@@ -91,9 +93,9 @@ def extract_text_from_pdf(content: bytes) -> dict:
     }
 
 
-def _safe_filename(filename: str) -> str:
-    base = os.path.basename(filename)
-    return re.sub(r"[^\w\-. ]", "_", base)
+def _original_filename(filename: str | None) -> str:
+    base = os.path.basename(filename or "upload.pdf").strip()
+    return base[:255] or "upload.pdf"
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -103,14 +105,10 @@ async def upload_pdf(
     user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
-
-    safe_name = _safe_filename(file.filename)
+    original_name = _original_filename(file.filename)
     research_session = require_research_session(db, user, session_id, create=True)
-    print(f"[upload] Processing file: {safe_name} for session: {session_id}")
 
-    content = await file.read()
+    content = read_pdf_content(await file.read(settings.MAX_UPLOAD_BYTES + 1))
 
     result = extract_text_from_pdf(content)
     text = result["text"]
@@ -123,26 +121,22 @@ async def upload_pdf(
 
     print(f"[upload] Extracted {len(text)} chars from {result['page_count']} pages (OCR used: {result['ocr_used']})")
 
-    session_dir = os.path.join(UPLOAD_DIR, session_id)
-    os.makedirs(session_dir, exist_ok=True)
-    file_path = os.path.join(session_dir, safe_name)
-    with open(file_path, "wb") as f:
-        f.write(content)
+    stored_name = storage.save(session_id, content)
     db.add(
         UploadedFile(
             session_id=research_session.id,
             user_id=user.id,
-            original_filename=file.filename or "upload.pdf",
-            stored_filename=safe_name,
+            original_filename=original_name,
+            stored_filename=stored_name,
             size_bytes=len(content),
         )
     )
     db.commit()
 
-    file_url = f"{_BACKEND_PUBLIC_URL}/api/uploads/{session_id}/{safe_name}"
+    file_url = f"{_BACKEND_PUBLIC_URL}/api/uploads/{session_id}/{stored_name}"
 
     paper = {
-        "title": safe_name,
+        "title": original_name,
         "link": file_url,
         "file_url": file_url,
         "text": text,
@@ -161,7 +155,7 @@ async def upload_pdf(
     chunk_count = max(len(text.split()) // 500, 1)
 
     return UploadResponse(
-        filename=safe_name,
+        filename=original_name,
         chunks_indexed=chunk_count,
         status="indexed",
         file_url=file_url,
@@ -176,10 +170,7 @@ async def serve_uploaded_pdf(
     user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
-    """This route did not previously exist — file_url pointed at it but nothing
-    served it, so 'open PDF' from the Library always 404'd. Path components are
-    taken as-is from the URL; combined with _safe_filename() at write time, and
-    os.path.basename() here, this blocks '../' traversal on read."""
+    """Serve a stored PDF only after verifying its database ownership."""
     research_session = require_research_session(db, user, session_id)
     uploaded = db.scalar(
         select(UploadedFile).where(
@@ -190,14 +181,19 @@ async def serve_uploaded_pdf(
     )
     if not uploaded:
         raise HTTPException(status_code=404, detail="File not found.")
-    safe_session = os.path.basename(session_id)
     safe_name = os.path.basename(filename)
-    file_path = os.path.join(UPLOAD_DIR, safe_session, safe_name)
-
-    if not os.path.isfile(file_path):
+    try:
+        file_path = storage.resolve(session_id, uploaded.stored_filename)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="File not found.")
+    if not file_path.is_file():
         raise HTTPException(status_code=404, detail="File not found.")
 
-    return FileResponse(file_path, media_type="application/pdf", filename=safe_name)
+    return FileResponse(
+        file_path,
+        media_type="application/pdf",
+        filename=uploaded.original_filename,
+    )
 
 @router.delete("/uploads/{session_id}")
 async def delete_uploaded_pdf(
@@ -227,13 +223,12 @@ async def delete_uploaded_pdf(
     except Exception as exc:
         print(f"[upload] graph_store.delete_paper failed: {exc}; continuing")
 
-    file_path = os.path.join(UPLOAD_DIR, session_id, filename)
-
     try:
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        storage.delete(session_id, uploaded.stored_filename)
+        db.delete(uploaded)
+        db.commit()
     except Exception as exc:
-        print(f"[upload] failed to remove file {file_path}: {exc}; continuing")
+        print(f"[upload] failed to remove uploaded file: {type(exc).__name__}; continuing")
 
     return {"status": "deleted"}
 
@@ -270,13 +265,10 @@ async def upload_pdf_stream(
     user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
-
-    safe_name = _safe_filename(file.filename)
+    original_name = _original_filename(file.filename)
     research_session = require_research_session(db, user, session_id, create=True)
 
-    content = await file.read()
+    content = read_pdf_content(await file.read(settings.MAX_UPLOAD_BYTES + 1))
 
     async def event_stream():
         if request_id:
@@ -331,27 +323,22 @@ async def upload_pdf_stream(
                 )
                 await asyncio.sleep(0)
 
-                session_dir = os.path.join(UPLOAD_DIR, session_id)
-                os.makedirs(session_dir, exist_ok=True)
-
-                file_path = os.path.join(session_dir, safe_name)
-                with open(file_path, "wb") as f:
-                    f.write(content)
+                stored_name = storage.save(session_id, content)
                 db.add(
                     UploadedFile(
                         session_id=research_session.id,
                         user_id=user.id,
-                        original_filename=file.filename or "upload.pdf",
-                        stored_filename=safe_name,
+                        original_filename=original_name,
+                        stored_filename=stored_name,
                         size_bytes=len(content),
                     )
                 )
                 db.commit()
 
-                file_url = f"{_BACKEND_PUBLIC_URL}/api/uploads/{session_id}/{safe_name}"
+                file_url = f"{_BACKEND_PUBLIC_URL}/api/uploads/{session_id}/{stored_name}"
 
                 paper = {
-                    "title": safe_name,
+                    "title": original_name,
                     "link": file_url,
                     "file_url": file_url,
                     "text": text,
@@ -404,12 +391,12 @@ async def upload_pdf_stream(
                         yield sse_event("cancelled")
                         return
                 except asyncio.TimeoutError:
-                    print(f"[upload/stream] graph_store.upsert_paper timed out after {_GRAPH_WRITE_TIMEOUT_SECONDS}s for {safe_name}; continuing without graph data")
+                    print(f"[upload/stream] graph_store.upsert_paper timed out after {_GRAPH_WRITE_TIMEOUT_SECONDS}s; continuing without graph data")
                 except Exception as exc:
                     print(f"[upload/stream] graph_store.upsert_paper failed: {exc}; continuing without graph data")
 
                 yield sse_event("result", payload={
-                    "filename": safe_name,
+                    "filename": original_name,
                     "file_url": file_url,
                     "link": file_url,
                     "status": "indexed",
