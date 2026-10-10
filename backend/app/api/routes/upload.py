@@ -4,7 +4,7 @@ import asyncio
 import fitz
 from PIL import Image
 import pytesseract
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, Request, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from app.services.sse import sse_event
@@ -21,6 +21,7 @@ from app.services.ownership import require_research_session
 from app.services.storage import LocalPrivateStorage
 from app.services.upload_validation import read_pdf_content
 from app.services.malware_scanner import scanner
+from app.services.rate_limit import enforce_rate_limit
 from sqlalchemy.orm import Session as DBSession
 from sqlalchemy import select
 
@@ -101,11 +102,13 @@ def _original_filename(filename: str | None) -> str:
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload_pdf(
+    request: Request,
     file: UploadFile = File(...),
     session_id: str = "default",
     user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
+    enforce_rate_limit(request, "upload", 20)
     original_name = _original_filename(file.filename)
     research_session = require_research_session(db, user, session_id, create=True)
 
@@ -266,12 +269,14 @@ async def _await_with_cancel_watch(task: "asyncio.Task", request_id: str, sentin
 
 @router.post("/upload/stream")
 async def upload_pdf_stream(
+    request: Request,
     file: UploadFile = File(...),
     session_id: str = "default",
     request_id: str = "",
     user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
+    enforce_rate_limit(request, "upload", 20)
     original_name = _original_filename(file.filename)
     research_session = require_research_session(db, user, session_id, create=True)
 

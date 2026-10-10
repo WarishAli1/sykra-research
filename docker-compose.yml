@@ -45,6 +45,13 @@ services:
     volumes:
       - clamav_data:/var/lib/clamav
 
+  redis:
+    image: redis:7-alpine
+    container_name: sykra_redis
+    restart: always
+    expose:
+      - "6379"
+
   backend:
     build:
       context: ./backend
@@ -65,6 +72,7 @@ services:
       CLAMAV_ENABLED: ${CLAMAV_ENABLED:-false}
       CLAMAV_HOST: clamav
       CLAMAV_PORT: 3310
+      REDIS_URL: redis://redis:6379/0
     volumes:
       - ./backend/uploads:/app/uploads
       - ./backend/exports:/app/exports

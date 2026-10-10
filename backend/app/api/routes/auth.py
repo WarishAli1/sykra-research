@@ -18,6 +18,7 @@ from app.db.database import get_db
 from app.db.models import EmailToken, Session, User
 from app.services.email import password_reset_email, send_email, verification_email
 from app.services.breached_password import ensure_not_breached
+from app.services.rate_limit import enforce_rate_limit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 limiter = Limiter(key_func=get_remote_address)
@@ -81,6 +82,7 @@ def _google_configured() -> bool:
 @router.post("/signup", response_model=UserRead, status_code=201)
 @limiter.limit("5/minute")
 async def signup(request: Request, payload: Credentials, response: Response, db: DBSession = Depends(get_db)):
+    enforce_rate_limit(request, "signup", 5)
     try:
         ensure_not_breached(payload.password)
     except ValueError as exc:
@@ -105,6 +107,7 @@ async def signup(request: Request, payload: Credentials, response: Response, db:
 @router.post("/login", response_model=UserRead)
 @limiter.limit("5/minute")
 def login(request: Request, payload: Credentials, response: Response, db: DBSession = Depends(get_db)):
+    enforce_rate_limit(request, "login", 5)
     email = normalize_email(str(payload.email))
     user = db.scalar(select(User).where(User.email == email))
     if not user or not password_hash.verify(payload.password, user.password_hash):
@@ -160,6 +163,7 @@ async def resend_verification(
     payload: EmailPayload,
     db: DBSession = Depends(get_db),
 ):
+    enforce_rate_limit(request, "resend-verification", 3)
     user = db.scalar(select(User).where(User.email == normalize_email(str(payload.email))))
     if user and not user.email_verified_at:
         token = _new_token(db, user, "verify_email", timedelta(hours=24))
@@ -177,6 +181,7 @@ async def forgot_password(
     payload: EmailPayload,
     db: DBSession = Depends(get_db),
 ):
+    enforce_rate_limit(request, "forgot-password", 3)
     user = db.scalar(select(User).where(User.email == normalize_email(str(payload.email))))
     if user:
         token = _new_token(db, user, "password_reset", timedelta(minutes=30))
@@ -193,6 +198,7 @@ async def forgot_password(
 @router.post("/reset-password")
 @limiter.limit("3/minute")
 async def reset_password(request: Request, payload: ResetPayload, response: Response, db: DBSession = Depends(get_db)):
+    enforce_rate_limit(request, "reset-password", 3)
     try:
         ensure_not_breached(payload.password)
     except ValueError as exc:

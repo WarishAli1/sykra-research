@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     RESEND_API_KEY: str = ""
     FRONTEND_PUBLIC_URL: str = "http://localhost:3000"
     HIBP_CHECK_ENABLED: bool = True
+    REDIS_URL: str = ""
+    ENVIRONMENT: str = "development"
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
     GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/auth/google/callback"
