@@ -58,6 +58,11 @@ database, logs, URL, or local storage.
   providers require separately configured services.
 - Current frontend lint and npm audit report pre-existing issues; CI exposes
   them and no breaking forced audit upgrade was applied.
+- The backend dependency audit currently reports ChromaDB advisories without a
+  published fixed version. The Cerebras adapter also constrains
+  `langchain-openai` to the vulnerable 0.3.x line; removing that provider
+  would be a functional change, so it remains an explicitly tracked upstream
+  blocker.
 
 See [`docs/PRODUCTION_CHECKLIST.md`](./docs/PRODUCTION_CHECKLIST.md) for the
 remaining human-only deployment steps.
