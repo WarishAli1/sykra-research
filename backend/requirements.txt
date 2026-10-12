@@ -36,7 +36,7 @@ duckduckgo-search==8.1.1
 
 # Authentication and durable user data
 SQLAlchemy==2.0.36
-psycopg[binary]==3.2.3
+psycopg[binary]==3.3.6
 alembic==1.14.0
 pwdlib[argon2]==0.2.1
 email-validator==2.2.0
