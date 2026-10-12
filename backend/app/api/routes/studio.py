@@ -1,11 +1,16 @@
 from typing import Literal, Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session as DBSession
 from pydantic import BaseModel
 from app.visuals.schema import VisualSpec, recompute_grounding
 from app.visuals.renderers.chart_renderer import render_chart
 from app.visuals.renderers.diagram_renderer import render as render_diagram
 from app.services.vector_store import vector_store
 from app.services.reference_builder import build_references
+from app.auth import get_current_user
+from app.db.database import get_db
+from app.db.models import User
+from app.services.ownership import require_research_session
 
 router = APIRouter()
 
@@ -48,8 +53,9 @@ def _render_spec(spec: VisualSpec) -> str:
 
 
 @router.post("/generate")
-def generate(req: GenerateRequest):
+def generate(req: GenerateRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     spec = req.spec
+    require_research_session(db, user, spec.session_id, create=True)
     spec.grounding = recompute_grounding(spec.payload)
     spec.asset_path = _render_spec(spec)
     _REGISTRY.setdefault(spec.visual_id, []).append(spec)
@@ -58,11 +64,12 @@ def generate(req: GenerateRequest):
 
 
 @router.post("/generate/grounded")
-def generate_grounded(req: GroundedChartRequest):
+def generate_grounded(req: GroundedChartRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     """Paths 2 & 3: build a GROUNDED chart server-side via spec_builder."""
     from app.visuals.spec_builder import build_spec_from_papers, build_spec_from_web_search
 
     title = req.title or req.query or "Grounded chart"
+    require_research_session(db, user, req.session_id)
     if req.path == "papers":
         ranked = [p for p in vector_store.get_session_papers(req.session_id) if p.get("title")][:10]
         if not ranked:
@@ -83,7 +90,7 @@ def generate_grounded(req: GroundedChartRequest):
 
 
 @router.post("/draft")
-def draft(req: DraftRequest):
+def draft(req: DraftRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     """
     Generation-first draft endpoint.
 
@@ -100,6 +107,7 @@ def draft(req: DraftRequest):
     from app.visuals.draft_builder import build_diagram_draft
 
     title = (req.prompt or "").strip().split("\n")[0][:80] or "Draft visual"
+    require_research_session(db, user, req.session_id)
     warnings: list[str] = []
     missing_data: list[str] = []
 
@@ -212,7 +220,8 @@ def draft(req: DraftRequest):
 
 
 @router.post("/{visual_id}/revise")
-def revise(visual_id: str, spec: VisualSpec):
+def revise(visual_id: str, spec: VisualSpec, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    require_research_session(db, user, spec.session_id)
     prev = _REGISTRY.get(visual_id)
     if not prev:
         raise HTTPException(404, "visual not found")
@@ -225,14 +234,16 @@ def revise(visual_id: str, spec: VisualSpec):
 
 
 @router.get("/{visual_id}")
-def get(visual_id: str):
+def get(visual_id: str, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     revs = _REGISTRY.get(visual_id)
     if not revs:
         raise HTTPException(404)
+    require_research_session(db, user, revs[-1].session_id)
     return {"current": revs[-1], "history": revs}
 
 
 @router.get("/session/{session_id}")
-def list_session(session_id: str):
+def list_session(session_id: str, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    require_research_session(db, user, session_id)
     return {"visuals": [revs[-1] for revs in _REGISTRY.values()
                         if revs and revs[-1].session_id == session_id]}

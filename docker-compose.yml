@@ -1,4 +1,22 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sykra_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sykra}
+      POSTGRES_USER: ${POSTGRES_USER:-sykra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sykra} -d ${POSTGRES_DB:-sykra}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
   neo4j:
     image: neo4j:5
     container_name: sykra_neo4j
@@ -18,6 +36,22 @@ services:
       - neo4j_data:/data
       - neo4j_logs:/logs
 
+  clamav:
+    image: clamav/clamav:latest-debian13-slim
+    container_name: sykra_clamav
+    restart: always
+    expose:
+      - "3310"
+    volumes:
+      - clamav_data:/var/lib/clamav
+
+  redis:
+    image: redis:7-alpine
+    container_name: sykra_redis
+    restart: always
+    expose:
+      - "6379"
+
   backend:
     build:
       context: ./backend
@@ -30,14 +64,23 @@ services:
       - "8000:8000"
     environment:
       BACKEND_PUBLIC_URL: http://localhost:8000
+      DATABASE_URL: postgresql+psycopg://sykra:${POSTGRES_PASSWORD}@postgres:5432/sykra
+      TRUSTED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      SECURE_COOKIES: "false"
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USER: neo4j
+      CLAMAV_ENABLED: ${CLAMAV_ENABLED:?Set CLAMAV_ENABLED=true in .env}
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: 3310
+      REDIS_URL: redis://redis:6379/0
     volumes:
       - ./backend/uploads:/app/uploads
       - ./backend/exports:/app/exports
       - chroma_data:/app/app/db/vector_db
       - hf_cache:/app/huggingface_cache
     depends_on:
+      postgres:
+        condition: service_healthy
       neo4j:
         condition: service_healthy
     healthcheck:
@@ -63,7 +106,9 @@ services:
         condition: service_healthy
 
 volumes:
+  postgres_data:
   neo4j_data:
   neo4j_logs:
   chroma_data:
   hf_cache:
+  clamav_data:
