@@ -16,7 +16,7 @@
     "next": "16.4.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "react-force-graph-2d": "^1.29.1",
+    "react-force-graph-2d": "^1.29.2",
     "react-markdown": "^10.1.0",
     "react-pdf": "^10.4.1",
     "rehype-katex": "^7.0.1",
