@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { HTMLAttributes, ImgHTMLAttributes } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -163,18 +164,18 @@ function normalizeMathFences(md: string): string {
   return out.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
-const markdownComponents = {
-  ul({ children, ...props }: any) {
+const markdownComponents: Components = {
+  ul({ children, ...props }: HTMLAttributes<HTMLUListElement>) {
     return <ul {...props} className="my-2 space-y-1 pl-1">{children}</ul>;
   },
-  ol({ children, ...props }: any) {
+  ol({ children, ...props }: HTMLAttributes<HTMLOListElement>) {
     return (
       <ol {...props} className="my-2 space-y-1 pl-1 list-decimal list-inside marker:text-ink-soft">
         {children}
       </ol>
     );
   },
-  li({ children, ordered, ...props }: any) {
+  li({ children, ordered, ...props }: HTMLAttributes<HTMLLIElement> & { ordered?: boolean }) {
     if (ordered) {
       return (
         <li {...props} className="pl-1 text-body leading-relaxed">
@@ -189,7 +190,7 @@ const markdownComponents = {
       </li>
     );
   },
-  table({ children, ...props }: any) {
+  table({ children, ...props }: HTMLAttributes<HTMLTableElement>) {
     return (
       <div className="my-3 overflow-x-auto rounded-md border border-line">
         <table {...props} className="w-full border-collapse text-caption">
@@ -198,34 +199,35 @@ const markdownComponents = {
       </div>
     );
   },
-  thead({ children, ...props }: any) {
+  thead({ children, ...props }: HTMLAttributes<HTMLTableSectionElement>) {
     return (
       <thead {...props} className="bg-paper-dim text-ink">
         {children}
       </thead>
     );
   },
-  th({ children, ...props }: any) {
+  th({ children, ...props }: HTMLAttributes<HTMLTableCellElement>) {
     return (
       <th {...props} className="border-b border-line px-3 py-1.5 text-left font-semibold">
         {children}
       </th>
     );
   },
-  td({ children, ...props }: any) {
+  td({ children, ...props }: HTMLAttributes<HTMLTableCellElement>) {
     return (
       <td {...props} className="border-b border-line/60 px-3 py-1.5 align-top">
         {children}
       </td>
     );
   },
-  img({ src, alt, ...props }: any) {
-    const resolved = resolveAssetUrl(src);
+  img({ src, alt, ...props }: ImgHTMLAttributes<HTMLImageElement>) {
+    const source = typeof src === "string" ? src : undefined;
+    const resolved = resolveAssetUrl(source);
     return (
       <span className="my-3 block">
         <img
           {...props}
-          src={resolved ?? src}
+          src={resolved ?? source}
           alt={alt ?? "Generated chart"}
           className="max-w-full max-h-[360px] w-auto h-auto rounded-md border border-line shadow-sm shadow-black/5 object-contain"
         />

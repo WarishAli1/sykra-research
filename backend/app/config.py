@@ -6,6 +6,31 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
+    NEO4J_AUTH: str = ""
+    MIGRATION_DATABASE_URL: str = ""
+    DATABASE_URL: str = "postgresql://user:password@localhost:5432/sykra"
+    SESSION_COOKIE_NAME: str = "sykra_session"
+    SESSION_TTL_SECONDS: int = 60 * 60 * 24 * 30
+    SECURE_COOKIES: bool = True
+    TRUSTED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+    LOGIN_RATE_LIMIT: str = "5/minute"
+    LLM_RATE_LIMIT: str = "30/minute"
+    MAX_MESSAGE_LENGTH: int = 12000
+    MAX_UPLOAD_BYTES: int = 25 * 1024 * 1024
+    STORAGE_ROOT: str = str(_BACKEND_DIR / "uploads")
+    CLAMAV_ENABLED: bool = False
+    CLAMAV_HOST: str = "clamav"
+    CLAMAV_PORT: int = 3310
+    EMAIL_PROVIDER: str = "console"
+    EMAIL_FROM: str = ""
+    RESEND_API_KEY: str = ""
+    FRONTEND_PUBLIC_URL: str = "http://localhost:3000"
+    HIBP_CHECK_ENABLED: bool = True
+    REDIS_URL: str = ""
+    ENVIRONMENT: str = "development"
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/auth/google/callback"
     GROQ_API_KEY: str = ""
     GROQ_API_KEY_2: str = ""
 
@@ -108,6 +133,7 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = str(_BACKEND_DIR / ".env")
+        extra = "ignore"
 
 
 settings = Settings()

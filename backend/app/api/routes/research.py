@@ -1,8 +1,13 @@
 import asyncio
 import uuid
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy.orm import Session as DBSession
+from app.auth import get_current_user
+from app.db.database import get_db
+from app.db.models import User
+from app.services.ownership import require_research_session
 from app.services import graph_builder
 from app.agents.graph import research_graph, run_enrichment
 from app.services.graph_store import graph_store
@@ -23,8 +28,13 @@ class ResearchResponse(BaseModel):
 
 
 @router.post("/research", response_model=ResearchResponse)
-async def research(req: ResearchRequest):
+async def research(
+    req: ResearchRequest,
+    user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
     session_id = req.session_id or str(uuid.uuid4())
+    require_research_session(db, user, session_id, create=True)
 
     graph_store.clear_session(session_id)
 
@@ -145,7 +155,8 @@ class GraphPathRequest(GraphViewRequest):
     b: str
 
 @router.post("/graph/{session_id}/view")
-def graph_view(session_id: str, req: GraphViewRequest):
+def graph_view(session_id: str, req: GraphViewRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    require_research_session(db, user, session_id)
     enriched = graph_builder.get_enriched(session_id)
     links = req.paper_links if req.scope == "message" else None 
     view = graph_builder.filter_view(enriched, links, req.max_year)
@@ -153,49 +164,57 @@ def graph_view(session_id: str, req: GraphViewRequest):
             "global_stats": enriched["stats"]}
 
 @router.post("/graph/{session_id}/path")
-def graph_path(session_id: str, req: GraphPathRequest):
+def graph_path(session_id: str, req: GraphPathRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    require_research_session(db, user, session_id)
     enriched = graph_builder.get_enriched(session_id)
     links = req.paper_links if req.scope == "message" else None 
     return {"path": graph_builder.shortest_path(enriched, req.a, req.b, links, req.max_year)}
 
 @router.get("/graph/{session_id}/suggest")
-def graph_suggest(session_id: str, q: str = ""):
+def graph_suggest(session_id: str, q: str = "", user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    require_research_session(db, user, session_id)
     return {"matches": graph_builder.suggest_nodes(graph_builder.get_enriched(session_id), q)}
     
 
 @router.post("/graph/{session_id}/query")
-def graph_query(session_id: str, req: GraphQueryRequest):
+def graph_query(session_id: str, req: GraphQueryRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    require_research_session(db, user, session_id)
     return {"matches": graph_builder.semantic_query(session_id, req.q)}
 
 
 @router.get("/graph/{session_id}/ensure")
-def ensure_graph(session_id: str, force: bool = False):
+def ensure_graph(session_id: str, force: bool = False, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     """Single on-demand call used by the Explore view.
     Builds the session graph the first time (few seconds), cached afterwards."""
+    require_research_session(db, user, session_id)
     return graph_builder.build_session_graph(session_id, force=force)
 
 
 @router.get("/graph/{session_id}/clusters")
-def macro_view(session_id: str):
+def macro_view(session_id: str, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    require_research_session(db, user, session_id)
     return {"clusters": graph_builder.get_clusters(session_id)}
 
 
 @router.get("/graph/{session_id}/contradictions")
-def contradictions(session_id: str):
+def contradictions(session_id: str, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    require_research_session(db, user, session_id)
     return {"contradictions": graph_builder.get_contradictions(session_id)}
 
 
 @router.get("/graph/paper/focus")
-def focus_mode(paper_link: str):
+def focus_mode(paper_link: str, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     return graph_store.get_node_neighborhood(paper_link)
 
 
 
 @router.get("/graph/{session_id}/full")
-def full_graph(session_id: str):
+def full_graph(session_id: str, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    require_research_session(db, user, session_id)
     return graph_store.get_full_graph(session_id)
 
 
 @router.get("/graph/{session_id}/turn/{turn_id}/full")
-def turn_graph(session_id: str, turn_id: str):
+def turn_graph(session_id: str, turn_id: str, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    require_research_session(db, user, session_id)
     return graph_store.get_turn_graph(session_id, turn_id)
