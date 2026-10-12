@@ -21,6 +21,8 @@ from app.api.routes import (
     research,
     export,
     filename as filename_route,
+    sessions,
+    avatar,
 )
 from app.config import settings
 from app.db.database import create_tables
@@ -99,6 +101,8 @@ async def security_middleware(request: Request, call_next):
 app.include_router(auth.router, prefix="/api")
 app.include_router(account.router, prefix="/api")
 app.include_router(chats.router, prefix="/api")
+app.include_router(sessions.router, prefix="/api")
+app.include_router(avatar.router, prefix="/api")
 app.include_router(library.router, prefix="/api")
 protected = [Depends(get_current_user)]
 app.include_router(chat.router, prefix="/api", dependencies=protected)

@@ -6,7 +6,9 @@ __pycache__/
 venv/
 env/
 
-.env
+# Local environment files and variants. Keep only explicitly safe templates.
+**/.env*
+!**/.env.example
 
 backend/app/db/vector_db/
 backend/app/db/pdf_cache/
@@ -16,6 +18,17 @@ backend/uploads/
 backend/app/db/graph_cache/
 
 package-lock.json
+
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.pem
+*.key
+*.p12
+*.pfx
+.coverage
+htmlcov/
 
 
 .DS_Store

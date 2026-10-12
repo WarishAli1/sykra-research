@@ -70,7 +70,6 @@ def delete_account(
 ):
     if not password_hash.verify(payload.password, user.password_hash):
         raise HTTPException(status_code=400, detail="Password is incorrect.")
-
     files = db.scalars(select(UploadedFile).where(UploadedFile.user_id == user.id)).all()
     sessions = db.scalars(select(ResearchSession).where(ResearchSession.user_id == user.id)).all()
     for uploaded in files:

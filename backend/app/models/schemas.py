@@ -5,6 +5,7 @@ from typing import Literal, Optional
 class ChatRequest(BaseModel):
     query: str = Field(..., min_length=3)
     session_id: Optional[str] = None
+    chat_id: Optional[str] = None
     turn_id: Optional[str] = None
     evidence_mode: Literal["literature", "uploaded", "blended"] = "literature"
     response_mode: Literal["normal", "researched", "graph_research"] = "normal"
@@ -68,6 +69,7 @@ class ReferenceEntry(BaseModel):
 
 class ChatResponse(BaseModel):
     answer: str
+    chat_id: Optional[str] = None
     session_id: str
     turn_id: str
     papers: list[PaperResult]

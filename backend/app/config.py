@@ -8,7 +8,7 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 class Settings(BaseSettings):
     NEO4J_AUTH: str = ""
     MIGRATION_DATABASE_URL: str = ""
-    DATABASE_URL: str = "postgresql+psycopg://sykra:change-me@localhost:5432/sykra"
+    DATABASE_URL: str = "postgresql://user:password@localhost:5432/sykra"
     SESSION_COOKIE_NAME: str = "sykra_session"
     SESSION_TTL_SECONDS: int = 60 * 60 * 24 * 30
     SECURE_COOKIES: bool = True

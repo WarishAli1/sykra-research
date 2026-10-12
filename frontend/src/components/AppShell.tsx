@@ -1,16 +1,18 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   ChevronsLeft,
   ChevronsRight,
   Library,
   Network,
   ArrowLeft,
-  PanelLeftOpen,
   Plus,
   Shapes,
   LogOut,
-  UserRound,
+  Trash2,
+  Pencil,
+  Pin,
 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
@@ -26,6 +28,9 @@ const PdfViewer = dynamic(() => import("./PdfViewer").then((m) => m.PdfViewer), 
   ssr: false,
 });
 import { PdfViewerBoundary } from "./PdfViewerBoundary";
+import { ConfirmDialog, NameDialog } from "./ConfirmDialog";
+import { SessionDashboard, type DashboardSession } from "./SessionDashboard";
+import { Avatar } from "./Avatar";
 
 const isHttpUrl = (v?: string | null) =>
   !!v && /^https?:\/\//i.test(v.replace(/^user_upload:\/\//i, ""));
@@ -58,7 +63,7 @@ const PDF_WIDTH_DEFAULT = 50;
 const PDF_WIDTH_MIN = 30;
 const PDF_WIDTH_MAX = 70;
 
-type ChatSummary = { id: string; title: string; created_at: string; updated_at: string };
+type ChatSummary = { id: string; title: string; session_id?: string; session_name?: string | null; created_at: string; updated_at: string; pinned_at?: string | null };
 
 function groupChats(chats: ChatSummary[]): [string, ChatSummary[]][] {
   const now = new Date();
@@ -76,18 +81,47 @@ function groupChats(chats: ChatSummary[]): [string, ChatSummary[]][] {
     else if (days < 7) groups["Previous 7 days"].push(chat);
     else groups.Older.push(chat);
   }
+
   return Object.entries(groups).filter(([, items]) => items.length > 0);
 }
 
-export function AppShell() {
-  const [currentUser, setCurrentUser] = useState<{ name: string | null; email: string } | null>(null);
+function SessionMenu({ onRename, onDelete }: { onRename: () => void; onDelete: () => void }) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(event.target as Node)) setOpen(false); };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", escape); };
+  }, [open]);
+  return <div ref={menuRef} className="relative shrink-0"><button onClick={() => setOpen((value) => !value)} aria-label="Open menu" aria-expanded={open} className="rounded-md p-1.5 text-ink-soft hover:bg-paper"><span className="text-lg leading-none">…</span></button>{open && <div className="absolute right-0 top-8 z-40 w-32 rounded-xl border border-line bg-white p-1.5 shadow-xl"><button onClick={() => { setOpen(false); onRename(); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-paper"><Pencil className="h-3.5 w-3.5" />Rename</button><button onClick={() => { setOpen(false); onDelete(); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-danger hover:bg-danger/5"><Trash2 className="h-3.5 w-3.5" />Delete</button></div>}</div>;
+}
+
+function ChatHistory({ chats, activeChatId, sessionId, onRename, onDelete, onPin }: { chats: ChatSummary[]; activeChatId?: string; sessionId: string; onRename: (chat: ChatSummary) => void; onDelete: (chat: ChatSummary) => void; onPin: (chat: ChatSummary) => void }) {
+  const pinned = chats.filter((chat) => chat.pinned_at);
+  const groups = groupChats(chats.filter((chat) => !chat.pinned_at));
+  const renderRow = (chat: ChatSummary) => <div key={chat.id} className={`group/chat flex min-w-0 items-center gap-1 rounded-md ${activeChatId === chat.id ? "bg-gold-tint text-ink font-medium" : "text-ink-soft"}`}><Link href={`/app/s/${sessionId}/chat/${chat.id}`} className="min-w-0 flex-1 truncate px-2.5 py-1.5 text-caption hover:text-ink">{chat.title}</Link><div className={`mr-1 flex shrink-0 gap-0.5 ${activeChatId === chat.id ? "" : "opacity-0 group-hover/chat:opacity-100"}`}><button onClick={() => onPin(chat)} aria-label={chat.pinned_at ? "Unpin chat" : "Pin chat"} className="rounded p-1 hover:bg-paper"><Pin className={`h-3 w-3 ${chat.pinned_at ? "fill-current" : ""}`} /></button><SessionMenu onRename={() => onRename(chat)} onDelete={() => onDelete(chat)} /></div></div>;
+  return <>{pinned.length > 0 && <div className="mb-3"><p className="px-1.5 pb-1 text-micro font-semibold uppercase tracking-wide text-ink-soft/60">PINNED</p>{pinned.map(renderRow)}</div>}{groups.map(([group, items]) => <div key={group} className="mb-3"><p className="px-1.5 pb-1 text-micro font-semibold uppercase tracking-wide text-ink-soft/60">{group}</p>{items.map(renderRow)}</div>)}</>;
+}
+
+export function AppShell({ initialSessionId, initialChatId, dashboard = false }: { initialSessionId?: string; initialChatId?: string; dashboard?: boolean }) {
+  const router = useRouter();
+  const [currentUser, setCurrentUser] = useState<{ name: string | null; email: string; image: string | null } | null>(null);
   const [recentChats, setRecentChats] = useState<ChatSummary[]>([]);
   const [papers, setPapers] = useState<Paper[]>([]);
   const [sessionId, setSessionId] = useState("");
+  const [sessionName, setSessionName] = useState("Session");
+  const [sessions, setSessions] = useState<DashboardSession[]>([]);
+  const [dialog, setDialog] = useState<{ kind: "create-session" | "rename-session" | "rename-chat"; item?: DashboardSession | ChatSummary } | null>(null);
+  const [confirm, setConfirm] = useState<{ kind: "session" | "chat"; item: DashboardSession | ChatSummary } | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
   const [uploadedFilename, setUploadedFilename] = useState<string | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [railOpen, setRailOpen] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [tab, setTab] = useState<"library" | "explore">("library");
   const [showGraphView, setShowGraphView] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -101,18 +135,38 @@ export function AppShell() {
   // Session IDs are client-only so the app can keep server and client markup aligned.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setSessionId(crypto.randomUUID());
+    setSessionId(initialSessionId || crypto.randomUUID());
+  }, [initialSessionId]);
+
+  useEffect(() => {
+    api.listSessions().then(setSessions).catch(() => setSessions([]));
   }, []);
+
+  useEffect(() => {
+    if (initialSessionId) api.getSession(initialSessionId).then((session) => setSessionName(session.name)).catch(() => setSessionName("Session"));
+  }, [initialSessionId]);
 
   useEffect(() => {
     fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000/api"}/auth/me`, { credentials: "include" })
       .then((response) => (response.ok ? response.json() : null))
-      .then((user: { name: string | null; email: string } | null) => {
+      .then((user: { name: string | null; email: string; image: string | null } | null) => {
         setCurrentUser(user);
-        if (user) api.listChats().then(setRecentChats).catch(() => setRecentChats([]));
+        if (user) api.listChats(undefined, initialSessionId).then(setRecentChats).catch(() => setRecentChats([]));
       })
       .catch(() => setCurrentUser(null));
-  }, []);
+  }, [initialSessionId]);
+
+  useEffect(() => {
+    if (!initialChatId) return;
+    api.getChat(initialChatId).then((messages) => {
+      setTurns(messages.map((message) => ({
+        id: message.id,
+        role: message.role as ChatTurn["role"],
+        text: message.content,
+        references: Array.isArray(message.citations?.references) ? message.citations.references as ChatTurn["references"] : [],
+      })));
+    }).catch(() => setTurns([]));
+  }, [initialChatId]);
 
   const handleLogout = async () => {
     await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000/api"}/auth/logout`, {
@@ -212,16 +266,69 @@ export function AppShell() {
     window.addEventListener("mouseup", onUp);
   }, []);
 
-  const handleNewChat = () => {
+  const handleNewChat = async () => {
     setTurns([]);
     setPapers([]);
     setUploadedFilename(null);
     setUploadState({ status: "idle", filename: "", progress: "", stage: "", fileUrl: "" });
     setHasUpload(false);
     setEvidenceMode("literature");
-    setSessionId(crypto.randomUUID());
+    if (sessionId && !initialChatId) return;
+    if (sessionId) router.push(`/app/s/${sessionId}`);
     setShowGraphView(false);
     setShowStudio(false);
+  };
+  const handleRenameChat = async (chat: ChatSummary) => {
+    setDialog({ kind: "rename-chat", item: chat });
+  };
+  const handleDeleteChat = async (chat: ChatSummary) => {
+    setConfirm({ kind: "chat", item: chat });
+  };
+  const handlePinChat = async (chat: ChatSummary) => {
+    const updated = await api.pinChat(chat.id);
+    setRecentChats((items) => items.map((item) => item.id === chat.id ? { ...item, pinned_at: updated.pinned_at } : item));
+  };
+  const handleCreateSession = () => setDialog({ kind: "create-session" });
+  const handleRenameSession = (session: DashboardSession) => setDialog({ kind: "rename-session", item: session });
+  const handleDeleteSession = (session: DashboardSession) => setConfirm({ kind: "session", item: session });
+  const submitDialog = async (name: string) => {
+    if (!dialog) return;
+    if (dialog.kind === "create-session") {
+      const created = await api.createSession(name);
+      setSessions((items) => [created as DashboardSession, ...items]);
+      setDialog(null);
+      router.push(`/app/s/${created.id}`);
+      return;
+    }
+    if (dialog.kind === "rename-session") {
+      const session = dialog.item as DashboardSession;
+      const updated = await api.renameSession(session.id, name);
+      setSessions((items) => items.map((item) => item.id === session.id ? { ...item, name: updated.name, updated_at: updated.updated_at } : item));
+      if (session.id === initialSessionId) setSessionName(updated.name);
+    } else {
+      const chat = dialog.item as ChatSummary;
+      const updated = await api.renameChat(chat.id, name);
+      setRecentChats((items) => items.map((item) => item.id === chat.id ? { ...item, title: updated.title, updated_at: updated.updated_at } : item));
+    }
+    setDialog(null);
+  };
+  const confirmDelete = async () => {
+    if (!confirm) return;
+    if (confirm.kind === "chat") {
+      const chat = confirm.item as ChatSummary;
+      await api.deleteChat(chat.id);
+      setRecentChats((items) => items.filter((item) => item.id !== chat.id));
+      if (initialChatId === chat.id) router.push(`/app/s/${sessionId}`);
+      setToast("Chat deleted");
+    } else {
+      const session = confirm.item as DashboardSession;
+      await api.deleteSession(session.id);
+      setSessions((items) => items.filter((item) => item.id !== session.id));
+      if (session.id === initialSessionId) router.push("/app/dashboard");
+      setToast("Session deleted");
+    }
+    setConfirm(null);
+    window.setTimeout(() => setToast(null), 2200);
   };
   const handleDeletePaper = async (paper: Paper) => {
     const remainingPapers = papers.filter((p) => p.link !== paper.link);
@@ -322,17 +429,18 @@ export function AppShell() {
       >
         {sidebarOpen ? (
           <div className="flex h-full flex-col" style={{ width: SIDEBAR_WIDTH }}>
-            <div className="flex items-center gap-2.5 px-4 py-4 shrink-0">
+            <div className="flex h-16 items-center gap-2.5 px-4 shrink-0">
               <Link href="/" aria-label="Back to Sykra Research home" className="shrink-0 rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo">
                 <Image
                   src="/sykra-logo.svg"
                   alt="Sykra Research"
-                  width={180}
+                  width={32}
                   height={32}
-                  className="w-[150px] h-auto shrink-0 -mt-3"
+                  className="h-8 w-8 shrink-0 object-contain"
                   priority
                 />
               </Link>
+              <span className="truncate font-serif text-[18px] font-medium text-ink">Sykra Research</span>
               <button
                 onClick={() => setSidebarOpen(false)}
                 aria-label="Collapse sidebar"
@@ -342,21 +450,14 @@ export function AppShell() {
               </button>
             </div>
 
-            <div className="px-3">
-              <button
-                onClick={handleNewChat}
-                className="flex w-full items-center gap-2 rounded-lg bg-gold-tint border border-gold/40 px-3 py-2 text-caption font-medium text-ink hover:bg-gold-tint/70 hover:border-gold/60 transition-colors"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                New Chat
-              </button>
-            </div>
-
-            <div className="mt-5 px-3">
-              <p className="px-1.5 pb-1.5 text-label text-ink-soft/70">
-                Workspace
-              </p>
-
+            {dashboard ? <div className="flex min-h-0 flex-1 flex-col px-3">
+              <button onClick={handleCreateSession} className="flex w-full items-center gap-2 rounded-lg bg-gold-tint border border-gold/40 px-3 py-2 text-caption font-medium text-ink hover:bg-gold-tint/70 transition-colors"><Plus className="h-3.5 w-3.5" />New Session</button>
+              <p className="mt-6 px-1.5 pb-2 text-label text-ink-soft/70">SESSIONS</p>
+              <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">{sessions.slice(0, 5).map((session) => <div key={session.id} className={`group/session flex items-center gap-1 rounded-md ${session.id === initialSessionId ? "bg-gold-tint text-ink font-medium" : "text-ink-soft"}`}><button onClick={() => router.push(`/app/s/${session.id}`)} className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2.5 py-2 text-left text-caption hover:text-ink"><span className="h-2 w-2 shrink-0 rounded-full bg-sage" /><span className="truncate">{session.name}</span></button><SessionMenu onRename={() => handleRenameSession(session)} onDelete={() => handleDeleteSession(session)} /></div>)}</div>
+            </div> : <div className="flex min-h-0 flex-1 flex-col px-3">
+              <Link href="/app/dashboard" className="mb-4 flex items-center gap-2 px-2 text-caption text-ink-soft hover:text-ink"><ArrowLeft className="h-3.5 w-3.5" /> Dashboard</Link>
+              <div className="flex items-center justify-between px-2"><div className="min-w-0"><p className="text-label text-ink-soft/70">SESSION</p><p className="truncate text-sm font-medium text-ink">{sessionName}</p></div><SessionMenu onRename={() => { const item = sessions.find((session) => session.id === initialSessionId); if (item) handleRenameSession(item); }} onDelete={() => { const item = sessions.find((session) => session.id === initialSessionId); if (item) handleDeleteSession(item); }} /></div>
+              <div className="mt-4 space-y-1">
               <button
                 onClick={() => {
                   setShowGraphView(false);
@@ -378,8 +479,6 @@ export function AppShell() {
                   </span>
                 )}
               </button>
-              {recentChats.length > 0 && <div className="mt-5"><p className="px-1.5 pb-1.5 text-label text-ink-soft/70">Recent chats</p>{groupChats(recentChats).map(([group, chats]) => <div key={group} className="mb-3"><p className="px-1.5 pb-1 text-micro font-semibold uppercase tracking-wide text-ink-soft/60">{group}</p><div className="space-y-0.5">{chats.map((chat) => <Link key={chat.id} href={`/app/c/${chat.id}`} className="block truncate rounded-md px-2.5 py-1.5 text-caption text-ink-soft hover:bg-paper hover:text-ink">{chat.title}</Link>)}</div></div>)}</div>}
-
               <button
                 onClick={handleOpenGraph}
                 className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-caption transition-colors ${
@@ -403,15 +502,22 @@ export function AppShell() {
                   <Shapes className="h-3.5 w-3.5 shrink-0" />
                 Studio
               </button>
-            </div>
+              </div>
+              <div className="mt-4 border-t border-line pt-4">
+                <button onClick={handleNewChat} className="flex w-full items-center gap-2 rounded-lg bg-gold-tint border border-gold/40 px-3 py-2 text-caption font-medium text-ink hover:bg-gold-tint/70"><Plus className="h-3.5 w-3.5" />New Chat</button>
+                <p className="mt-5 px-1.5 pb-1.5 text-label text-ink-soft/70">CHATS</p>
+                <div className="min-h-0 max-h-[40vh] flex-1 overflow-y-auto">{recentChats.length === 0 ? <p className="px-2 py-3 text-caption text-ink-soft">No chats yet</p> : <ChatHistory chats={recentChats} activeChatId={initialChatId} sessionId={sessionId} onRename={handleRenameChat} onDelete={handleDeleteChat} onPin={handlePinChat} />}</div>
+              </div>
+            </div>}
 
             <div className="mt-auto border-t border-line px-3 py-3 shrink-0">
-              <div className="flex items-center gap-2 rounded-lg px-2 py-2">
-                <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-indigo-tint text-indigo"><UserRound className="h-3.5 w-3.5" /></span>
+              <div className="group relative">
+              <button onClick={() => setUserMenuOpen((value) => !value)} className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-paper">
+                <Avatar name={currentUser?.name} email={currentUser?.email} className="h-7 w-7" />
                 <div className="min-w-0 flex-1"><p className="truncate text-caption font-medium text-ink">{currentUser?.name || "Researcher"}</p><p className="truncate text-micro text-ink-soft">{currentUser?.email || "Signed in"}</p></div>
-                <button onClick={handleLogout} aria-label="Log out" title="Log out" className="rounded-md p-1.5 text-ink-soft hover:bg-paper hover:text-ink"><LogOut className="h-3.5 w-3.5" /></button>
+              </button>
+              {userMenuOpen && <div className="absolute bottom-14 left-2 z-50 w-52 rounded-xl border border-line bg-white p-2 shadow-xl"><div className="mb-1 flex items-center gap-2 border-b border-line px-2 pb-2"><Avatar name={currentUser?.name} email={currentUser?.email} className="h-8 w-8" /><span className="min-w-0 truncate text-xs font-medium">{currentUser?.name || currentUser?.email}</span></div><Link href="/app/settings" className="block rounded-lg px-3 py-2 text-xs hover:bg-paper">Settings</Link><Link href="/" className="block rounded-lg px-3 py-2 text-xs hover:bg-paper">← Back to website</Link><button onClick={handleLogout} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-danger hover:bg-danger/5"><LogOut className="h-3.5 w-3.5" />Log out</button></div>}
               </div>
-              <Link href="/app/settings" className="mt-1 block px-2 text-micro text-ink-soft hover:text-ink">Settings</Link>
             </div>
           </div>
         ) : (
@@ -419,14 +525,19 @@ export function AppShell() {
             className="flex h-full flex-col items-center gap-2 py-3"
             style={{ width: SIDEBAR_COLLAPSED_WIDTH }}
           >
-            <button
-              onClick={() => setSidebarOpen(true)}
-              aria-label="Expand sidebar"
-              title="Expand sidebar"
-              className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-soft hover:bg-paper hover:text-ink transition-colors"
-            >
-              <PanelLeftOpen className="h-4 w-4" />
-            </button>
+            <div className="flex items-center gap-1">
+              <Link href="/" aria-label="Back to Sykra Research home" title="Website" className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-soft hover:bg-paper hover:text-ink transition-colors">
+                <img src="/sykra-logo.svg" alt="Sykra Research" className="h-8 w-8 object-contain" />
+              </Link>
+              <button
+                onClick={() => setSidebarOpen(true)}
+                aria-label="Expand sidebar"
+                title="Expand sidebar"
+                className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-soft hover:bg-paper hover:text-ink transition-colors"
+              >
+                <ChevronsRight className="h-4 w-4" />
+              </button>
+            </div>
 
             <div className="my-1 h-px w-6 bg-line" aria-hidden="true" />
 
@@ -534,7 +645,7 @@ export function AppShell() {
 
       <div ref={containerRef} className="flex flex-1 min-h-0 min-w-0">
         <main className="flex-1 min-w-0">
-          {showStudio ? (
+          {dashboard ? <SessionDashboard sessions={sessions} chats={recentChats} userName={currentUser?.name} onOpen={(id) => router.push(`/app/s/${id}`)} onRename={handleRenameSession} onDelete={handleDeleteSession} onCreateSession={handleCreateSession} /> : showStudio ? (
             <StudioView
               sessionId={sessionId}
               getConversationContext={getConversationContext}
@@ -565,6 +676,7 @@ export function AppShell() {
               turns={turns}
               setTurns={setTurns}
               sessionId={sessionId}
+              chatId={initialChatId}
               onOpenGraph={handleOpenGraph}
               onDeletePaper={async (link) => {
                 const paper =
@@ -587,7 +699,7 @@ export function AppShell() {
           )}
         </main>
 
-        {!pdfViewerUrl && !showStudio && (
+        {!dashboard && !pdfViewerUrl && !showStudio && (
           <div
             className="relative shrink-0 h-full border-l border-line overflow-hidden transition-[width] duration-200 ease-out"
             style={{ width: railOpen ? RAIL_WIDTH : STRIP_WIDTH }}
@@ -684,6 +796,9 @@ export function AppShell() {
       {draggingPdf && (
         <div className="fixed inset-0 z-[60] cursor-col-resize" aria-hidden="true" />
       )}
+      <NameDialog open={dialog !== null} title={dialog?.kind === "create-session" ? "New session" : dialog?.kind === "rename-session" ? "Rename session" : "Rename chat"} initialValue={dialog?.item && "name" in dialog.item ? dialog.item.name : dialog?.item && "title" in dialog.item ? dialog.item.title : ""} onCancel={() => setDialog(null)} onSubmit={submitDialog} />
+      <ConfirmDialog open={confirm !== null} title={confirm?.kind === "chat" ? "Delete chat?" : "Delete session?"} body={confirm?.kind === "chat" ? `This will permanently delete "${(confirm.item as ChatSummary).title}" and all its messages. This can't be undone.` : `This will permanently delete "${(confirm?.item as DashboardSession)?.name}" including ${(confirm?.item as DashboardSession)?.chat_count} ${(confirm?.item as DashboardSession)?.chat_count === 1 ? "chat" : "chats"} and ${(confirm?.item as DashboardSession)?.paper_count} ${(confirm?.item as DashboardSession)?.paper_count === 1 ? "paper" : "papers"}.`} onCancel={() => setConfirm(null)} onConfirm={confirmDelete} />
+      {toast && <div role="status" className="fixed bottom-5 left-1/2 z-[110] -translate-x-1/2 rounded-full bg-forest px-4 py-2 text-sm font-medium text-white shadow-lg">{toast}</div>}
     </div>
   );
 }

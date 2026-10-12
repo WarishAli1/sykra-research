@@ -120,6 +120,7 @@ export type ChatTurn = {
 export type ChatRequest = {
   query: string;
   session_id?: string;
+  chat_id?: string;
   turn_id?: string;
   evidence_mode?: EvidenceMode;
   response_mode: ResponseMode;
@@ -128,6 +129,7 @@ export type ChatRequest = {
 };
 
 export type ChatResponse = {
+  chat_id?: string;
   answer: string;
   session_id: string;
   turn_id: string;

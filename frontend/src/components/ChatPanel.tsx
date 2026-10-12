@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { ArrowUp, Paperclip, Loader2, Square, MoreHorizontal, Pin, Share2, Check } from "lucide-react";
 import Image from "next/image";
 import { api, ApiError, ApiAbortError } from "@/lib/api";
@@ -38,6 +39,7 @@ export function ChatPanel({
   turns,
   setTurns,
   sessionId,
+  chatId,
   onNewPapers,
   onOpenGraph,
   onOpenPdf,
@@ -54,6 +56,7 @@ export function ChatPanel({
   turns: ChatTurn[];
   setTurns: React.Dispatch<React.SetStateAction<ChatTurn[]>>;
   sessionId: string;
+  chatId?: string;
   onNewPapers: (papers: Paper[]) => void;
   onOpenGraph: () => void;
   onOpenPdf: (url: string) => void;
@@ -79,6 +82,7 @@ export function ChatPanel({
   evidenceMode: EvidenceMode;
   setEvidenceMode: React.Dispatch<React.SetStateAction<EvidenceMode>>;
 }) {
+  const router = useRouter();
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -295,6 +299,7 @@ export function ChatPanel({
       case "result": {
         if (opts.isChat) {
           const res = event.payload as ChatResponse;
+          if (res.chat_id && !chatId) router.replace(`/app/s/${sessionId}/chat/${res.chat_id}`);
           onNewPapers(res.papers ?? []);
           updateTurn(turnId, (prev) => {
             const finalAnswer = (res.answer ?? "").trim();
@@ -371,6 +376,7 @@ export function ChatPanel({
         {
           query,
           session_id: sessionId,
+          chat_id: chatId,
           turn_id: kgTurnId,
           evidence_mode: evMode,
           response_mode: mode,

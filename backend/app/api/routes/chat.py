@@ -3,7 +3,7 @@ import datetime
 import time
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.models.schemas import (
@@ -40,7 +40,7 @@ from app.services.reference_builder import (
 from app.services.chat_titles import schedule_title_generation
 from app.auth import get_current_user
 from app.db.database import get_db
-from app.db.models import Chat, Message, User
+from app.db.models import Chat, Message, ResearchSession, User
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
 from slowapi import Limiter
@@ -51,23 +51,34 @@ router = APIRouter()
 limiter = Limiter(key_func=get_remote_address)
 
 
-def _get_or_create_chat(db: DBSession, user: User, session_id: str, query: str) -> Chat:
+def _get_or_create_chat(db: DBSession, user: User, session_id: str, query: str, requested_chat_id: str | None = None) -> Chat:
     try:
-        chat_id = uuid.UUID(session_id)
+        session_uuid = uuid.UUID(session_id)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail="Invalid chat identifier.") from exc
-    chat = db.scalar(select(Chat).where(Chat.id == chat_id, Chat.deleted_at.is_(None)))
-    if chat and chat.user_id != user.id:
-        raise HTTPException(status_code=404, detail="Chat not found.")
-    if not chat:
-        chat = Chat(id=chat_id, user_id=user.id, title=query.strip()[:200] or "New chat")
-        db.add(chat)
-        db.flush()
+        raise HTTPException(status_code=422, detail="Invalid session identifier.") from exc
+    research_session = db.scalar(select(ResearchSession).where(ResearchSession.id == session_uuid, ResearchSession.user_id == user.id))
+    if not research_session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    if requested_chat_id:
+        try:
+            chat_uuid = uuid.UUID(requested_chat_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid chat identifier.") from exc
+        chat = db.scalar(select(Chat).where(Chat.id == chat_uuid, Chat.session_id == session_uuid, Chat.user_id == user.id, Chat.deleted_at.is_(None)))
+        if not chat:
+            raise HTTPException(status_code=404, detail="Chat not found.")
+        return chat
+    chat = Chat(id=uuid.uuid4(), session_id=session_uuid, user_id=user.id, title="New chat")
+    db.add(chat)
+    db.flush()
     return chat
 
 
 def _persist_message(db: DBSession, chat: Chat, role: str, content: str, citations: dict | None = None, status: str = "complete") -> None:
-    chat.updated_at = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    chat.updated_at = now
+    if chat.research_session:
+        chat.research_session.updated_at = now
     db.add(Message(chat_id=chat.id, role=role, content=content[:12000], citations=citations or {}, status=status))
     db.commit()
 
@@ -80,7 +91,10 @@ def _create_message(
     citations: dict | None = None,
     status: str = "streaming",
 ) -> Message:
-    chat.updated_at = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    chat.updated_at = now
+    if chat.research_session:
+        chat.research_session.updated_at = now
     message = Message(
         chat_id=chat.id,
         role=role,
@@ -103,6 +117,8 @@ def _update_message(
     citations: dict | None = None,
 ) -> None:
     message.content = content[:12000]
+    if message.chat.research_session:
+        message.chat.research_session.updated_at = datetime.datetime.now(datetime.timezone.utc)
     if status:
         message.status = status
     if citations is not None:
@@ -384,7 +400,7 @@ def _background_persist_and_filename(
 async def chat(req: ChatRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     session_id = req.session_id or str(uuid.uuid4())
     turn_id = req.turn_id or str(uuid.uuid4())
-    chat_record = _get_or_create_chat(db, user, session_id, req.query)
+    chat_record = _get_or_create_chat(db, user, session_id, req.query, req.chat_id)
     schedule_title_generation(chat_record.id, req.query)
     _persist_message(db, chat_record, "user", req.query, status="complete")
     assistant_message = _create_message(db, chat_record, "assistant")
@@ -412,7 +428,12 @@ async def chat(req: ChatRequest, user: User = Depends(get_current_user), db: DBS
 
 @router.post("/chat/stream")
 @limiter.limit("30/minute")
-async def chat_stream(req: ChatRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+async def chat_stream(
+    request: Request,
+    req: ChatRequest,
+    user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
     if not req.request_id:
         raise HTTPException(
             status_code=400,
@@ -422,7 +443,7 @@ async def chat_stream(req: ChatRequest, user: User = Depends(get_current_user), 
     request_id = req.request_id
     session_id = req.session_id or str(uuid.uuid4())
     turn_id = req.turn_id or str(uuid.uuid4())
-    chat_record = _get_or_create_chat(db, user, session_id, req.query)
+    chat_record = _get_or_create_chat(db, user, session_id, req.query, req.chat_id)
     schedule_title_generation(chat_record.id, req.query)
     _persist_message(db, chat_record, "user", req.query, status="complete")
 
@@ -599,6 +620,7 @@ async def chat_stream(req: ChatRequest, user: User = Depends(get_current_user), 
                 assistant_content = final_answer
 
             response = _build_stream_response(req, session_id, turn_id, state)
+            response.chat_id = str(chat_record.id)
             yield sse_event("result", payload=response.model_dump())
             assistant_content = response.answer
             _update_message(
@@ -734,5 +756,6 @@ async def regenerate(req: RegenerateRequest, user: User = Depends(get_current_us
         turn_id,
         final_state,
     )
+    response.chat_id = str(chat_record.id)
     _persist_message(db, chat_record, "assistant", response.answer, {"references": [r.model_dump() for r in response.references]})
     return response

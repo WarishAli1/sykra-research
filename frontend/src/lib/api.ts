@@ -89,6 +89,7 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
     throw new ApiError(message, response.status);
   }
 
+  if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
 
@@ -178,15 +179,42 @@ async function streamRequest<T>(
 }
 
 export const api = {
-  me(): Promise<{ id: string; email: string; name: string | null }> {
+  me(): Promise<{ id: string; email: string; name: string | null; image: string | null }> {
     return request("/auth/me", { method: "GET" });
   },
-  listChats(before?: string): Promise<{ id: string; title: string; created_at: string; updated_at: string }[]> {
-    const query = before ? `?before=${encodeURIComponent(before)}` : "";
+  listChats(before?: string, sessionId?: string): Promise<{ id: string; session_id?: string; session_name?: string | null; title: string; created_at: string; updated_at: string; pinned_at?: string | null }[]> {
+    const query = queryString({ before, session_id: sessionId });
     return request(`/chats${query}`, { method: "GET" });
+  },
+  listSessions(): Promise<{ id: string; name: string; created_at: string; updated_at: string; chat_count: number; paper_count: number }[]> {
+    return request("/sessions", { method: "GET" });
+  },
+  createSession(name: string): Promise<{ id: string; name: string }> {
+    return request("/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+  },
+  getSession(sessionId: string): Promise<{ id: string; name: string }> {
+    return request(`/sessions/${encodeURIComponent(sessionId)}`, { method: "GET" });
+  },
+  renameSession(sessionId: string, name: string): Promise<{ id: string; name: string; updated_at: string }> {
+    return request(`/sessions/${encodeURIComponent(sessionId)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+  },
+  deleteSession(sessionId: string) {
+    return request<void>(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+  },
+  createChat(sessionId: string): Promise<{ id: string; session_id: string; title: string; created_at: string; updated_at: string }> {
+    return request(`/sessions/${encodeURIComponent(sessionId)}/chats`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
   },
   getChat(chatId: string): Promise<{ id: string; role: string; content: string; citations: Record<string, unknown>; status: string; created_at: string }[]> {
     return request(`/chats/${encodeURIComponent(chatId)}`, { method: "GET" });
+  },
+  renameChat(chatId: string, title: string) {
+    return request<{ id: string; title: string; updated_at: string }>(`/chats/${encodeURIComponent(chatId)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }) });
+  },
+  pinChat(chatId: string) {
+    return request<{ id: string; title: string; pinned_at: string | null }>(`/chats/${encodeURIComponent(chatId)}/pin`, { method: "PATCH" });
+  },
+  deleteChat(chatId: string) {
+    return request<void>(`/chats/${encodeURIComponent(chatId)}`, { method: "DELETE" });
   },
   chat(payload: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
     return request<ChatResponse>("/chat", {

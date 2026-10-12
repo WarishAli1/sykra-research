@@ -24,6 +24,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     name: Mapped[str | None] = mapped_column(String(160))
+    image: Mapped[str | None] = mapped_column(String(2048))
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -31,6 +32,7 @@ class User(Base):
     sessions: Mapped[list["Session"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     chats: Mapped[list["Chat"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     papers: Mapped[list["LibraryPaper"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    research_sessions: Mapped[list["ResearchSession"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class Session(Base):
@@ -68,13 +70,16 @@ class Chat(Base):
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    session_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("research_sessions.id", ondelete="CASCADE"), index=True)
     title: Mapped[str] = mapped_column(String(200), default="New chat")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
     user: Mapped[User] = relationship(back_populates="chats")
     messages: Mapped[list["Message"]] = relationship(back_populates="chat", cascade="all, delete-orphan")
+    research_session: Mapped["ResearchSession | None"] = relationship(back_populates="chats")
     __table_args__ = (Index("ix_chats_user_updated", "user_id", "updated_at"),)
 
 
@@ -97,6 +102,7 @@ class LibraryPaper(Base):
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    session_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("research_sessions.id", ondelete="CASCADE"), index=True)
     title: Mapped[str] = mapped_column(String(1000))
     link: Mapped[str] = mapped_column(String(2048))
     paper_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
@@ -112,6 +118,7 @@ class ResearchSession(Base):
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     external_id: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), default="My Session")
     user_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
@@ -120,7 +127,9 @@ class ResearchSession(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    user: Mapped[User] = relationship()
+    user: Mapped[User] = relationship(back_populates="research_sessions")
+    chats: Mapped[list[Chat]] = relationship(back_populates="research_session", cascade="all, delete-orphan")
+    papers: Mapped[list[LibraryPaper]] = relationship()
     __table_args__ = (Index("ix_research_sessions_user_updated", "user_id", "updated_at"),)
 
 

@@ -18,6 +18,7 @@ from app.db.database import get_db
 from app.db.models import EmailToken, Session, User
 from app.services.email import password_reset_email, send_email, verification_email
 from app.services.breached_password import ensure_not_breached
+from app.services.password_policy import ensure_password_policy
 from app.services.rate_limit import enforce_rate_limit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -35,6 +36,7 @@ class UserRead(BaseModel):
     id: str
     email: str
     name: str | None
+    image: str | None = None
 
 
 class EmailPayload(BaseModel):
@@ -72,7 +74,7 @@ async def _send_verification(user: User, token: str) -> None:
 
 
 def public_user(user: User) -> UserRead:
-    return UserRead(id=str(user.id), email=user.email, name=user.name)
+    return UserRead(id=str(user.id), email=user.email, name=user.name, image=user.image)
 
 
 def _google_configured() -> bool:
@@ -84,6 +86,7 @@ def _google_configured() -> bool:
 async def signup(request: Request, payload: Credentials, response: Response, db: DBSession = Depends(get_db)):
     enforce_rate_limit(request, "signup", 5)
     try:
+        ensure_password_policy(payload.password)
         ensure_not_breached(payload.password)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -200,6 +203,7 @@ async def forgot_password(
 async def reset_password(request: Request, payload: ResetPayload, response: Response, db: DBSession = Depends(get_db)):
     enforce_rate_limit(request, "reset-password", 3)
     try:
+        ensure_password_policy(payload.password)
         ensure_not_breached(payload.password)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -232,6 +236,7 @@ def change_password(
     db: DBSession = Depends(get_db),
 ):
     try:
+        ensure_password_policy(payload.new_password)
         ensure_not_breached(payload.new_password)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -291,12 +296,12 @@ async def google_callback(request: Request, response: Response, code: str = "", 
         client_secret=settings.GOOGLE_CLIENT_SECRET,
         scope="openid email profile",
     ) as client:
-        token = await client.fetch_token(
+        await client.fetch_token(
             "https://oauth2.googleapis.com/token",
             code=code,
             redirect_uri=settings.GOOGLE_REDIRECT_URI,
         )
-        userinfo = await client.get("https://openidconnect.googleapis.com/v1/userinfo", token=token)
+        userinfo = await client.get("https://openidconnect.googleapis.com/v1/userinfo")
         userinfo.raise_for_status()
         profile = userinfo.json()
 
@@ -304,19 +309,24 @@ async def google_callback(request: Request, response: Response, code: str = "", 
         raise HTTPException(status_code=400, detail="Google account email could not be verified.")
 
     email = normalize_email(profile["email"])
+    image = profile.get("picture") or profile.get("image")
     user = db.scalar(select(User).where(User.email == email))
     if not user:
         user = User(
             email=email,
             name=profile.get("name"),
+            image=image,
             password_hash=password_hash.hash(secrets.token_urlsafe(32)),
             email_verified_at=datetime.now(timezone.utc),
         )
         db.add(user)
         db.commit()
         db.refresh(user)
-    elif not user.email_verified_at:
-        user.email_verified_at = datetime.now(timezone.utc)
+    else:
+        user.name = profile.get("name") or user.name
+        user.image = image or user.image
+        if not user.email_verified_at:
+            user.email_verified_at = datetime.now(timezone.utc)
         db.commit()
 
     redirect = RedirectResponse(f"{settings.FRONTEND_PUBLIC_URL}/app")

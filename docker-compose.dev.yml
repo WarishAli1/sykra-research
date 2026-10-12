@@ -1,0 +1,43 @@
+name: sykra-dev
+
+services:
+  postgres:
+    restart: "no"
+
+  neo4j:
+    restart: "no"
+
+  clamav:
+    profiles: ["scan"]            # off by default; enable with --profile scan
+
+  backend:
+    restart: "no"
+    environment:
+      CLAMAV_ENABLED: "false"
+      ANONYMIZED_TELEMETRY: "false"
+    command:
+      - sh
+      - -c
+      - >
+        alembic upgrade head &&
+        exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+        --reload --reload-dir app
+        --reload-exclude 'app/db/vector_db/*'
+    volumes:
+      - ./backend:/app                          # source, migrations, alembic.ini, uploads, exports
+      - chroma_data:/app/app/db/vector_db       # keep Chroma off the host and out of the watcher
+      - hf_cache:/app/huggingface_cache
+    healthcheck:
+      start_period: 60s
+
+  frontend:
+    restart: "no"
+    build:
+      target: deps                              # stops before `next build`; has node_modules, no source
+    command: npm run dev -- -H 0.0.0.0
+    environment:
+      WATCHPACK_POLLING: "true"                 # only needed on Windows/macOS
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next

@@ -10,7 +10,8 @@ from app.db.models import Chat
 
 def _title_from_query(query: str) -> str:
     compact = re.sub(r"\s+", " ", query).strip()
-    return compact[:80] or "New chat"
+    title = compact[:40].rstrip(" \t.,!?;:…")
+    return title or "New chat"
 
 
 def _persist_title(chat_id: UUID, query: str) -> None:
