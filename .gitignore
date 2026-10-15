@@ -40,3 +40,4 @@ htmlcov/
 
 SECURITY.md
 docs/
+.github/dependabot.yml
