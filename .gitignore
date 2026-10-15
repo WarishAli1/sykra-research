@@ -36,3 +36,7 @@ htmlcov/
 .vscode/
 .idea/
 *.swp
+
+
+SECURITY.md
+docs/
