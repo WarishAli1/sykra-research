@@ -4,6 +4,12 @@ import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import type { ClusterOut, ContradictionOut, FocusModeResponse } from "@/lib/types";
 
+function overviewErrorMessage(e: unknown): string {
+  return e instanceof ApiError
+    ? e.message
+    : "Could not load the research graph for this project.";
+}
+
 export function useResearchGraph(projectId: string) {
   const [clusters, setClusters] = useState<ClusterOut[] | null>(null);
   const [contradictions, setContradictions] = useState<ContradictionOut[]>([]);
@@ -18,39 +24,52 @@ export function useResearchGraph(projectId: string) {
   const [focusLoading, setFocusLoading] = useState(false);
   const [focusError, setFocusError] = useState<string | null>(null);
 
-  const fetchOverview = useCallback(
-    async (isCancelled: () => boolean = () => false) => {
-      try {
-        const [clusterRes, contradictionRes] = await Promise.all([
-          api.getClusters(projectId),
-          api.getContradictions(projectId),
-        ]);
-        if (isCancelled()) return;
-        setClusters(clusterRes.clusters);
-        setContradictions(contradictionRes.contradictions);
-        setError(null);
-      } catch (e) {
-        if (isCancelled()) return;
-        setError(e instanceof ApiError ? e.message : "Could not load the research graph for this project.");
-      } finally {
-        if (!isCancelled()) setLoadedFor(projectId);
-      }
-    },
+  const fetchOverviewData = useCallback(
+    () =>
+      Promise.all([
+        api.getClusters(projectId),
+        api.getContradictions(projectId),
+      ]),
     [projectId]
   );
 
   useEffect(() => {
     let cancelled = false;
-    void fetchOverview(() => cancelled);
-    return () => { cancelled = true; };
-  }, [fetchOverview]);
+    fetchOverviewData()
+      .then(([clusterRes, contradictionRes]) => {
+        if (cancelled) return;
+        setClusters(clusterRes.clusters);
+        setContradictions(contradictionRes.contradictions);
+        setError(null);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(overviewErrorMessage(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoadedFor(projectId);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchOverviewData, projectId]);
 
   async function loadOverview() {
     setRefreshing(true);
-    try { await fetchOverview(); } finally { setRefreshing(false); }
+    try {
+      const [clusterRes, contradictionRes] = await fetchOverviewData();
+      setClusters(clusterRes.clusters);
+      setContradictions(contradictionRes.contradictions);
+      setError(null);
+    } catch (e) {
+      setError(overviewErrorMessage(e));
+    } finally {
+      setLoadedFor(projectId);
+      setRefreshing(false);
+    }
   }
 
-    async function openFocus(link: string, title: string) {
+  async function openFocus(link: string, title: string) {
     setFocusLink(link);
     setFocusTitle(title);
     setFocus(null);
