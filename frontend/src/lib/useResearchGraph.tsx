@@ -1,14 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import type { ClusterOut, ContradictionOut, FocusModeResponse } from "@/lib/types";
 
 export function useResearchGraph(projectId: string) {
   const [clusters, setClusters] = useState<ClusterOut[] | null>(null);
   const [contradictions, setContradictions] = useState<ContradictionOut[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const loading = refreshing || loadedFor !== projectId;
 
   const [focusLink, setFocusLink] = useState<string | null>(null);
   const [focusTitle, setFocusTitle] = useState<string | null>(null);
@@ -16,30 +18,39 @@ export function useResearchGraph(projectId: string) {
   const [focusLoading, setFocusLoading] = useState(false);
   const [focusError, setFocusError] = useState<string | null>(null);
 
-  async function loadOverview() {
-    setLoading(true);
-    setError(null);
-    try {
-      const [clusterRes, contradictionRes] = await Promise.all([
-        api.getClusters(projectId),
-        api.getContradictions(projectId),
-      ]);
-      setClusters(clusterRes.clusters);
-      setContradictions(contradictionRes.contradictions);
-    } catch (e) {
-      setError(
-        e instanceof ApiError ? e.message : "Could not load the research graph for this project."
-      );
-    } finally {
-      setLoading(false);
-    }
-  }
+  const fetchOverview = useCallback(
+    async (isCancelled: () => boolean = () => false) => {
+      try {
+        const [clusterRes, contradictionRes] = await Promise.all([
+          api.getClusters(projectId),
+          api.getContradictions(projectId),
+        ]);
+        if (isCancelled()) return;
+        setClusters(clusterRes.clusters);
+        setContradictions(contradictionRes.contradictions);
+        setError(null);
+      } catch (e) {
+        if (isCancelled()) return;
+        setError(e instanceof ApiError ? e.message : "Could not load the research graph for this project.");
+      } finally {
+        if (!isCancelled()) setLoadedFor(projectId);
+      }
+    },
+    [projectId]
+  );
 
   useEffect(() => {
-    loadOverview();
-  }, [projectId]);
+    let cancelled = false;
+    void fetchOverview(() => cancelled);
+    return () => { cancelled = true; };
+  }, [fetchOverview]);
 
-  async function openFocus(link: string, title: string) {
+  async function loadOverview() {
+    setRefreshing(true);
+    try { await fetchOverview(); } finally { setRefreshing(false); }
+  }
+
+    async function openFocus(link: string, title: string) {
     setFocusLink(link);
     setFocusTitle(title);
     setFocus(null);

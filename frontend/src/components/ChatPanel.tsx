@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowUp, Paperclip, Loader2, Square, MoreHorizontal, Pin, Share2, Check } from "lucide-react";
 import Image from "next/image";
@@ -32,6 +32,8 @@ function getGreetingByHour(hour: number): { title: string; subtitle: string } {
 function getGreeting(): { title: string; subtitle: string } {
   return getGreetingByHour(new Date().getHours());
 }
+const noopSubscribe = () => () => {};
+const PINNED_EVENT = "sykra:pinned-change";
 
 export function ChatPanel({
   onUploadComplete,
@@ -89,10 +91,22 @@ export function ChatPanel({
   const [responseMode, setResponseMode] = useState<ResponseMode>("normal");
   const [scrolled, setScrolled] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [pinned, setPinned] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  const [hasMounted, setHasMounted] = useState(false);
-
+  const hasMounted = useSyncExternalStore(noopSubscribe, () => true, () => false);
+  const pinnedKey = `sykra:pinned:${sessionId}`;
+  const subscribePinned = useCallback((cb: () => void) => {
+    window.addEventListener("storage", cb);
+    window.addEventListener(PINNED_EVENT, cb);
+    return () => {
+      window.removeEventListener("storage", cb);
+      window.removeEventListener(PINNED_EVENT, cb);
+    };
+  }, []);
+  const pinned = useSyncExternalStore(
+    subscribePinned,
+    () => { try { return localStorage.getItem(pinnedKey) === "1"; } catch { return false; } },
+    () => false,
+  );
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -150,17 +164,16 @@ export function ChatPanel({
     return () => document.removeEventListener("mousedown", onDown);
   }, []);
 
-  useEffect(() => {
-    setHasMounted(true);
-  }, []);
-
-  useEffect(() => {
+  function handleTogglePin() {
+    setMenuOpen(false);
+    const next = !pinned;
     try {
-      setPinned(localStorage.getItem(`sykra:pinned:${sessionId}`) === "1");
-    } catch {
-      setPinned(false);
-    }
-  }, [sessionId]);
+      if (next) localStorage.setItem(pinnedKey, "1");
+      else localStorage.removeItem(pinnedKey);
+    } catch {}
+    window.dispatchEvent(new Event(PINNED_EVENT));
+    flashToast(next ? "Conversation pinned" : "Conversation unpinned");
+  }
 
   useEffect(() => {
     return () => {
@@ -174,20 +187,6 @@ export function ChatPanel({
     setToast(msg);
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     toastTimerRef.current = setTimeout(() => setToast(null), 1800);
-  }
-
-  function handleTogglePin() {
-    setMenuOpen(false);
-    setPinned((prev) => {
-      const next = !prev;
-      try {
-        if (next) localStorage.setItem(`sykra:pinned:${sessionId}`, "1");
-        else localStorage.removeItem(`sykra:pinned:${sessionId}`);
-      } catch {
-      }
-      flashToast(next ? "Conversation pinned" : "Conversation unpinned");
-      return next;
-    });
   }
 
   async function handleShareConversation() {
@@ -442,13 +441,13 @@ export function ChatPanel({
     activeUploadCountRef.current = Math.max(0, activeUploadCountRef.current - 1);
     pumpUploadQueue();
   }
-
+  const runSingleUploadRef = useRef<(id: string, file: File) => Promise<void>>(async () => {});
   const pumpUploadQueue = useCallback(() => {
     while (activeUploadCountRef.current < MAX_CONCURRENT_UPLOADS && uploadQueueRef.current.length > 0) {
       const next = uploadQueueRef.current.shift();
       if (!next) break;
       activeUploadCountRef.current += 1;
-      runSingleUpload(next.id, next.file);
+      void runSingleUploadRef.current(next.id, next.file);
     }
   }, []);
 
@@ -507,7 +506,7 @@ export function ChatPanel({
       pumpUploadQueue();
     }
   }
-
+  useEffect(() => { runSingleUploadRef.current = runSingleUpload; });
   function handleFilesChange(e: React.ChangeEvent<HTMLInputElement>) {
     const selected = Array.from(e.target.files ?? []);
     if (fileInputRef.current) fileInputRef.current.value = "";

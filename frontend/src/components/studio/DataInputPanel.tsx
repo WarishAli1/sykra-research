@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
   PenLine,
@@ -70,6 +70,13 @@ const NODE_TYPES: Record<"flowchart" | "architecture" | "dfd", NodeType[]> = {
   architecture: ["external", "process", "store"],
   dfd: ["process", "external", "store"],
 };
+
+const allowedSourceIds = (family: VisualFamily): StudioDraftSource[] =>
+  DRAFT_SOURCES.filter((s) => family === "chart" || s.id !== "web_search").map((s) => s.id);
+
+const resolveSource = (family: VisualFamily, source: StudioDraftSource): StudioDraftSource =>
+  allowedSourceIds(family).includes(source) ? source : family === "chart" ? "manual" : "prompt";
+
 
 const STUDIO_FLOW_SCHEMA = {
   family: { label: "Visual Family", required: true },
@@ -176,7 +183,8 @@ export function DataInputPanel({
 }) {
   const [family, setFamily] = useState<VisualFamily>("chart");
   const [prompt, setPrompt] = useState("");
-  const [draftSource, setDraftSource] = useState<StudioDraftSource>("manual");
+  const [selectedSource, setSelectedSource] = useState<StudioDraftSource>("manual");
+  const draftSource = resolveSource(family, selectedSource);
   const [chartType, setChartType] = useState<StudioChartType>("bar");
   const [title, setTitle] = useState("");
   const [categories, setCategories] = useState<string[]>(["A", "B", "C"]);
@@ -186,28 +194,26 @@ export function DataInputPanel({
   const [dfdLevel, setDfdLevel] = useState<0 | 1>(0);
   const [warn, setWarn] = useState<string | null>(null);
 
-  useEffect(() => {
-    const allowedSources = family === "chart"
-      ? DRAFT_SOURCES.map((source) => source.id)
-      : DRAFT_SOURCES.filter((source) => source.id !== "web_search").map((source) => source.id);
+  const seedTemplateIfEmpty = (nextFamily: VisualFamily, nextSource: StudioDraftSource) => {
+    if (nextFamily === "chart" || nextSource !== "manual") return;
+    if (nodes.length > 0 || edges.length > 0) return;
+    const template = templateFor(nextFamily, dfdLevel);
+    setNodes(template.nodes);
+    setEdges(template.edges);
+  };
+  const handleFamilyChange = (next: VisualFamily) => {
+    setFamily(next);
+    seedTemplateIfEmpty(next, resolveSource(next, selectedSource));
+  };
+  const handleSourceChange = (next: StudioDraftSource) => {
+    setSelectedSource(next);
+    seedTemplateIfEmpty(family, next);
+  };
 
-    if (!allowedSources.includes(draftSource)) {
-      setDraftSource(family === "chart" ? "manual" : "prompt");
-    }
-
-    if (family !== "chart" && draftSource === "manual" && nodes.length === 0 && edges.length === 0) {
-      const template = templateFor(family, dfdLevel);
-      setNodes(template.nodes);
-      setEdges(template.edges);
-    }
-  }, [draftSource, family, dfdLevel, nodes.length, edges.length]);
-
-  const visibleSources = useMemo(() => {
-    const allowedSources = family === "chart"
-      ? DRAFT_SOURCES.map((source) => source.id)
-      : DRAFT_SOURCES.filter((source) => source.id !== "web_search").map((source) => source.id);
-    return DRAFT_SOURCES.filter((source) => allowedSources.includes(source.id));
-  }, [family]);
+  const visibleSources = useMemo(
+    () => DRAFT_SOURCES.filter((s) => allowedSourceIds(family).includes(s.id)),
+    [family]
+  );
 
   const validation = useMemo(() => {
     const next: Record<string, string> = {};
@@ -456,7 +462,7 @@ export function DataInputPanel({
         {FAMILIES.map((item) => (
           <motion.button
             key={item.id}
-            onClick={() => setFamily(item.id)}
+            onClick={() => handleFamilyChange(item.id)}
             whileHover={{ y: -2 }}
             whileTap={{ scale: 0.98 }}
             className={`flex flex-col items-start gap-2 rounded-xl border p-3.5 text-left transition-all ${
@@ -508,7 +514,7 @@ export function DataInputPanel({
           <button
             key={source.id}
             type="button"
-            onClick={() => setDraftSource(source.id)}
+            onClick={() => handleSourceChange(source.id)}
             className={`flex flex-col items-start gap-2 rounded-xl border p-4 text-left transition-all ${
               draftSource === source.id ? "border-indigo/50 bg-indigo-tint/50 shadow-md shadow-indigo/10" : "border-line bg-paper hover:border-indigo/30 hover:shadow-sm"
             }`}

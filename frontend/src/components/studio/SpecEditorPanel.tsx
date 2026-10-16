@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { motion } from "framer-motion";
 import { Save, RotateCcw, Loader2, Plus, Trash2, ArrowRight } from "lucide-react";
 import type {
@@ -10,34 +10,35 @@ import type {
   StudioDiagramEdge,
 } from "@/lib/types";
 
-export function SpecEditorPanel({
-  spec,
-  onRevise,
-  isGenerating,
-}: {
+type SpecEditorPanelProps = {
   spec: StudioVisualSpec;
   onRevise: (spec: StudioVisualSpec) => void;
   isGenerating: boolean;
-}) {
-  const [title, setTitle] = useState(spec.title);
-  const [chartType, setChartType] = useState<StudioChartType>("bar");
-  const [categories, setCategories] = useState<string[]>([]);
-  const [values, setValues] = useState<string[]>([]);
-  const [hasChanges, setHasChanges] = useState(false);
-  const [nodes, setNodes] = useState<StudioDiagramNode[]>([]);
-  const [edges, setEdges] = useState<StudioDiagramEdge[]>([]);
-  useEffect(() => {
-    setTitle(spec.title);
+};
 
-    if (spec.payload.kind === "chart") {
-      setChartType(spec.payload.chart_type);
-      setCategories(spec.payload.categories);
-      setValues(spec.payload.series[0]?.values.map(String) ?? []);
-    } else {
-      setNodes(spec.payload.nodes ?? []);
-      setEdges(spec.payload.edges ?? []);
-    }
-  }, [spec]);
+export function SpecEditorPanel(props: SpecEditorPanelProps) {
+  return <SpecEditorForm key={`${props.spec.visual_id}:${props.spec.revision}`} {...props} />;
+}
+
+function SpecEditorForm({ spec, onRevise, isGenerating }: SpecEditorPanelProps) {
+  const isChart = spec.payload.kind === "chart";
+  const [title, setTitle] = useState(spec.title);
+  const [chartType, setChartType] = useState<StudioChartType>(
+    spec.payload.kind === "chart" ? spec.payload.chart_type : "bar"
+  );
+  const [categories, setCategories] = useState<string[]>(
+    spec.payload.kind === "chart" ? spec.payload.categories : []
+  );
+  const [values, setValues] = useState<string[]>(
+    spec.payload.kind === "chart" ? (spec.payload.series[0]?.values.map(String) ?? []) : []
+  );
+  const [hasChanges, setHasChanges] = useState(false);
+  const [nodes, setNodes] = useState<StudioDiagramNode[]>(
+    spec.payload.kind !== "chart" ? (spec.payload.nodes ?? []) : []
+  );
+  const [edges, setEdges] = useState<StudioDiagramEdge[]>(
+    spec.payload.kind !== "chart" ? (spec.payload.edges ?? []) : []
+  );
   const diagramNodeTypes = [
     "process",
     "terminal",
@@ -158,7 +159,7 @@ export function SpecEditorPanel({
     };
     onRevise(revised);
     setHasChanges(false);
-  };
+}
 
   return (
     <div className="flex h-full flex-col bg-paper">

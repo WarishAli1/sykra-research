@@ -446,8 +446,14 @@ async def chat_stream(
     chat_record = _get_or_create_chat(db, user, session_id, req.query, req.chat_id)
     schedule_title_generation(chat_record.id, req.query)
     _persist_message(db, chat_record, "user", req.query, status="complete")
+    assistant_message = _create_message(db, chat_record, "assistant")
+    chat_id = str(chat_record.id)
+    message_id = assistant_message.id
 
     async def event_stream():
+        db_gen = get_db()
+        db = next(db_gen)
+        assistant_message = db.get(Message, message_id)
         cancellation.register(request_id)
         assistant_content = ""
         finished = False
@@ -620,7 +626,7 @@ async def chat_stream(
                 assistant_content = final_answer
 
             response = _build_stream_response(req, session_id, turn_id, state)
-            response.chat_id = str(chat_record.id)
+            response.chat_id = chat_id
             yield sse_event("result", payload=response.model_dump())
             assistant_content = response.answer
             _update_message(
@@ -678,6 +684,7 @@ async def chat_stream(
                 _update_message(db, assistant_message, assistant_content, status="stopped")
             bridge_cleanup(request_id)
             cancellation.cleanup(request_id)
+            db_gen.close()
 
     return StreamingResponse(
         event_stream(),

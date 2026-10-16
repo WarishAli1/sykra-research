@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import { ArrowLeft, FolderKanban, List, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
 
 export type DashboardSession = {
@@ -47,20 +48,16 @@ export function SessionDashboard({
   onDelete: (session: DashboardSession) => void;
   onCreateSession: () => void;
 }) {
-  const [greeting, setGreeting] = useState("Good evening");
+  const noopSubscribe = () => () => {};
+  const getGreeting = () => {
+    const hour = new Date().getHours();
+    return `Good ${hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening"}`;
+  };
+  const greeting = useSyncExternalStore(noopSubscribe, getGreeting, () => "Hello");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<"updated" | "name" | "papers">("updated");
   const [listView, setListView] = useState(false);
-  const [now, setNow] = useState(0);
-
-  useEffect(() => {
-    const hour = new Date().getHours();
-    setGreeting(`Good ${hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening"}`);
-  }, []);
-  useEffect(() => {
-    setNow(Date.now());
-  }, []);
-
+  const [now] = useState(() => Date.now());
   const filtered = useMemo(
     () =>
       sessions
@@ -89,9 +86,9 @@ export function SessionDashboard({
             <p className="mt-2 text-sm text-ink-soft">Keep your sources, conversations, and ideas moving forward.</p>
           </div>
           <div className="flex items-center gap-2">
-            <a href="/" className="inline-flex h-9 items-center gap-2 rounded-lg border border-line bg-white px-3 text-sm text-ink-soft transition hover:border-ink-soft hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+            <Link href="/" className="inline-flex h-9 items-center gap-2 rounded-lg border border-line bg-white px-3 text-sm text-ink-soft transition hover:border-ink-soft hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
               <ArrowLeft className="h-4 w-4" /> Website
-            </a>
+            </Link>
             <button onClick={onCreateSession} className="inline-flex h-9 items-center gap-2 rounded-lg bg-accent px-3.5 text-sm font-semibold text-white transition hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
               <Plus className="h-4 w-4" /> New Session
             </button>

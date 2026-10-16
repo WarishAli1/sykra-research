@@ -103,8 +103,8 @@ class Settings(BaseSettings):
     SEMANTIC_CACHE_TTL_SECONDS: int = 3600
     REQUEST_DEDUP_ENABLED: bool = True
 
-    GROQ_MODEL_FAST: str = "qwen/qwen3.6-27b"
-    GROQ_MODEL_DEFAULT: str = "qwen/qwen3.6-27b"
+    GROQ_MODEL_FAST: str = "qwen/qwen3.8-27b"
+    GROQ_MODEL_DEFAULT: str = "qwen/qwen3.8-27b"
     GROQ_MODEL_STRONG: str = "openai/gpt-oss-120b"
 
     LLM_THINKING_CONTROL_MAP: str = (

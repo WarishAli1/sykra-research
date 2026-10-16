@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import {
   ChevronsLeft,
@@ -87,16 +88,55 @@ function groupChats(chats: ChatSummary[]): [string, ChatSummary[]][] {
 
 function SessionMenu({ onRename, onDelete }: { onRename: () => void; onDelete: () => void }) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+  const btnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  const toggle = () => {
+    if (!open && btnRef.current) {
+      const r = btnRef.current.getBoundingClientRect();
+      const W = 128, H = 96;
+      const top = r.bottom + H + 8 > window.innerHeight ? r.top - H - 4 : r.bottom + 4;
+      setPos({ top, left: Math.max(8, r.right - W) });
+    }
+    setOpen((v) => !v);
+  };
+
   useEffect(() => {
     if (!open) return;
-    const close = (event: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(event.target as Node)) setOpen(false); };
-    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
+    const close = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (menuRef.current?.contains(t) || btnRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    const escape = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    const dismiss = () => setOpen(false);
     document.addEventListener("mousedown", close);
     document.addEventListener("keydown", escape);
-    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", escape); };
+    window.addEventListener("scroll", dismiss, true);
+    window.addEventListener("resize", dismiss);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", escape);
+      window.removeEventListener("scroll", dismiss, true);
+      window.removeEventListener("resize", dismiss);
+    };
   }, [open]);
-  return <div ref={menuRef} className="relative shrink-0"><button onClick={() => setOpen((value) => !value)} aria-label="Open menu" aria-expanded={open} className="rounded-md p-1.5 text-ink-soft hover:bg-paper"><span className="text-lg leading-none">…</span></button>{open && <div className="absolute right-0 top-8 z-40 w-32 rounded-xl border border-line bg-white p-1.5 shadow-xl"><button onClick={() => { setOpen(false); onRename(); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-paper"><Pencil className="h-3.5 w-3.5" />Rename</button><button onClick={() => { setOpen(false); onDelete(); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-danger hover:bg-danger/5"><Trash2 className="h-3.5 w-3.5" />Delete</button></div>}</div>;
+
+  return (
+    <div className="relative shrink-0">
+      <button ref={btnRef} onClick={toggle} aria-label="Open menu" aria-expanded={open} className="rounded-md p-1.5 text-ink-soft hover:bg-paper">
+        <span className="text-lg leading-none">…</span>
+      </button>
+      {open && createPortal(
+        <div ref={menuRef} style={{ position: "fixed", top: pos.top, left: pos.left }} className="z-[100] w-32 rounded-xl border border-line bg-white p-1.5 shadow-xl">
+          <button onClick={() => { setOpen(false); onRename(); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-paper"><Pencil className="h-3.5 w-3.5" />Rename</button>
+          <button onClick={() => { setOpen(false); onDelete(); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-danger hover:bg-danger/5"><Trash2 className="h-3.5 w-3.5" />Delete</button>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
 }
 
 function ChatHistory({ chats, activeChatId, sessionId, onRename, onDelete, onPin }: { chats: ChatSummary[]; activeChatId?: string; sessionId: string; onRename: (chat: ChatSummary) => void; onDelete: (chat: ChatSummary) => void; onPin: (chat: ChatSummary) => void }) {

@@ -24,7 +24,14 @@ jobs:
       - name: Run backend tests
         run: PYTHONPATH=. pytest -q
       - name: Audit Python dependencies
-        run: pip-audit -r requirements.txt
+        # chromadb is used embedded (PersistentClient), not as a server.
+        # TODO: remove ignores once chromadb ships a fix (none listed as of 2026-10-15)
+        run: >
+          pip-audit -r requirements.txt
+          --ignore-vuln PYSEC-2026-311
+          --ignore-vuln PYSEC-2026-3813
+          --ignore-vuln PYSEC-2026-3814
+          --ignore-vuln PYSEC-2026-3815
 
   frontend:
     runs-on: ubuntu-latest

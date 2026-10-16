@@ -34,7 +34,7 @@ export class PdfViewerBoundary extends Component<Props, State> {
         >
           <div className="w-full max-w-sm rounded-xl border border-white/12 bg-white/5 p-6 text-center">
             <p className="text-[13.5px] text-white/90 mb-4">
-              Couldn't open this PDF. The file may be missing, corrupted, or blocked.
+              Couldn&apos;t open this PDF. The file may be missing, corrupted, or blocked.
             </p>
             <button
               onClick={this.props.onClose}

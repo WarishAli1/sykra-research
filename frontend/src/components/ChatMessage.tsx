@@ -238,17 +238,14 @@ const markdownComponents: Components = {
 };
 
 function PreviewAnswer({ preview, hasFinal, streaming }: { preview: string; hasFinal: boolean; streaming: boolean }) {
-  const [open, setOpen] = useState(true);
-  useEffect(() => {
-    if (hasFinal) setOpen(false);
-  }, [hasFinal]);
-
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const open = userOpen ?? !hasFinal;
   const generating = streaming && !hasFinal;
 
   return (
     <div className="mb-3 animate-fade-up overflow-hidden rounded-lg border border-gold/35 bg-gold-tint/40">
       <button
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setUserOpen(!open)}
         aria-expanded={open}
         className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-gold-tint/70"
       >
@@ -348,7 +345,7 @@ export function ChatMessage({
   const isStopped = !!turn.stopped;
   const hasText = turn.text.trim().length > 0;
   const hasPreview = !!turn.previewText;
-  const showMetadata = !isStreaming;
+  const showMetadata = !isStreaming && (hasText || hasPreview);
   const artifacts = turn.artifacts;
   const showDisclaimer = showMetadata && hasText;
 
@@ -437,6 +434,7 @@ export function ChatMessage({
   const hasSteps = !!turn.statusSteps?.length;
   const showStatusFallback = isStreaming && !!turn.statusLabel && !hasText && !hasPreview && !hasSteps;
   const hasBody = hasText || isStopped || regenerating || showMetadata;
+  const isEmptyFailure = !isStreaming && !isStopped && !regenerating && !hasText && !hasPreview && !hasSteps;
 
   return (
     <div className="animate-fade-up space-y-3">
@@ -454,6 +452,13 @@ export function ChatMessage({
           <div className="flex items-center gap-2 text-caption text-ink-soft">
             <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
             <span>{turn.statusLabel}</span>
+          </div>
+        )}
+
+        {isEmptyFailure && (
+          <div className="flex items-center gap-1.5 text-caption text-ink-soft">
+            <OctagonX className="h-3.5 w-3.5 shrink-0" />
+            <span>No answer was generated. Please try again.</span>
           </div>
         )}
 

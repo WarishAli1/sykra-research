@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+
 import { AlertCircle, ArrowLeft, ArrowRight, Check, Eye, EyeOff, LockKeyhole } from "lucide-react";
 import { passwordIsValid, passwordRequirements, PASSWORD_MIN_LENGTH } from "@/lib/passwordPolicy";
 
@@ -14,7 +15,7 @@ export default function LoginPage() {
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
-  const [googleAuthEnabled, setGoogleAuthEnabled] = useState(false);
+  const googleAuthEnabled = process.env.NEXT_PUBLIC_GOOGLE_AUTH_ENABLED === "true";
   const [showPassword, setShowPassword] = useState(false);
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -37,9 +38,6 @@ export default function LoginPage() {
     setTouched((current) => ({ ...current, [field]: true }));
     setFieldErrors((current) => ({ ...current, [field]: validateField(field, value) }));
   };
-  useEffect(() => {
-    setGoogleAuthEnabled(process.env.NEXT_PUBLIC_GOOGLE_AUTH_ENABLED === "true");
-  }, []);
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     const nextErrors = {

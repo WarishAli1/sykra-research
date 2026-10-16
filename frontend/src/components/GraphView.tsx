@@ -72,9 +72,12 @@ export function GraphView({
   activeTurnId?: string | null;
   messagePaperLinks?: string[];
 }) {
-  const [scope, setScope] = useState<GraphScope>(activeTurnId ? "message" : "conversation");
-  const [view, setView] = useState<GraphViewResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [scopeState, setScope] = useState<GraphScope>(activeTurnId ? "message" : "conversation");
+  const scope: GraphScope = !activeTurnId && scopeState === "message" ? "conversation" : scopeState;
+  const [rawView, setRawView] = useState<GraphViewResponse | null>(null);
+  const view = sessionId ? rawView : null;
+  const [settledKey, setSettledKey] = useState<string | null>(null);
+  const [rebuilding, setRebuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [labelsAuto, setLabelsAuto] = useState(true);
   const [physicsOn, setPhysicsOn] = useState(true);
@@ -110,7 +113,18 @@ export function GraphView({
     { focus: null, focusId: null, hl: null, path: null }
   );
   const glowCache = useRef(new Map<string, HTMLCanvasElement>());
-
+  const spotlightMany = useCallback((ids: string[]) => {
+    const tryIt = (attempt = 0) => {
+      const objs = liveNodesRef.current.filter((n) => ids.includes(n.id) && typeof n.x === "number");
+      if (!objs.length) { if (attempt < 6) setTimeout(() => tryIt(attempt + 1), 250); return; }
+      const cx = objs.reduce((s, n) => s + (n.x ?? 0), 0) / objs.length;
+      const cy = objs.reduce((s, n) => s + (n.y ?? 0), 0) / objs.length;
+      const fg = fgRef.current; if (!fg) return;
+      if (typeof fg.centerAt === "function") fg.centerAt(cx, cy, 600);
+      if (typeof fg.zoom === "function") fg.zoom(1.8, 600);
+    };
+    tryIt();
+  }, []);
   const T = THEMES[theme];
   const linkAlpha = theme === "dark" ? { strong: 0.45, normal: 0.28 } : { strong: 0.75, normal: 0.55 };
   const ui = theme === "dark" ? {
@@ -142,38 +156,43 @@ export function GraphView({
   }, [theme]);
 
   const paperLinksKey = (messagePaperLinks ?? []).join("|");
+  const requestKey = `${sessionId}|${scope}|${paperLinksKey}|${nonce}`;
+  const loading = !!sessionId && (rebuilding || settledKey !== requestKey);
+
   useEffect(() => {
-    if (!sessionId) { setLoading(false); setView(null); return; }
+    if (!sessionId) return;
     let cancelled = false;
     let settled = false;
-    if (!view) setLoading(true);
     const t = setTimeout(() => {
       api.graphView(sessionId, {
         scope,
         paper_links: scope === "message" ? (messagePaperLinks ?? []) : undefined,
         max_year: null,
       })
-        .then((res) => { if (!cancelled) { setView(res); setError(null); } })
+        .then((res) => { if (!cancelled) { setRawView(res); setError(null); } })
         .catch((e) => { if (!cancelled) setError(e?.message ?? "Could not build the knowledge graph."); })
-        .finally(() => { settled = true; if (!cancelled) setLoading(false); });
+        .finally(() => { settled = true; if (!cancelled) setSettledKey(requestKey); });
     }, 120);
     const wd = setTimeout(() => {
       if (!settled && !cancelled) {
-        setLoading(false);
+        setSettledKey(requestKey);
         setError("The graph service timed out. Click Rebuild (↻) to try again.");
       }
     }, 60000);
     return () => { cancelled = true; clearTimeout(t); clearTimeout(wd); };
-  }, [sessionId, scope, paperLinksKey, nonce]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- paperLinksKey stands in for messagePaperLinks
+  }, [sessionId, scope, paperLinksKey, nonce, requestKey]);
 
   const rebuild = () => {
-    setLoading(true); setError(null); setSelectedNode(null); setTrail([]);
+    setRebuilding(true); setError(null); setSelectedNode(null); setTrail([]);
     setHighlightSet(null); setPathResult(null); setYearCut(null);
-    api.ensureGraph(sessionId, true).finally(() => setNonce((n) => n + 1));
+    api.ensureGraph(sessionId, true).finally(() => {
+      setNonce((n) => n + 1);
+      setRebuilding(false);
+    });
   };
 
   useEffect(() => { fittedOnce.current = false; }, [nonce, scope]);
-  useEffect(() => { if (!activeTurnId && scope === "message") setScope("conversation"); }, [activeTurnId, scope]);
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -269,7 +288,7 @@ export function GraphView({
       setSelectedNode(n); setTrail([n]);
       spotlightMany([id]);
     }
-  }, [colored]);
+  }, [colored, spotlightMany]);
 
   const focusNode = trail.length ? trail[trail.length - 1] : null;
   const focusSet = useMemo(() => {
@@ -309,7 +328,7 @@ export function GraphView({
   useEffect(() => {
     if (!playing || !gStats) return;
     const min = gStats.min_year, max = gStats.max_year;
-    if (min == null || max == null) { setPlaying(false); return; }
+    if (min == null || max == null) return;
     const id = setInterval(() => {
       setYearCut((y) => {
         const next = (y ?? min) + 1;
@@ -438,7 +457,7 @@ export function GraphView({
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.fillText(label, midX, midY);
   }, [theme]);
-
+  
   const paintPointer = useCallback((node: any, color: string, ctx: CanvasRenderingContext2D) => {
     if (typeof node.x !== "number" || typeof node.y !== "number" || !isFinite(node.x) || !isFinite(node.y)) return;
     ctx.fillStyle = color;
@@ -457,18 +476,6 @@ export function GraphView({
   }, []);
 
   useEffect(() => () => cachePositions(), [cachePositions]);
-  const spotlightMany = (ids: string[]) => {
-    const tryIt = (attempt = 0) => {
-      const objs = liveNodesRef.current.filter((n) => ids.includes(n.id) && typeof n.x === "number");
-      if (!objs.length) { if (attempt < 6) setTimeout(() => tryIt(attempt + 1), 250); return; }
-      const cx = objs.reduce((s, n) => s + (n.x ?? 0), 0) / objs.length;
-      const cy = objs.reduce((s, n) => s + (n.y ?? 0), 0) / objs.length;
-      const fg = fgRef.current; if (!fg) return;
-      if (typeof fg.centerAt === "function") fg.centerAt(cx, cy, 600);
-      if (typeof fg.zoom === "function") fg.zoom(1.8, 600);
-    };
-    tryIt();
-  };
 
   const requestPath = async (a: RichNode, b: RichNode) => {
     try {
@@ -503,7 +510,7 @@ export function GraphView({
     setSelectedNode(n);
     setTrail([n]);
   };
-
+  
   const drillTo = (n: RichNode) => {
     setSelectedNode(n);
     setTrail((prev) => [...prev.filter((p) => p.id !== n.id), n]);
@@ -527,13 +534,13 @@ export function GraphView({
 
   useEffect(() => {
     const q = searchQ.trim();
-    if (q.length < 2) { setSugs(null); return; }
+    if (q.length < 2) return;
     const t = setTimeout(() => {
       api.suggestGraph(sessionId, q).then((r) => setSugs(r.matches)).catch(() => setSugs(null));
     }, 180);
     return () => clearTimeout(t);
   }, [searchQ, sessionId]);
-
+  const shownSugs = searchQ.trim().length < 2 ? null : sugs;
   const onSearchSubmit = async () => {
     const q = searchQ.trim(); if (!q) return;
     setSugOpen(false); setSearching(true);
@@ -655,16 +662,20 @@ export function GraphView({
             <div className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 ${ui.panel}`}>
               {searching ? <Loader2 className="h-3.5 w-3.5 animate-spin opacity-50" /> : <Search className={`h-3.5 w-3.5 ${ui.faint}`} />}
               <input value={searchQ}
-                onChange={(e) => { setSearchQ(e.target.value); setSugOpen(true); }}
+                onChange={(e) => {
+                  setSearchQ(e.target.value);
+                  if (e.target.value.trim().length < 2) setSugs(null);
+                  setSugOpen(true);
+                }}
                 onFocus={() => setSugOpen(true)}
                 onBlur={() => setTimeout(() => setSugOpen(false), 120)}
                 onKeyDown={(e) => { if (e.key === "Enter") onSearchSubmit(); if (e.key === "Escape") { setSearchQ(""); setSugs(null); } }}
                 placeholder="Ask the graph… e.g. multimodal explainability"
                 className={`w-full bg-transparent text-[11.5px] outline-none ${ui.input}`} />
             </div>
-            {sugOpen && sugs && sugs.length > 0 && (
+            {sugOpen && shownSugs && shownSugs.length > 0 && (
               <div className={`mt-1 overflow-hidden rounded-lg border shadow-xl ${ui.card}`}>
-                {sugs.map((m) => (
+                {shownSugs.map((m) => (
                   <button key={m.id} onMouseDown={() => selectSug(m)}
                     className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[11px] ${ui.text} ${ui.hoverRow}`}>
                     <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] uppercase tracking-wide ${ui.chip}`}>{m.type}</span>

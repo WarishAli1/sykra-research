@@ -55,23 +55,22 @@ export function ConfirmDialog({
   </div>;
 }
 
-export function NameDialog({
-  open,
-  title,
-  initialValue,
-  onCancel,
-  onSubmit,
-}: {
+type NameDialogProps = {
   open: boolean;
   title: string;
   initialValue: string;
   onCancel: () => void;
   onSubmit: (name: string) => Promise<void>;
-}) {
+};
+
+export function NameDialog({ open, ...rest }: NameDialogProps) {
+  if (!open) return null;
+  return <NameDialogBody {...rest} />;
+}
+
+function NameDialogBody({ title, initialValue, onCancel, onSubmit }: Omit<NameDialogProps, "open">) {
   const [value, setValue] = useState(initialValue);
   const [pending, setPending] = useState(false);
-  useEffect(() => { if (open) setValue(initialValue); }, [open, initialValue]);
-  if (!open) return null;
   async function submit() {
     const name = value.trim();
     if (!name || pending) return;
