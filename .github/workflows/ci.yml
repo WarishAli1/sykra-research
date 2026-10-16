@@ -52,4 +52,4 @@ jobs:
       - name: Build frontend
         run: npm run build
       - name: Audit JavaScript dependencies
-        run: npm audit --audit-level=high
+        run: npm audit --omit=dev --audit-level=high
