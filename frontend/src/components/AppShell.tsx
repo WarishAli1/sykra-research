@@ -172,6 +172,8 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
 
   const [showStudio, setShowStudio] = useState(false);
 
+  const [hasUpload, setHasUpload] = useState(false);
+  const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>("literature");
   // Session IDs are client-only so the app can keep server and client markup aligned.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -244,14 +246,12 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
     stage: "",
     fileUrl: "",
   });
-  const [hasUpload, setHasUpload] = useState(false);
-  const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>("literature");
 
   const lastAssistantTurn = [...turns]
     .reverse()
     .find((t) => t.role === "assistant" && !t.streaming && t.text?.trim());
   const lastAssistantTurnId = lastAssistantTurn?.turnId ?? lastAssistantTurn?.id ?? null;
-  
+
   const lastAssistantPaperLinks = (
     lastAssistantTurn?.references?.length
       ? lastAssistantTurn.references.map((r) => r.link)
