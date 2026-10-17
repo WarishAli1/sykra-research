@@ -90,10 +90,8 @@ def _enrich(graph: dict) -> dict:
 def get_enriched(session_id: str, force: bool = False) -> dict:
     if not settings.GRAPH_ENABLED:
         return {"nodes": [], "links": [], "stats": _compute_stats([], []), "legend": [], "rel": {}}
+    build_session_graph(session_id, force=force)   # fast on cache hit
     cache = _load_cache(session_id)
-    if force or cache.get("schema") != CACHE_SCHEMA or not cache.get("enriched"):
-        build_session_graph(session_id, force=force)
-        cache = _load_cache(session_id)
     return cache.get("enriched") or _enrich(cache.get("graph") or {"nodes": [], "links": []})
 
 def filter_view(enriched: dict, paper_links: list[str] | None = None,
@@ -105,7 +103,7 @@ def filter_view(enriched: dict, paper_links: list[str] | None = None,
         seed = {n["id"] for n in nodes if n["type"] == "paper" and n["id"] in wanted}
         keep = set(seed)
         for l in links:
-            if l["type"] == "similar":
+            if l["type"] in ("similar", "cites"):
                 continue
             if l["source"] in seed:
                 keep.add(l["target"])
@@ -509,10 +507,14 @@ def build_session_graph(session_id: str, force: bool = False) -> dict:
         return graph
 
 
-def get_clusters(session_id: str) -> list[dict]:
+def get_clusters(session_id: str, paper_links: list[str] | None = None) -> list[dict]:
     graph = build_session_graph(session_id)
+    allowed = set(paper_links) if paper_links is not None else None
     clusters: dict[str, list[str]] = {}
-    paper_names = {n["id"]: n["name"] for n in graph["nodes"] if n["type"] == "paper"}
+    paper_names = {
+        n["id"]: n["name"] for n in graph["nodes"]
+        if n["type"] == "paper" and (allowed is None or n["id"] in allowed)
+    }
     for l in graph["links"]:
         if l["type"] == "discusses" and l["target"].startswith("concept_"):
             name = l["target"][len("concept_"):]

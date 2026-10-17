@@ -10,14 +10,14 @@ function overviewErrorMessage(e: unknown): string {
     : "Could not load the research graph for this project.";
 }
 
-export function useResearchGraph(projectId: string) {
+export function useResearchGraph(projectId: string, chatId?: string) {
   const [clusters, setClusters] = useState<ClusterOut[] | null>(null);
   const [contradictions, setContradictions] = useState<ContradictionOut[]>([]);
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const loading = refreshing || loadedFor !== projectId;
-
+  const viewKey = `${projectId}|${chatId ?? ""}`;
+  const loading = refreshing || loadedFor !== viewKey;
   const [focusLink, setFocusLink] = useState<string | null>(null);
   const [focusTitle, setFocusTitle] = useState<string | null>(null);
   const [focus, setFocus] = useState<FocusModeResponse | null>(null);
@@ -27,10 +27,10 @@ export function useResearchGraph(projectId: string) {
   const fetchOverviewData = useCallback(
     () =>
       Promise.all([
-        api.getClusters(projectId),
+        api.getClusters(projectId, chatId),
         api.getContradictions(projectId),
       ]),
-    [projectId]
+    [projectId, chatId]
   );
 
   useEffect(() => {
@@ -47,12 +47,12 @@ export function useResearchGraph(projectId: string) {
         setError(overviewErrorMessage(e));
       })
       .finally(() => {
-        if (!cancelled) setLoadedFor(projectId);
+        setLoadedFor(viewKey)
       });
     return () => {
       cancelled = true;
     };
-  }, [fetchOverviewData, projectId]);
+  }, [fetchOverviewData, viewKey]);
 
   async function loadOverview() {
     setRefreshing(true);
@@ -64,7 +64,7 @@ export function useResearchGraph(projectId: string) {
     } catch (e) {
       setError(overviewErrorMessage(e));
     } finally {
-      setLoadedFor(projectId);
+      setLoadedFor(viewKey);
       setRefreshing(false);
     }
   }

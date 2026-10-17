@@ -1,6 +1,9 @@
 import asyncio
 import uuid
-
+from uuid import UUID
+from fastapi import HTTPException
+from sqlalchemy import select
+from app.db.models import LibraryPaper
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
@@ -14,17 +17,35 @@ from app.services.graph_store import graph_store
 
 router = APIRouter()
 
+def _chat_links(db, user, rs, chat_id: str | None):
+    """Links of papers saved in this chat; None means no chat filter."""
+    if not chat_id:
+        return None
+    try:
+        cid = UUID(chat_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid chat identifier.")
+    return list(db.scalars(select(LibraryPaper.link).where(
+        LibraryPaper.user_id == user.id,
+        LibraryPaper.session_id == rs.id,
+        LibraryPaper.chat_id == cid,
+    )))
 
 class ResearchRequest(BaseModel):
     query: str
     session_id: str | None = None
-
 
 class ResearchResponse(BaseModel):
     answer: str
     session_id: str
     papers_processed: int
     paper_links: list[str] = []
+
+class GraphViewRequest(BaseModel):
+    scope: str = "conversation"
+    chat_id: str | None = None
+    paper_links: list[str] | None = None
+    max_year: int | None = None
 
 
 @router.post("/research", response_model=ResearchResponse)
@@ -35,8 +56,6 @@ async def research(
 ):
     session_id = req.session_id or str(uuid.uuid4())
     require_research_session(db, user, session_id, create=True)
-
-    graph_store.clear_session(session_id)
 
     initial_state = {
         "query": req.query,
@@ -144,11 +163,7 @@ async def research(
 
 class GraphQueryRequest(BaseModel):
     q: str
-
-class GraphViewRequest(BaseModel):
-    scope: str = "conversation"          # "conversation" | "message"
-    paper_links: list[str] | None = None
-    max_year: int | None = None
+    chat_id: str | None = None
 
 class GraphPathRequest(GraphViewRequest):
     a: str
@@ -156,30 +171,39 @@ class GraphPathRequest(GraphViewRequest):
 
 @router.post("/graph/{session_id}/view")
 def graph_view(session_id: str, req: GraphViewRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
-    require_research_session(db, user, session_id)
+    rs = require_research_session(db, user, session_id)
     enriched = graph_builder.get_enriched(session_id)
-    links = req.paper_links if req.scope == "message" else None 
+    links = req.paper_links if req.scope == "message" else _chat_links(db, user, rs, req.chat_id)
     view = graph_builder.filter_view(enriched, links, req.max_year)
     return {**view, "legend": enriched["legend"], "rel": enriched["rel"],
             "global_stats": enriched["stats"]}
 
 @router.post("/graph/{session_id}/path")
 def graph_path(session_id: str, req: GraphPathRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
-    require_research_session(db, user, session_id)
+    rs = require_research_session(db, user, session_id)
     enriched = graph_builder.get_enriched(session_id)
-    links = req.paper_links if req.scope == "message" else None 
+    links = req.paper_links if req.scope == "message" else _chat_links(db, user, rs, req.chat_id)
     return {"path": graph_builder.shortest_path(enriched, req.a, req.b, links, req.max_year)}
 
 @router.get("/graph/{session_id}/suggest")
-def graph_suggest(session_id: str, q: str = "", user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
-    require_research_session(db, user, session_id)
-    return {"matches": graph_builder.suggest_nodes(graph_builder.get_enriched(session_id), q)}
+def graph_suggest(session_id: str, q: str = "", chat_id: str | None = None, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    rs = require_research_session(db, user, session_id)
+    enriched = graph_builder.get_enriched(session_id)
+    links = _chat_links(db, user, rs, chat_id)
+    if links is not None:
+        enriched = {**enriched, **graph_builder.filter_view(enriched, links)}
+    return {"matches": graph_builder.suggest_nodes(enriched, q)}
     
 
 @router.post("/graph/{session_id}/query")
 def graph_query(session_id: str, req: GraphQueryRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
-    require_research_session(db, user, session_id)
-    return {"matches": graph_builder.semantic_query(session_id, req.q)}
+    rs = require_research_session(db, user, session_id)
+    links = _chat_links(db, user, rs, req.chat_id)
+    matches = graph_builder.semantic_query(session_id, req.q, top_k=30)
+    if links is not None:
+        allowed = {n["id"] for n in graph_builder.filter_view(graph_builder.get_enriched(session_id), links)["nodes"]}
+        matches = [m for m in matches if m["id"] in allowed]
+    return {"matches": matches[:6]}
 
 
 @router.get("/graph/{session_id}/ensure")
@@ -191,9 +215,9 @@ def ensure_graph(session_id: str, force: bool = False, user: User = Depends(get_
 
 
 @router.get("/graph/{session_id}/clusters")
-def macro_view(session_id: str, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
-    require_research_session(db, user, session_id)
-    return {"clusters": graph_builder.get_clusters(session_id)}
+def macro_view(session_id: str, chat_id: str | None = None, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    rs = require_research_session(db, user, session_id)
+    return {"clusters": graph_builder.get_clusters(session_id, _chat_links(db, user, rs, chat_id))}
 
 
 @router.get("/graph/{session_id}/contradictions")

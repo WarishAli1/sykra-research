@@ -66,9 +66,10 @@ const THEMES = {
 };
 
 export function GraphView({
-  sessionId, activeTurnId, messagePaperLinks,
+  sessionId, chatId, activeTurnId, messagePaperLinks,
 }: {
   sessionId: string;
+  chatId?: string;
   activeTurnId?: string | null;
   messagePaperLinks?: string[];
 }) {
@@ -156,7 +157,7 @@ export function GraphView({
   }, [theme]);
 
   const paperLinksKey = (messagePaperLinks ?? []).join("|");
-  const requestKey = `${sessionId}|${scope}|${paperLinksKey}|${nonce}`;
+  const requestKey = `${sessionId}|${chatId ?? ""}|${scope}|${paperLinksKey}|${nonce}`;
   const loading = !!sessionId && (rebuilding || settledKey !== requestKey);
 
   useEffect(() => {
@@ -164,8 +165,17 @@ export function GraphView({
     let cancelled = false;
     let settled = false;
     const t = setTimeout(() => {
+      if (!chatId) {
+        // new chat with nothing saved yet: show the empty state, don't load the whole session
+        settled = true;
+        setRawView(null);
+        setError(null);
+        setSettledKey(requestKey);
+        return;
+      }
       api.graphView(sessionId, {
         scope,
+        chat_id: chatId,
         paper_links: scope === "message" ? (messagePaperLinks ?? []) : undefined,
         max_year: null,
       })
@@ -181,7 +191,7 @@ export function GraphView({
     }, 60000);
     return () => { cancelled = true; clearTimeout(t); clearTimeout(wd); };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- paperLinksKey stands in for messagePaperLinks
-  }, [sessionId, scope, paperLinksKey, nonce, requestKey]);
+  }, [sessionId, chatId, scope, paperLinksKey, nonce, requestKey]);
 
   const rebuild = () => {
     setRebuilding(true); setError(null); setSelectedNode(null); setTrail([]);
@@ -480,7 +490,7 @@ export function GraphView({
   const requestPath = async (a: RichNode, b: RichNode) => {
     try {
       const res = await api.graphPath(sessionId, {
-        a: a.id, b: b.id, scope,
+        a: a.id, b: b.id, chat_id: chatId, scope,
         paper_links: scope === "message" ? (messagePaperLinks ?? []) : undefined,
         max_year: yearCut,
       });
@@ -536,16 +546,16 @@ export function GraphView({
     const q = searchQ.trim();
     if (q.length < 2) return;
     const t = setTimeout(() => {
-      api.suggestGraph(sessionId, q).then((r) => setSugs(r.matches)).catch(() => setSugs(null));
+      api.suggestGraph(sessionId, q, chatId).then((r) => setSugs(r.matches)).catch(() => setSugs(null));
     }, 180);
     return () => clearTimeout(t);
-  }, [searchQ, sessionId]);
+  }, [searchQ, sessionId, chatId]);
   const shownSugs = searchQ.trim().length < 2 ? null : sugs;
   const onSearchSubmit = async () => {
     const q = searchQ.trim(); if (!q) return;
     setSugOpen(false); setSearching(true);
     try {
-      const res = await api.queryGraph(sessionId, q);
+      const res = await api.queryGraph(sessionId, q, chatId);
       const ids = res.matches.filter((m) => m.score > 0.25).map((m) => m.id);
       if (ids.length) { setHighlightSet(new Set(ids)); setTrail([]); spotlightMany(ids); }
     } catch { /* ignore */ }

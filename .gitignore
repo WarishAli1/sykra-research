@@ -16,6 +16,7 @@ backend/exports/
 backend/node_modules/
 backend/uploads/
 backend/app/db/graph_cache/
+backend/huggingface_cache/
 
 package-lock.json
 

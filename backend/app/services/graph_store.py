@@ -131,6 +131,17 @@ class GraphStore:
             a=link_a, b=link_b, reason=reason,
         )
 
+    def link_similar(self, link_a: str, link_b: str, weight: float) -> None:
+        self._safe_run(
+            """
+            MERGE (a:Paper {link: $a})
+            MERGE (b:Paper {link: $b})
+            MERGE (a)-[r:SIMILAR]-(b)
+            SET r.weight = $weight
+            """,
+            a=link_a, b=link_b, weight=weight,
+        )
+
     def get_clusters(self, session_id: str) -> list[dict]:
         try:
             with self.driver.session() as session:
@@ -275,16 +286,7 @@ class GraphStore:
                     if src in known_ids and tgt in known_ids:
                         edges.append({"source": src, "target": tgt, "type": "uses"})
                 
-                def link_similar(self, link_a: str, link_b: str, weight: float) -> None:
-                    self._safe_run(
-                        """
-                        MERGE (a:Paper {link: $a})
-                        MERGE (b:Paper {link: $b})
-                        MERGE (a)-[r:SIMILAR]-(b)
-                        SET r.weight = $weight
-                        """,
-                        a=link_a, b=link_b, weight=weight,
-                    )
+                
 
                 return {"nodes": nodes, "links": edges}
         except Exception as e:

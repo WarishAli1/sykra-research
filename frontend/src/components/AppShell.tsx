@@ -208,6 +208,26 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
     }).catch(() => setTurns([]));
   }, [initialChatId]);
 
+  const prevChatId = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (!initialSessionId) return;
+    if (!initialChatId || (prevChatId.current && prevChatId.current !== initialChatId)) {
+      setPapers([]);
+      setHasUpload(false);
+      setUploadedFilename(null);
+    }
+    prevChatId.current = initialChatId;
+    if (!initialChatId) return;
+    api.listLibraryPapers(initialSessionId, initialChatId)
+      .then((saved) => {
+        setPapers((prev) => mergePapers(saved, prev));
+        const up = saved.find((p) => p.is_uploaded);
+        if (up) { setHasUpload(true); setUploadedFilename(up.title); }
+      })
+      .catch(() => {});
+  }, [initialSessionId, initialChatId]);
+
   const handleLogout = async () => {
     await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000/api"}/auth/logout`, {
       method: "POST",
@@ -227,8 +247,11 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
   const [hasUpload, setHasUpload] = useState(false);
   const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>("literature");
 
-  const lastAssistantTurn = [...turns].reverse().find((t) => t.role === "assistant" && t.turnId);
-  const lastAssistantTurnId = lastAssistantTurn?.turnId ?? null;
+  const lastAssistantTurn = [...turns]
+    .reverse()
+    .find((t) => t.role === "assistant" && !t.streaming && t.text?.trim());
+  const lastAssistantTurnId = lastAssistantTurn?.turnId ?? lastAssistantTurn?.id ?? null;
+  
   const lastAssistantPaperLinks = (
     lastAssistantTurn?.references?.length
       ? lastAssistantTurn.references.map((r) => r.link)
@@ -308,7 +331,6 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
 
   const handleNewChat = async () => {
     setTurns([]);
-    setPapers([]);
     setUploadedFilename(null);
     setUploadState({ status: "idle", filename: "", progress: "", stage: "", fileUrl: "" });
     setHasUpload(false);
@@ -388,7 +410,7 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
     }
 
     try {
-      await api.deleteUploadedPdf(sessionId, paper.link);
+      await api.deleteUploadedPdf(sessionId, paper.link, initialChatId);
     } catch (e) {
       console.error("Failed to delete paper:", e);
       const restoredPapers = papers.some((p) => p.link === paper.link)
@@ -704,7 +726,7 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                 <span className="w-[90px]" />
               </div>
               <div className="flex-1 min-h-0">
-                <GraphView sessionId={sessionId} activeTurnId={lastAssistantTurnId} messagePaperLinks={lastAssistantPaperLinks} />
+                <GraphView sessionId={sessionId} chatId={initialChatId} activeTurnId={lastAssistantTurnId} messagePaperLinks={lastAssistantPaperLinks} />
               </div>
             </div>
           ) : (
@@ -759,6 +781,7 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                   <RightRail
                     papers={papers}
                     sessionId={sessionId}
+                    chatId={initialChatId}
                     tab={tab}
                     setTab={setTab}
                     onOpenPdf={handleOpenPdf}

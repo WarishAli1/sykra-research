@@ -108,7 +108,7 @@ class LibraryPaper(Base):
     paper_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
+    chat_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("chats.id", ondelete="CASCADE"), index=True)
     user: Mapped[User] = relationship(back_populates="papers")
     __table_args__ = (Index("ix_library_papers_user_updated", "user_id", "updated_at"),)
 

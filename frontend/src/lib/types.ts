@@ -37,7 +37,7 @@ export type GraphStats = {
 };
 export type LegendEntry = { name: string; cluster?: number; kind?: "method" | "dataset" | "paper" };
 export type NodeRel = { concepts: string[]; methods: string[]; datasets: string[]; papers: { id: string; name: string }[] };
-export type GraphViewRequest = { scope: GraphScope; paper_links?: string[]; max_year?: number | null };
+export type GraphViewRequest = { scope: GraphScope; paper_links?: string[]; max_year?: number | null, chat_id?: string; };
 export type GraphViewResponse = {
   nodes: GraphNode[]; links: GraphLink[]; stats: GraphStats;
   global_stats: GraphStats; legend: LegendEntry[]; rel: Record<string, NodeRel>;
@@ -170,6 +170,7 @@ export type FollowupResponse = {
 export type RegenerateRequest = {
   query: string;
   session_id?: string;
+  chat_id?: string;
   turn_id?: string;
   evidence_mode?: EvidenceMode;
   response_mode: ResponseMode;

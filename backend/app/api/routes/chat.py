@@ -38,6 +38,7 @@ from app.services.reference_builder import (
     rewrite_inline_citations,
 )
 from app.services.chat_titles import schedule_title_generation
+from app.services.library_store import save_papers
 from app.auth import get_current_user
 from app.db.database import get_db
 from app.db.models import Chat, Message, ResearchSession, User
@@ -423,6 +424,7 @@ async def chat(req: ChatRequest, user: User = Depends(get_current_user), db: DBS
         final_state,
     )
     _persist_message(db, chat_record, "assistant", response.answer, {"references": [r.model_dump() for r in response.references]})
+    save_papers(db, user.id, session_id, final_state.get("ranked_papers") or [], chat_id=chat_record.id)
     return response
 
 
@@ -449,7 +451,7 @@ async def chat_stream(
     assistant_message = _create_message(db, chat_record, "assistant")
     chat_id = str(chat_record.id)
     message_id = assistant_message.id
-
+    user_id = user.id
     async def event_stream():
         db_gen = get_db()
         db = next(db_gen)
@@ -457,10 +459,7 @@ async def chat_stream(
         cancellation.register(request_id)
         assistant_content = ""
         finished = False
-
         try:
-            if req.response_mode == "graph_research":
-                graph_store.clear_session(session_id)
 
             if req.response_mode in ("researched", "graph_research"):
                 yield sse_event(
@@ -624,6 +623,10 @@ async def chat_stream(
                     yield sse_event("cancelled")
                     return
                 assistant_content = final_answer
+            try:
+                save_papers(db, user_id, session_id, state.get("ranked_papers") or [], chat_id=chat_id)
+            except Exception as e:
+                print(f"[chat_stream] save_papers failed: {type(e).__name__}: {e}")
 
             response = _build_stream_response(req, session_id, turn_id, state)
             response.chat_id = chat_id
@@ -747,9 +750,10 @@ async def regenerate(req: RegenerateRequest, user: User = Depends(get_current_us
         evidence_mode=req.evidence_mode,
         response_mode=req.response_mode,
     )
-    chat_record = _get_or_create_chat(db, user, req.session_id, req.query)
-    schedule_title_generation(chat_record.id, req.query)
-    _persist_message(db, chat_record, "user", req.query, status="complete")
+    chat_record = _get_or_create_chat(db, user, req.session_id, req.query, req.chat_id)
+    if not req.chat_id:
+        schedule_title_generation(chat_record.id, req.query)
+        _persist_message(db, chat_record, "user", req.query, status="complete")
 
     initial_state = _build_initial_state(chat_req, req.session_id, turn_id)
 
@@ -765,4 +769,5 @@ async def regenerate(req: RegenerateRequest, user: User = Depends(get_current_us
     )
     response.chat_id = str(chat_record.id)
     _persist_message(db, chat_record, "assistant", response.answer, {"references": [r.model_dump() for r in response.references]})
+    save_papers(db, user.id, req.session_id, final_state.get("ranked_papers") or [], chat_id=chat_record.id)
     return response

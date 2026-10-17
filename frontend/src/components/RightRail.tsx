@@ -10,6 +10,7 @@ type Tab = "library" | "explore";
 export function RightRail({
   papers,
   sessionId,
+  chatId,
   tab,
   setTab,
   onOpenPdf,
@@ -17,6 +18,7 @@ export function RightRail({
 }: {
   papers: Paper[];
   sessionId: string;
+  chatId?: string;
   tab: Tab;
   setTab: (t: Tab) => void;
   onOpenPdf: (url: string) => void;
@@ -42,7 +44,7 @@ export function RightRail({
 
       <div className="flex-1 min-h-0">
         {tab === "library" && <LibraryPanel papers={papers} onOpenPdf={onOpenPdf} onDeletePaper={onDeletePaper} />}
-        {tab === "explore" && <ExplorePanel key={sessionId} projectId={sessionId} />}
+        {tab === "explore" && <ExplorePanel key={`${sessionId}:${chatId ?? ""}`} projectId={sessionId} chatId={chatId} />}
       </div>
     </div>
   );

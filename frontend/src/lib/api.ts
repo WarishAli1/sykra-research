@@ -18,6 +18,7 @@ import type {
   GraphViewResponse,
   GraphPathRequest,
   SuggestMatch,
+  Paper,
 } from "./types";
 
 export class ApiError extends Error {
@@ -189,6 +190,9 @@ export const api = {
   listSessions(): Promise<{ id: string; name: string; created_at: string; updated_at: string; chat_count: number; paper_count: number }[]> {
     return request("/sessions", { method: "GET" });
   },
+  listLibraryPapers(sessionId: string, chatId?: string): Promise<Paper[]> {
+    return request(`/library/session/${encodeURIComponent(sessionId)}/papers${queryString({ chat_id: chatId })}`, { method: "GET" });
+  },
   createSession(name: string): Promise<{ id: string; name: string }> {
     return request("/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
   },
@@ -290,10 +294,11 @@ export const api = {
     });
   },
 
-  getClusters(sessionId: string): Promise<ClustersResponse> {
-    return request<ClustersResponse>(`/graph/${encodeURIComponent(sessionId)}/clusters`, {
-      method: "GET",
-    });
+  getClusters(sessionId: string, chatId?: string): Promise<ClustersResponse> {
+    return request<ClustersResponse>(
+      `/graph/${encodeURIComponent(sessionId)}/clusters${queryString({ chat_id: chatId })}`,
+      { method: "GET" }
+    );
   },
 
   getFocus(paperLink: string): Promise<FocusModeResponse> {
@@ -308,12 +313,6 @@ export const api = {
       `/graph/${encodeURIComponent(sessionId)}/contradictions`,
       { method: "GET" }
     );
-  },
-
-  getSessionPapers(sessionId: string): Promise<SessionPapersResponse> {
-    return request<SessionPapersResponse>(`/graph/${encodeURIComponent(sessionId)}/papers`, {
-      method: "GET",
-    });
   },
 
   getFullGraph(sessionId: string): Promise<FullGraphData> {
@@ -343,8 +342,8 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
-  suggestGraph(sessionId: string, q: string): Promise<{ matches: SuggestMatch[] }> {
-    return request(`/graph/${encodeURIComponent(sessionId)}/suggest${queryString({ q })}`, { method: "GET" });
+  suggestGraph(sessionId: string, q: string, chatId?: string): Promise<{ matches: SuggestMatch[] }> {
+    return request(`/graph/${encodeURIComponent(sessionId)}/suggest${queryString({ q, chat_id: chatId })}`, { method: "GET" });
   },
 
   exportPdf(payload: PdfExportRequest): Promise<Blob> {
@@ -355,11 +354,10 @@ export const api = {
     });
   },
 
-  uploadPdfStream(file: File, sessionId: string, onEvent: (event: UploadStreamEvent) => void, signal?: AbortSignal, requestId?: string): Promise<void> {
-    const formData = new FormData();
+  uploadPdfStream(file: File, sessionId: string, onEvent: (event: UploadStreamEvent) => void, signal?: AbortSignal, requestId?: string, chatId?: string): Promise<void> {    const formData = new FormData();
     formData.append("file", file);
     return streamRequest(
-      `/upload/stream${queryString({ session_id: sessionId, request_id: requestId })}`,
+      `/upload/stream${queryString({ session_id: sessionId, request_id: requestId, chat_id: chatId })}`,
       { method: "POST", body: formData, signal },
       onEvent
     );
@@ -389,9 +387,9 @@ export const api = {
     return null;
   },
 
-  deleteUploadedPdf(sessionId: string, link: string) {
+  deleteUploadedPdf(sessionId: string, link: string, chatId?: string) {
     return request<{ success: boolean }>(
-      `/uploads/${sessionId}?link=${encodeURIComponent(link)}`,
+      `/uploads/${sessionId}${queryString({ link, chat_id: chatId })}`,
       {
         method: "DELETE",
       }
@@ -403,11 +401,11 @@ export const api = {
       { method: "GET" }
     );
   },
-  queryGraph(sessionId: string, q: string): Promise<{ matches: { id: string; name: string; type: string; score: number }[] }> {
+  queryGraph(sessionId: string, q: string, chatId?: string): Promise<{ matches: { id: string; name: string; type: string; score: number }[] }> {
     return request(`/graph/${encodeURIComponent(sessionId)}/query`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ q }),
+      body: JSON.stringify({ q, chat_id: chatId }),
     });
   },
 };

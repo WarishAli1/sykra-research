@@ -85,6 +85,23 @@ export function ChatPanel({
   setEvidenceMode: React.Dispatch<React.SetStateAction<EvidenceMode>>;
 }) {
   const router = useRouter();
+  const pendingChatRef = useRef<string | null>(null);
+  const pendingChatPromiseRef = useRef<Promise<string> | null>(null);
+  useEffect(() => {
+    pendingChatRef.current = null;
+    pendingChatPromiseRef.current = null;
+  }, [chatId]);
+  async function ensureChatId(): Promise<string> {
+    if (chatId) return chatId;
+    if (pendingChatRef.current) return pendingChatRef.current;
+    if (!pendingChatPromiseRef.current) {
+      pendingChatPromiseRef.current = api.createChat(sessionId).then((c) => {
+        pendingChatRef.current = c.id;
+        return c.id;
+      });
+    }
+    return pendingChatPromiseRef.current;
+  }
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -375,7 +392,7 @@ export function ChatPanel({
         {
           query,
           session_id: sessionId,
-          chat_id: chatId,
+          chat_id: chatId ?? pendingChatRef.current ?? undefined,
           turn_id: kgTurnId,
           evidence_mode: evMode,
           response_mode: mode,
@@ -458,8 +475,9 @@ export function ChatPanel({
     const controller = new AbortController();
     uploadControllersRef.current.set(id, controller);
     patchUpload(id, { requestId });
-
+    
     try {
+      const uploadChatId = await ensureChatId();
       await api.uploadPdfStream(
         file,
         sessionId,
@@ -493,7 +511,8 @@ export function ChatPanel({
           }
         },
         controller.signal,
-        requestId
+        requestId,
+        uploadChatId
       );
     } catch (err) {
       if (!(err instanceof ApiAbortError)) {
@@ -809,6 +828,7 @@ export function ChatPanel({
                   const res = await api.chatRegenerate(
                     {
                       session_id: sessionId,
+                      chat_id: chatId,
                       turn_id: t.turnId,
                       query: t.sourceQuery ?? "",
                       response_mode: mode,

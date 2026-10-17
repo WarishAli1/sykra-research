@@ -27,6 +27,25 @@ def list_papers(session_id: UUID | None = Query(None), user: User = Depends(get_
     return list(db.scalars(query.order_by(LibraryPaper.updated_at.desc())))
 
 
+@router.get("/session/{session_id}/papers")
+def session_papers(session_id: UUID, chat_id: UUID | None = Query(None), user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    q = select(LibraryPaper).where(LibraryPaper.user_id == user.id, LibraryPaper.session_id == session_id)
+    if chat_id is not None:
+        q = q.where(LibraryPaper.chat_id == chat_id)
+    rows = db.scalars(q.order_by(LibraryPaper.created_at.asc()))
+    out = []
+    for r in rows:
+        m = r.paper_metadata or {}
+        out.append({
+            "title": r.title, "link": r.link,
+            "authors": m.get("authors", []), "summary": m.get("summary", ""),
+            "published": m.get("published"), "relevance_score": m.get("relevance_score"),
+            "source": m.get("source"), "is_uploaded": m.get("is_uploaded", False),
+            "file_url": m.get("file_url"),
+        })
+    return out
+
+
 @router.post("", status_code=201)
 def save_paper(payload: PaperPayload, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     if payload.session_id is not None and not db.scalar(select(ResearchSession).where(ResearchSession.id == payload.session_id, ResearchSession.user_id == user.id)):

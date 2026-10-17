@@ -113,6 +113,7 @@ class FollowupResponse(BaseModel):
 
 class RegenerateRequest(BaseModel):
     session_id: str
+    chat_id: Optional[str] = None
     turn_id: Optional[str] = None
     query: str = Field(..., min_length=3)
     response_mode: Literal["normal", "researched", "graph_research"] = "normal"

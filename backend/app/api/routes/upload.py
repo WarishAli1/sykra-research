@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import fitz
+from uuid import UUID
 from PIL import Image
 import pytesseract
 from fastapi import APIRouter, Depends, Request, UploadFile, File, HTTPException
@@ -16,12 +17,13 @@ from app.services.graph_store import graph_store
 from app.config import settings
 from app.auth import get_current_user
 from app.db.database import get_db
-from app.db.models import UploadedFile, User
+from app.db.models import UploadedFile, User, LibraryPaper
 from app.services.ownership import require_research_session
 from app.services.storage import LocalPrivateStorage
 from app.services.upload_validation import read_pdf_content
 from app.services.malware_scanner import scanner
 from app.services.rate_limit import enforce_rate_limit
+from app.services.library_store import save_papers
 from sqlalchemy.orm import Session as DBSession
 from sqlalchemy import select
 
@@ -105,6 +107,7 @@ async def upload_pdf(
     request: Request,
     file: UploadFile = File(...),
     session_id: str = "default",
+    chat_id: str | None = None,
     user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
@@ -156,6 +159,7 @@ async def upload_pdf(
         "authors": [],
         "paper_type": "user_upload",
     }
+    save_papers(db, user.id, research_session.id, [paper], chat_id=chat_id)
     vector_store.upsert_paper(paper, session_id)
     try:
         graph_store.upsert_paper(paper, session_id)
@@ -209,20 +213,28 @@ async def serve_uploaded_pdf(
 async def delete_uploaded_pdf(
     session_id: str,
     link: str,
+    chat_id: str | None = None,
     user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
     research_session = require_research_session(db, user, session_id)
     filename = os.path.basename(link)
-    uploaded = db.scalar(
-        select(UploadedFile).where(
-            UploadedFile.session_id == research_session.id,
-            UploadedFile.user_id == user.id,
-            UploadedFile.stored_filename == filename,
-        )
-    )
-    if not uploaded:
+    lib_row = db.scalar(select(LibraryPaper).where(
+        LibraryPaper.user_id == user.id,
+        LibraryPaper.session_id == research_session.id,
+        LibraryPaper.chat_id == (UUID(chat_id) if chat_id else None),
+        LibraryPaper.link == link))
+    uploaded = db.scalar(select(UploadedFile).where(
+        UploadedFile.session_id == research_session.id,
+        UploadedFile.user_id == user.id,
+        UploadedFile.stored_filename == filename))
+    if not uploaded and not lib_row:
         raise HTTPException(status_code=404, detail="File not found.")
+    if lib_row:
+        db.delete(lib_row)
+        db.commit()
+    if not uploaded:
+        return {"status": "deleted"}
     try:
         vector_store.delete_paper(link, session_id)
     except Exception as exc:
@@ -272,6 +284,7 @@ async def upload_pdf_stream(
     request: Request,
     file: UploadFile = File(...),
     session_id: str = "default",
+    chat_id: str | None = None,
     request_id: str = "",
     user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
@@ -366,6 +379,7 @@ async def upload_pdf_stream(
                     "authors": [],
                     "paper_type": "user_upload",
                 }
+                save_papers(db, user.id, research_session.id, [paper], chat_id=chat_id)
 
                 if request_id and cancellation.is_cancelled(request_id):
                     yield sse_event("cancelled")

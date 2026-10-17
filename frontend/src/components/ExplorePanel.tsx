@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { useResearchGraph } from "@/lib/useResearchGraph";
 
-export function ExplorePanel({ projectId }: { projectId: string }) {
+export function ExplorePanel({ projectId, chatId }: { projectId: string; chatId?: string }) {
   const {
     clusters,
     contradictions,
@@ -27,7 +27,7 @@ export function ExplorePanel({ projectId }: { projectId: string }) {
     focusError,
     openFocus,
     closeFocus,
-  } = useResearchGraph(projectId);
+  } = useResearchGraph(projectId, chatId);
   const [openCluster, setOpenCluster] = useState<string | null>(null);
 
   if (focusLink) {
