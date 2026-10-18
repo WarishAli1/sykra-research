@@ -2,7 +2,7 @@ import asyncio
 import datetime
 import time
 import uuid
-
+import json
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
@@ -458,6 +458,7 @@ async def chat_stream(
         assistant_message = db.get(Message, message_id)
         cancellation.register(request_id)
         assistant_content = ""
+        status_steps: list[dict] = []
         finished = False
         try:
 
@@ -552,7 +553,12 @@ async def chat_stream(
                                 if p.get("title")
                             ]
 
-                    yield progress_event(node_name, detail=detail, items=items, evidence_mode=req.evidence_mode)
+                    step_str = progress_event(node_name, detail=detail, items=items, evidence_mode=req.evidence_mode)
+                    try:
+                        status_steps.append(json.loads(step_str[len("data:"):].strip()))
+                    except Exception:
+                        pass
+                    yield step_str
 
                 elif etype == "llm_token":
                     sections_streamed = True
@@ -637,7 +643,10 @@ async def chat_stream(
                 assistant_message,
                 assistant_content,
                 status="complete",
-                citations={"references": [r.model_dump() for r in response.references]},
+                citations={
+                    "references": [r.model_dump() for r in response.references],
+                    "status_steps": status_steps,
+                },
             )
             finished = True
 

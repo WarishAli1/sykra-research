@@ -153,7 +153,7 @@ export function ResearchSteps({
   streaming: boolean;
   embedded?: boolean;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(streaming);
 
   if (!steps.length) return null;
 

@@ -1,3 +1,5 @@
+import { StepEvent } from "@/components/ResearchSteps";
+
 export type ResponseMode = "normal" | "researched";
 export type EvidenceMode = "literature" | "uploaded" | "blended";
 
@@ -151,6 +153,7 @@ export type ChatResponse = {
   information_needs?: string[];
   complexity_score?: number;
   report_notice?: string | null;
+  status_steps?: StepEvent[];
 };
 
 export type FollowupRequest = {
@@ -196,6 +199,7 @@ export type StatusStep = {
   label: string;
   detail?: string;
   items?: string[];
+  evidence_mode?: string;
 };
 
 export type UploadStreamEvent =

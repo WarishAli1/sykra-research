@@ -22,7 +22,7 @@ import { ChatPanel } from "./ChatPanel";
 import { GraphView } from "./GraphView";
 import { api, ApiError } from "@/lib/api";
 import { StudioView } from "./studio/StudioView";
-import type { ChatTurn, Paper, EvidenceMode } from "@/lib/types";
+import type { ChatTurn, Paper, EvidenceMode, StatusStep } from "@/lib/types";
 import dynamic from "next/dynamic";
 
 const PdfViewer = dynamic(() => import("./PdfViewer").then((m) => m.PdfViewer), {
@@ -206,6 +206,7 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
         role: message.role as ChatTurn["role"],
         text: message.content,
         references: Array.isArray(message.citations?.references) ? message.citations.references as ChatTurn["references"] : [],
+        statusSteps: Array.isArray(message.citations?.status_steps) ? message.citations.status_steps as StatusStep[] : undefined,
       })));
     }).catch(() => setTurns([]));
   }, [initialChatId]);
@@ -492,17 +493,9 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
         {sidebarOpen ? (
           <div className="flex h-full flex-col" style={{ width: SIDEBAR_WIDTH }}>
             <div className="flex h-16 items-center gap-2.5 px-4 shrink-0">
-              <Link href="/" aria-label="Back to Sykra Research home" className="shrink-0 rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo">
-                <Image
-                  src="/sykra-logo.svg"
-                  alt="Sykra Research"
-                  width={32}
-                  height={32}
-                  className="h-8 w-8 shrink-0 object-contain"
-                  priority
-                />
+              <Link href="/" aria-label="Back to Sykra Research home" className="min-w-0 rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo">
+                <span className="block truncate font-serif text-[20px] font-medium text-ink">Sykra Research</span>
               </Link>
-              <span className="truncate font-serif text-[18px] font-medium text-ink">Sykra Research</span>
               <button
                 onClick={() => setSidebarOpen(false)}
                 aria-label="Collapse sidebar"
@@ -587,9 +580,9 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
             className="flex h-full flex-col items-center gap-2 py-3"
             style={{ width: SIDEBAR_COLLAPSED_WIDTH }}
           >
-            <div className="flex items-center gap-1">
-              <Link href="/" aria-label="Back to Sykra Research home" title="Website" className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-soft hover:bg-paper hover:text-ink transition-colors">
-                <img src="/sykra-logo.svg" alt="Sykra Research" className="h-8 w-8 object-contain" />
+            <div className="flex flex-col items-center gap-1">
+              <Link href="/" aria-label="Back to Sykra Research home" title="Website" className="flex h-9 w-9 items-center justify-center rounded-lg text-ink-soft hover:bg-paper hover:text-ink transition-colors">
+                <Image src="/sykra-logo.svg" alt="Sykra Research" width={28} height={28} className="h-7 w-7 shrink-0 object-contain" />
               </Link>
               <button
                 onClick={() => setSidebarOpen(true)}
