@@ -151,7 +151,9 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
   const [currentUser, setCurrentUser] = useState<{ name: string | null; email: string; image: string | null } | null>(null);
   const [recentChats, setRecentChats] = useState<ChatSummary[]>([]);
   const [papers, setPapers] = useState<Paper[]>([]);
-  const [sessionId, setSessionId] = useState("");
+  const [sessionId, setSessionId] = useState(
+    () => initialSessionId || crypto.randomUUID()
+  );
   const [sessionName, setSessionName] = useState("Session");
   const [sessions, setSessions] = useState<DashboardSession[]>([]);
   const [dialog, setDialog] = useState<{ kind: "create-session" | "rename-session" | "rename-chat"; item?: DashboardSession | ChatSummary } | null>(null);
@@ -178,9 +180,6 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
     if (!initialSessionId || !initialChatId) return;
     api.listLibraryPapers(initialSessionId, initialChatId).then(setPapers).catch(() => {});
   }, [initialSessionId, initialChatId]);
-  useEffect(() => {
-    setSessionId(initialSessionId || crypto.randomUUID());
-  }, [initialSessionId]);
 
   useEffect(() => {
     api.listSessions().then(setSessions).catch(() => setSessions([]));
