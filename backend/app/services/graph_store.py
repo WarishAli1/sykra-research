@@ -5,17 +5,32 @@ from app.config import settings
 
 
 class GraphStore:
+    
     def __init__(self):
         self.available = True
         self._unavailable_until = 0.0
+        self.driver = None
+
+        uri = settings.NEO4J_URI
+        if not uri or not uri.strip():
+            self.available = False
+            print("[graph_store] NEO4J_URI is not configured; graph features disabled.")
+            return
+
         self.driver = GraphDatabase.driver(
-            settings.NEO4J_URI, auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
+            uri,
+            auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
         )
 
     def close(self):
-        self.driver.close()
+        if self.driver is not None:
+            self.driver.close()
+
 
     def _safe_run(self, query: str, **params):
+        if self.driver is None:
+            return None
+
         if not self.available and time.time() < self._unavailable_until:
             return None
         try:
