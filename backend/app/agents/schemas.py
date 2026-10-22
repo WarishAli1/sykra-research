@@ -231,7 +231,7 @@ class RetrievalPlan(BaseModel):
     use_foundational_search: bool = False
     use_citation_backtracking: bool = False
 
-    max_search_intents: int = Field(default=4, ge=1, le=6)
+    max_search_intents: int = Field(default=4, ge=1, le=15)
 
 
 class PaperJudgment(BaseModel):

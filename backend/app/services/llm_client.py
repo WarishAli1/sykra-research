@@ -6,6 +6,24 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 
 from app.config import settings
+from collections import deque
+_tpm_log: dict[tuple, deque] = {}
+
+def _tpm_used(key):
+    dq, now = _tpm_log.setdefault(key, deque()), time.time()
+    while dq and now - dq[0][0] > 60: dq.popleft()
+    return sum(t for _, t in dq)
+
+def _tpm_note(key, tokens): _tpm_log.setdefault(key, deque()).append((time.time(), tokens))
+
+def _pick_provider(providers, category, need):
+    limit = int(getattr(settings, "GROQ_TPM_LIMIT", 8000))
+    for _ in range(25):                
+        for n in providers:
+            if _tpm_used((n, category)) + need <= limit:
+                return [n] + [p for p in providers if p != n]
+        time.sleep(3)
+    return providers
 
 
 _RATE_LIMIT_COOLDOWN_SECONDS = 60
@@ -205,6 +223,9 @@ def _groq_reasoning_model_needles() -> list[str]:
 
 
 def _groq_reasoning_kwargs(model_name: str) -> dict:
+    name = (model_name or "").lower()
+    if "gpt-oss" in name:
+        return {"reasoning_effort": getattr(settings, "GROQ_GPT_OSS_REASONING_EFFORT", "low")}
     effort = str(getattr(settings, "GROQ_REASONING_EFFORT", "none") or "").strip()
     if not effort:
         return {}
@@ -533,6 +554,8 @@ class FailoverLLM:
         prompt = _enforce_prompt_budget(
             prompt, reserve_tokens=kwargs["max_tokens"]
         )
+        need = sum(_estimate_tokens(getattr(m, "content", "") or "") for m in prompt) + int(kwargs["max_tokens"] * 0.7)
+        providers = _pick_provider(providers, self.category, need)
         for attempt, name in enumerate(providers):
             model_name = _model_for_provider(name, self.category)
             model = _get_client(name, self.temperature, model_name)
@@ -543,6 +566,7 @@ class FailoverLLM:
                     _apply_thinking_control(prompt, model_name),
                     **kwargs,
                 )
+                _tpm_note((name, self.category), need)
                 _record_success(name)
                 return result
             except Exception as e:

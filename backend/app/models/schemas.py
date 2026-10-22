@@ -74,8 +74,7 @@ class ChatResponse(BaseModel):
     turn_id: str
     papers: list[PaperResult]
     citations: list[str] = Field(default_factory=list)
-
-    # New disclaimer field
+    method_note: Optional[str] = None
     disclaimer: Optional[str] = None
 
     papers_below_threshold: int = 0

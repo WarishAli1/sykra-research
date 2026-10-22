@@ -2,38 +2,16 @@ from typing import Iterable, Set
 
 
 CAPABILITY_PROVIDERS = {
-    "primary_research": {
-        "openalex",
-        "arxiv",
-    },
-    "secondary_research": {
-        "openalex",
-        "arxiv",
-    },
-    "official_authority": {
-        "web",
-    },
-    "official_authority_clinical": {
-        "web",
-    },
-    "official_authority_legal": {
-        "web",
-    },
-    "official_authority_financial": {
-        "web",
-    },
-    "technical_documentation": {
-        "web",
-    },
-    "current_information": {
-        "web",
-    },
-    "standards": {
-        "web",
-    },
-    "statistics": {
-        "web",
-    },
+    "primary_research": {"openalex", "arxiv", "europepmc"},
+    "secondary_research": {"openalex", "arxiv", "europepmc"},
+    "official_authority": {"web"},
+    "official_authority_clinical": {"web", "europepmc"},
+    "official_authority_legal": {"web"},
+    "official_authority_financial": {"web"},
+    "technical_documentation": {"web"},
+    "current_information": {"web"},
+    "standards": {"web"},
+    "statistics": {"web"},
 }
 
 
@@ -41,6 +19,7 @@ DEFAULT_PROVIDERS = {
     "openalex",
     "arxiv",
     "web",
+    "europepmc",
 }
 
 

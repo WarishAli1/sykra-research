@@ -33,23 +33,17 @@ class VectorStore:
         return f"{base}_{chunk_index}"
 
     def upsert_paper(self, paper: dict, session_id: str):
-        text = paper.get("text") or paper.get("summary", "")
-
+        text = paper.get("text") or paper.get("summary") or paper.get("title", "")
         if not text.strip():
             return
-
         chunks = chunk_text(text)
-
         if not chunks:
             return
-
         ids = [
             self._chunk_id(paper["link"], i)
             for i in range(len(chunks))
         ]
-
         authors_str = "|".join(paper.get("authors", []))
-
         metadatas = [
             {
                 "session_id": session_id,
@@ -65,7 +59,6 @@ class VectorStore:
             }
             for i in range(len(chunks))
         ]
-
         self.collection.upsert(
             ids=ids,
             documents=chunks,
@@ -188,6 +181,9 @@ class VectorStore:
             }
         )
 
+    def delete_session(self, session_id: str):
+        self.collection.delete(where={"session_id": session_id})
+        
     def get_full_text_for_paper(self, link: str, session_id: str) -> str:
         results = self.collection.get(
             where={

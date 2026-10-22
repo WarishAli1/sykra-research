@@ -19,6 +19,7 @@ from app.services.paper_search import (
     search_openalex_by_title_async,
     search_openalex_foundational_async,
     search_semantic_scholar_async,
+    search_europepmc_async,
 )
 
 from app.services.web_search import search_web_async
@@ -53,19 +54,11 @@ _QUOTED_RE = re.compile(r'"([^"]+)"')
 
 
 _BUDGETS = {
-    "fast": {
-        "openalex": 2,
-        "arxiv": 1,
-        "web": 1,
-        "total": 3,
-    },
-    "research": {
-        "openalex": 7,
-        "arxiv": 3,
-        "web": 1,
-        "total": 11,
-    },
+    "fast":     {"openalex": 2,  "arxiv": 1,  "web": 1,  "europepmc": 0, "total": 3,   "oa_n": 5,   "ax_n": 4, "ep_n": 0},
+    "research": {"openalex": 10, "arxiv": 3,  "web": 2,  "europepmc": 8, "total": 23,  "oa_n": 12,  "ax_n": 6, "ep_n": 12},
 }
+
+_BIO_RE = re.compile(r"\b(disease|infect|bacteri|virus|viral|clinical|patient|animal|veterinar|livestock|pathogen|toxin|therapy|drug|cancer|syndrome|clostridi|vaccin|medical|health|pharma|tumor|oncolog)\b", re.I)
 
 
 class SearchMetrics:
@@ -73,42 +66,31 @@ class SearchMetrics:
         self.openalex = 0
         self.arxiv = 0
         self.web = 0
+        self.europepmc = 0
         self.total = 0
 
-    def can_search(
-        self,
-        provider: str,
-        count: int,
-        maxes: dict,
-    ) -> bool:
+    def can_search(self, provider: str, count: int, maxes: dict) -> bool:
         if self.total + count > maxes["total"]:
             return False
-
         if provider in ("openalex", "foundational", "backtrack"):
             return self.openalex + count <= maxes["openalex"]
-
         if provider == "arxiv":
             return self.arxiv + count <= maxes["arxiv"]
-
         if provider == "web":
             return self.web + count <= maxes["web"]
-
+        if provider == "europepmc":
+            return self.europepmc + count <= maxes.get("europepmc", 0)
         return True
 
-    def record(
-        self,
-        provider: str,
-        count: int = 1,
-    ) -> None:
+    def record(self, provider: str, count: int = 1) -> None:
         if provider in ("openalex", "foundational", "backtrack"):
             self.openalex += count
-
         elif provider == "arxiv":
             self.arxiv += count
-
         elif provider == "web":
             self.web += count
-
+        elif provider == "europepmc":
+            self.europepmc += count
         self.total += count
 
 
@@ -158,7 +140,11 @@ def _extract_quoted_title(query: str) -> str | None:
     if not match:
         return None
 
-    return match.group(1).strip()
+    title = match.group(1).strip()
+    if len(title.split()) < 4 or len(title) < 0.7 * len((query or "").strip()):
+        return None
+
+    return title
 
 
 def _normalize_title_strict(title: str) -> str:
@@ -225,6 +211,9 @@ def _verify_primary_sources(
         for title in expected_titles
         if title
     }
+    for ent in (answer_spec or {}).get("canonical_entities") or []:
+        t = str(ent.get("expected_primary_source") or "").strip()
+        if t: expected_titles.append(t)
     for paper in candidates:
         paper_title = _normalize_title_strict(
             paper.get("title", "")
@@ -293,45 +282,45 @@ async def _fetch_intent(
         else None
     )
 
-    def _queue(provider: str, coro) -> None:
+    apply_year_filter = (
+        (min_year is not None or max_year is not None)
+        and purpose not in ("canonical_source", "equation")
+    )
+    oa_min_year = min_year if apply_year_filter else None
+    oa_max_year = max_year if apply_year_filter else None
+    oa_primary = purpose in ("canonical_source", "equation")
+
+    def _queue(provider: str, factory) -> None:
         if not metrics.can_search(provider, 1, maxes):
             return
-        tasks.append(asyncio.wait_for(coro, 7.0))
-        tags.append(provider)
+        tasks.append(asyncio.wait_for(factory(), 7.0)); tags.append(provider)
 
     if title:
         if "openalex" in providers:
-            _queue("openalex", search_openalex_by_title_async(title, 3))
+            _queue("openalex", lambda: search_openalex_async(
+                query, maxes["oa_n"], oa_primary,
+                min_year=oa_min_year, max_year=oa_max_year))
         if "arxiv" in providers:
-            _queue("arxiv", search_arxiv_by_title_async(title, 3))
+            _queue("arxiv", lambda: search_arxiv_by_title_async(title, maxes["ax_n"]))
         if "web" in providers:
-            _queue(
-                "web",
-                search_web_async(web_query, web_intent, max_results=3),
-            )
+            _queue("web", lambda: search_web_async(web_query, web_intent, max_results=3))
     else:
-        apply_year_filter = (
-            min_year is not None
-            or max_year is not None
-        ) and purpose not in ("canonical_source", "equation")
+        is_bio = bool(_BIO_RE.search(query))
+
         if "openalex" in providers:
-            _queue(
-                "openalex",
-                search_openalex_async(
-                    query,
-                    5,
-                    purpose in ("canonical_source", "equation"),
-                    min_year=min_year if apply_year_filter else None,
-                    max_year=max_year if apply_year_filter else None,
-                ),
-            )
-        if "arxiv" in providers:
-            _queue("arxiv", search_arxiv_async(query, 4))
+            _queue("openalex", lambda: search_openalex_async(
+                query, maxes["oa_n"], oa_primary,
+                min_year=oa_min_year, max_year=oa_max_year))
+
+        if "arxiv" in providers and not is_bio:
+            _queue("arxiv", lambda: search_arxiv_async(query, maxes["ax_n"]))
+
+        if ("europepmc" in providers or is_bio) and _provider_is_available("europepmc"):
+            _queue("europepmc", lambda: search_europepmc_async(query, maxes["ep_n"]))
+            
         if "web" in providers:
-            _queue(
-                "web",
-                search_web_async(web_query, web_intent, max_results=3),
-            )
+            _queue("web", lambda: search_web_async(web_query, web_intent, max_results=3))
+            
     if not tasks:
         return []
     results = await asyncio.gather(*tasks, return_exceptions=True)

@@ -400,7 +400,7 @@ def retrieval_plan_node(state: AgentState) -> AgentState:
         reverse=True,
     )
 
-    for requirement in requirements[:4]:
+    for requirement in requirements[:8]:
         text = str(requirement.get("text") or "").strip()
         if not text:
             continue
@@ -453,7 +453,7 @@ def retrieval_plan_node(state: AgentState) -> AgentState:
     if is_uploaded:
         max_search_intents = 6
     else:
-        max_search_intents = 3 if mode == "normal" else 4
+        max_search_intents = 3 if mode == "normal" else 10
 
     intents = intents[:max_search_intents]
 

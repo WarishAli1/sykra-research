@@ -13,6 +13,7 @@ from app.agents.schemas import SectionBatch, SectionOutput
 from app.services.llm_client import get_llm
 
 from app.services.reference_builder import (
+    CitationNumberer,
     build_references,
     paper_id_to_ref_id_map,
     rewrite_inline_citations,
@@ -20,13 +21,122 @@ from app.services.reference_builder import (
     extract_paper_ids,
 )
 
-from app.agents.report_modules import default_report_plan, MODULE_LIBRARY
+from app.agents.report_modules import default_report_plan, MODULE_LIBRARY, _is_technical_derivation
 from app.utils.text_sanitizer import sanitize_for_web
 from app.services.sse import bridge_push
 from app.config import settings
+from app.services.citation_grounding import (
+    ABSTAIN_TEXT,
+    ground_text,
+    verify_support,
+    MARKER_RE,
+    extract_quantities,
+    rewrite_sentences,
+)
 
 
 llm = get_llm(temperature=0, task="default")
+
+
+
+MODULE_TOKENS = {"direct_answer": 450, "executive_summary": 600, "key_concepts": 900,
+                 "background": 900, "derivation": 1800, "architecture": 1500,
+                 "boundary_conditions": 1200, "research_findings": 1600}
+
+
+SLIM_FORMAT = """Return only the final markdown for this ONE section. No heading, no <think>.
+Math: inline $x$; display math as $$ on its own lines with blank lines around; define each symbol once;
+use the canonical formula (e.g. softmax(QK^T/sqrt(d_k))V), never drop sqrt or normalisation.
+Cite as [paper_id=N], one id per bracket, only ids listed under ALLOWED SOURCES, only for what that
+excerpt states. Never write a number not in a cited excerpt. If sources don't cover something, say so.
+Never say "retrieved sources", "ledger" or "the user". No References section."""
+
+
+def _dynamic_paper_cap(papers, depth, hard_max=15):
+    strong = sum(1 for p in papers if float(p.get("_relevance_orig") or p.get("final_score") or 0) >= 0.45)
+    base = {"low": 6, "medium": 9, "high": 12}.get(depth, 9)
+    return max(4, min(hard_max, len(papers), max(base, strong)))
+
+
+def _block_for_ids(papers, summaries, ids, chars):
+    return "\n\n".join(
+        f"[paper_id={i}] Title: {papers[i].get('title','')} ({str(papers[i].get('published') or '')[:4]})\n"
+        f"Abstract: {((summaries.get(str(i)) or {}).get('findings') or papers[i].get('summary') or '')[:chars]}"
+        for i in ids)
+
+
+def _slim_prompt(m, block, ids, state, plan, guardrails, titles):
+    others = ", ".join(t for t in titles if t != m["title"])
+    derive = ("Derive step by step: one transformation per display equation, say why each step is valid, "
+              "define every symbol and dimension on first use.\n"
+              if m["module_id"] == "derivation" else "")
+    return f"""{_mode_positioning(state.get('response_mode','normal'))}
+USER QUERY: {state.get('query','')}
+{_evidence_mode_instruction(state.get('evidence_mode','literature'))}
+{_answer_spec_context(state, {})}
+DOMAIN GUARDRAILS: {'; '.join(guardrails) or 'none'}
+SECTION: {m['title']}
+GOAL: {m['purpose']}
+{derive}Length: about {m.get('target_words', 250)} words. Do not repeat these other sections: {others or 'none'}.
+ALLOWED SOURCES: {', '.join(map(str, ids)) or 'none'}
+{block}
+{_ledger_context(state)}
+{GROUNDING_RULES}
+{SLIM_FORMAT}"""
+
+
+def _generate_sections_per_module(modules, papers, summaries, state, evidence_map,
+                                  guardrails, plan, emitter, depth):
+    cancel = state.get("_cancel_check")
+    seen_ids = state.setdefault("_seen_paper_ids", set())
+    dedupe_seen, sections = set(), []
+    titles = [m["title"] for m in modules]
+    limit = _request_token_limit()
+    n_cap = _dynamic_paper_cap(papers, depth)
+    task = "strong" if state.get("response_mode") in ("researched", "graph_research") else "default"
+    timeout = settings.REPORT_SECTION_TIMEOUT_DEEP
+
+    for m in modules:
+        if cancel and cancel(): break
+        mid = m["module_id"]
+        max_out = min(MODULE_TOKENS.get(mid, 1200), int(limit * 0.30))
+        want = 10 if mid == "research_findings" else 6
+        ids = [int(x) for x in evidence_map.get(mid, {}).get("paper_ids", []) if str(x).isdigit() and int(x) < n_cap]
+        ids += [i for i in range(n_cap) if i not in ids]
+        ids = list(dict.fromkeys(ids))[:want]
+
+        fixed = _estimate_tokens(_slim_prompt(m, "", ids, state, plan, guardrails, titles))
+        budget_chars = max(0, int(limit * 0.70) - max_out - fixed) * 4
+        while len(ids) > 2 and budget_chars // len(ids) < 300:
+            ids.pop()
+        chars = max(300, min(1100, budget_chars // max(1, len(ids))))
+        block = _block_for_ids(papers, summaries, ids, chars)
+        seen_ids.update(str(i) for i in ids)
+        prompt = _slim_prompt(m, block, ids, state, plan, guardrails, titles)
+
+        content = ""
+        for _ in range(2):
+            try:
+                raw = get_llm(temperature=0, task=task).invoke(
+                    [SystemMessage(content="You write one section of a research report. Markdown only."),
+                     HumanMessage(content=prompt)],
+                    max_tokens=max_out, config={"timeout": timeout})
+                content = _clean_content(raw.content)
+                if len(content.split()) >= 25: break
+            except Exception as e:
+                print(f"[summarize] module {mid} failed: {type(e).__name__}: {e}")
+        if len(content.split()) < 25:
+            content = _deterministic_section_fallback(m, papers, summaries, {}, state)
+
+        content = _dedupe_paragraphs(_rewrite_author_year_markers(content, papers), dedupe_seen)
+        sections.append({"module_id": mid, "title": m["title"], "content": content,
+                         "cited_paper_ids": extract_paper_ids(content),
+                         "evidence_status": evidence_map.get(mid, {}).get("evidence_status", "mixed"),
+                         "confidence": "medium"})
+        if emitter:
+            emitter.submit(mid, f"## {m['title']}\n\n{_sanitize_preserving_math(content)}\n")
+    if emitter: emitter.flush_remaining()
+    return sections
 
 
 FORMAT_INSTRUCTION = """
@@ -67,8 +177,15 @@ QUANTITATIVE & CITATION INTEGRITY (CRITICAL):
 4. SCENARIO DISCIPLINE: If a scenario matrix is provided, answer resilience/robustness questions by referencing specific scenario rows, not by asserting a single option is "best" unconditionally.
 
 Cite a source ONLY if it specifically supports the exact claim in that sentence.
-Do not cite a paper just because it was retrieved — if a retrieved paper is not
-directly relevant to what you are currently explaining, do not mention it at all.
+Do not cite a paper just because it was retrieved.
+
+CITATION COMPLETENESS:
+If you use ANY fact, number, mechanism, finding, definition, example, comparison point,
+historical claim, equation, dataset, benchmark, or inference from a retrieved paper,
+you MUST cite that paper in the sentence where it is used.
+
+Using a source silently is forbidden.
+If you cannot cite a paper for a specific claim, do not use that paper's content.
 
 Recent ≠ relevant. Do not introduce a paper's topic (e.g. a new attention variant,
 a compression method, an unrelated domain application) unless the user's question
@@ -85,12 +202,136 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-def _enforce_groq_request_budget(prompt: str, max_output_tokens: int) -> str:
+def _request_token_limit() -> int:
+    """Single source of truth for the per-request token ceiling (config.LLM_MAX_PROMPT_TOKENS)."""
+    return int(getattr(settings, "LLM_MAX_PROMPT_TOKENS", 8000) or 8000)
+
+
+def _visible_ids_from_block(block: str) -> set[str]:
+    return set(re.findall(r"\[paper_id=(\d+)\]", block or ""))
+
+
+_NUM_TOKEN_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+
+def _number_token_set(text: str) -> set[str]:
+    return {n.replace(",", "") for n in _NUM_TOKEN_RE.findall(text or "")}
+
+
+def _mode_positioning(response_mode: str) -> str:
+    if response_mode == "normal":
+        return (
+            "MODE POSITIONING: Normal mode provides a fast, source-supported answer. "
+            "It supports academic writing by giving a clear, direct answer using relevant sources. "
+            "Do not describe Normal mode as a systematic review, formal research execution, "
+            "or source-verified research process. If the method is mentioned, describe it as "
+            "a quick answer based on targeted retrieved sources."
+        )
+
+    return (
+        "MODE POSITIONING: Researched mode is research execution and evidence synthesis. "
+        "It supports academic writing by performing targeted retrieval, source evaluation, "
+        "evidence synthesis, and citation checking. Describe the process accurately as "
+        "targeted research and evidence synthesis. Do NOT claim systematic-review rigor, "
+        "PRISMA, registered protocol, exhaustive search, formal risk-of-bias assessment, "
+        "or any review methodology that was not actually performed."
+    )
+
+
+def _add_missing_numeric_citations(
+    sections: list[dict],
+    papers: list[dict],
+    state: AgentState,
+) -> list[dict]:
     """
-    Groq on_demand tier enforces a hard 8000 token limit per request (prompt + output).
-    This function aggressively trims verbose prompt sections to prevent 413 errors.
+    Conservative citation repair.
+
+    If a sentence contains quantitative claims and has no citation, but the exact
+    numeric tokens appear in one or more shown sources, add the matching paper_ids.
     """
-    target_prompt_tokens = 7500 - max_output_tokens
+    if not sections or not papers:
+        return sections
+
+    visible = (
+        state.get("_seen_paper_ids")
+        or state.get("_visible_paper_ids")
+        or {str(i) for i in range(len(papers))}
+    )
+
+    source_tokens: dict[str, set[str]] = {}
+
+    for i, p in enumerate(papers):
+        pid = str(i)
+        if pid not in visible:
+            continue
+
+        blob = (
+            f"{p.get('title', '')}. "
+            f"{p.get('summary') or p.get('text') or ''}"
+        )
+        source_tokens[pid] = _number_token_set(blob)
+
+    if not source_tokens:
+        return sections
+
+    def _cite_sentence(sent: str) -> str:
+        if MARKER_RE.search(sent):
+            return sent
+
+        quants = extract_quantities(sent)
+        if not quants:
+            return sent
+
+        candidate_sets = []
+
+        for quant in quants:
+            qset = set(quant)
+            candidates = {
+                pid
+                for pid, toks in source_tokens.items()
+                if qset <= toks
+            }
+
+            if not candidates:
+                return sent
+
+            candidate_sets.append(candidates)
+
+        common = set.intersection(*candidate_sets)
+        if not common:
+            return sent
+
+        markers = "".join(
+            f"[paper_id={pid}]"
+            for pid in sorted(common, key=int)
+        )
+
+        return sent.rstrip() + " " + markers
+
+    for sec in sections:
+        content = sec.get("content") or ""
+
+        if not content:
+            continue
+
+        if ABSTAIN_TEXT in content:
+            continue
+
+        new_content = rewrite_sentences(content, _cite_sentence)
+
+        if new_content != content:
+            sec["content"] = new_content
+            sec["cited_paper_ids"] = extract_paper_ids(new_content)
+
+    return sections
+
+
+def _enforce_groq_request_budget_raw(prompt: str, max_output_tokens: int) -> str:
+    """
+    Trims verbose prompt sections when the prompt would exceed the per-request ceiling
+    (config.LLM_MAX_PROMPT_TOKENS) to prevent 413 errors.
+    """
+    target_prompt_tokens = _request_token_limit() - 500 - max_output_tokens
     target_chars = target_prompt_tokens * 4
     
     if len(prompt) <= target_chars:
@@ -155,10 +396,73 @@ def _enforce_groq_request_budget(prompt: str, max_output_tokens: int) -> str:
             
             allowed_chars = max(800, target_chars - len(before) - len(rest) - 20)
             if len(papers_text) > allowed_chars:
-                papers_text = papers_text[:allowed_chars] + "\n[Truncated for length]"
+                papers_text = _shrink_paper_text(papers_text, allowed_chars)
             prompt = before + "AVAILABLE SOURCES:" + papers_text + rest
 
     return prompt
+
+
+def _cap_findings(summaries: dict[str, dict], cap: int) -> dict[str, dict]:
+    return {
+        k: {**v, "findings": (v.get("findings") or "")[:cap]}
+        for k, v in summaries.items()
+    }
+
+
+_PAPER_START_RE = re.compile(r"(?m)^(?=\[paper_id=\d+\])")
+_MIN_CHARS_PER_PAPER = 400
+
+
+def _shrink_paper_text(text: str, allowed_chars: int) -> str:
+    """
+    Fit the AVAILABLE SOURCES text into `allowed_chars` WITHOUT cutting the tail off
+    mid-paper: every paper keeps a share of the space; if the share would be too small
+    to be useful, whole lowest-ranked papers are dropped instead.
+    """
+    chunks = [c for c in _PAPER_START_RE.split(text) if c.strip()]
+    head = ""
+    if chunks and not chunks[0].lstrip().startswith("[paper_id="):
+        head = chunks.pop(0)
+    if not chunks:
+        return text[:allowed_chars]
+
+    budget = max(allowed_chars - len(head), _MIN_CHARS_PER_PAPER)
+    keep = len(chunks)
+    if budget // keep < _MIN_CHARS_PER_PAPER:
+        keep = max(2, budget // _MIN_CHARS_PER_PAPER)
+    per = budget // keep
+
+    out = []
+    for c in chunks[:keep]:
+        c = c.strip()
+        if len(c) > per:
+            c = c[:per].rsplit(" ", 1)[0].rstrip() + " ..."
+        out.append(c)
+    return "\n" + head + "\n\n".join(out)
+
+
+def _enforce_groq_request_budget(prompt: str, max_output_tokens: int) -> str:
+    """Trim to the request ceiling, then make sure the prompt only allows citing papers it still shows."""
+    out = _enforce_groq_request_budget_raw(prompt, max_output_tokens)
+    shown = _visible_ids_from_block("\n".join(re.findall(r"(?m)^\[paper_id=\d+\].*$", out)))
+
+    def _filter(m: re.Match) -> str:
+        ids = [i for i in m.group(1).split(",") if i.strip() in shown]
+        return "allowed_paper_ids=" + (",".join(ids) or "none")
+
+    out = re.sub(r"allowed_paper_ids=([\d,\s]+)", _filter, out)
+    print(
+        f"[summarize:prompt] est_prompt_tokens={_estimate_tokens(out)} "
+        f"max_output={max_output_tokens} limit={_request_token_limit()} "
+        f"papers_shown={sorted(shown, key=int)}"
+    )
+    return out
+
+
+def _record_seen_ids(state: AgentState, prompt: str) -> None:
+    """Remember which papers the model really saw (after trimming) for the grounding pass."""
+    seen = state.setdefault("_seen_paper_ids", set())
+    seen.update(re.findall(r"(?m)^\[paper_id=(\d+)\]", prompt))
 
 
 def _fit_paper_block_to_budget(
@@ -167,93 +471,51 @@ def _fit_paper_block_to_budget(
     prompt_overhead_tokens: int,
     max_output_tokens: int,
     tpm_limit: int = None,
-    max_abstract: int = 700,
+    max_abstract: int = 1000,
     max_papers: int = 8,
+    min_papers: int = 4,
 ) -> str:
     """
-    Shrinks paper_block until (prompt_tokens + max_output_tokens) fits
-    comfortably under the model's TPM limit.
+    Fits the paper block into the request budget.
+    Shrinks each paper's text first and only then drops papers - never below
+    `min_papers`, because the model must SEE every paper it is allowed to cite.
     """
-    tpm_limit = tpm_limit or getattr(
-        settings,
-        "GROQ_TPM_LIMIT_STRONG",
-        8000,
-    )
+    limit = tpm_limit or _request_token_limit()
+    budget = max(int(limit * 0.85) - max_output_tokens - prompt_overhead_tokens, 500)
 
-    safety_margin = 0.85
-
-    budget = (
-        int(tpm_limit * safety_margin)
-        - max_output_tokens
-        - prompt_overhead_tokens
-    )
-    budget = max(budget, 500)
-
-    n_papers = max_papers
-    abstract_cap = max_abstract
+    n_papers = max(1, min(max_papers, len(papers)))
+    floor_papers = min(min_papers, n_papers)
+    cap = max_abstract
 
     print(
-        f"[summarize:budget] START "
-        f"input_papers={len(papers)} "
-        f"max_papers={max_papers} "
-        f"max_abstract={max_abstract} "
-        f"tpm_limit={tpm_limit} "
-        f"budget={budget} "
-        f"prompt_overhead={prompt_overhead_tokens} "
-        f"max_output={max_output_tokens}"
+        f"[summarize:budget] START input_papers={len(papers)} max_papers={n_papers} "
+        f"findings_cap={cap} request_limit={limit} budget={budget} "
+        f"prompt_overhead={prompt_overhead_tokens} max_output={max_output_tokens}"
     )
 
-    while n_papers >= 1:
+    while True:
         block = _build_paper_block(
             papers,
-            summaries,
-            max_abstract=abstract_cap,
+            _cap_findings(summaries, cap),
+            max_abstract=cap,
             max_papers=n_papers,
         )
+        est = _estimate_tokens(block)
+        print(f"[summarize:budget] CHECK n_papers={n_papers} findings_cap={cap} estimated_tokens={est} budget={budget}")
 
-        estimated_tokens = _estimate_tokens(block)
-
-        print(
-            f"[summarize:budget] CHECK "
-            f"n_papers={n_papers} "
-            f"abstract_cap={abstract_cap} "
-            f"estimated_tokens={estimated_tokens} "
-            f"budget={budget}"
-        )
-
-        if estimated_tokens <= budget:
-            print(
-                f"[summarize:budget] FIT "
-                f"n_papers={n_papers} "
-                f"abstract_cap={abstract_cap} "
-                f"estimated_tokens={estimated_tokens} "
-                f"budget={budget}"
-            )
+        if est <= budget:
+            print(f"[summarize:budget] FIT n_papers={n_papers} findings_cap={cap}")
             return block
 
-        if abstract_cap > 250:
-            abstract_cap = int(abstract_cap * 0.7)
-        else:
+        if cap > 300:
+            cap = int(cap * 0.75)
+        elif n_papers > floor_papers:
             n_papers -= 1
-
-    # last resort
-    block = _build_paper_block(
-        papers,
-        summaries,
-        max_abstract=200,
-        max_papers=1,
-    )
-
-    print(
-        f"[summarize:budget] LAST_RESORT "
-        f"n_papers=1 "
-        f"abstract_cap=200 "
-        f"estimated_tokens={_estimate_tokens(block)} "
-        f"budget={budget}"
-    )
-
-    return block
-
+        elif cap > 150:
+            cap = 150
+        else:
+            print(f"[summarize:budget] LAST_RESORT n_papers={n_papers} findings_cap={cap}")
+            return block
 
 
 class _OrderedSectionEmitter:
@@ -271,14 +533,24 @@ class _OrderedSectionEmitter:
         ordered_module_ids: list[str],
         request_id: str,
         cancel_check=None,
+        numberer: "CitationNumberer | None" = None,
     ):
         self.order = ordered_module_ids
         self.request_id = request_id
         self.cancel_check = cancel_check
+        self.numberer = numberer
+        self._single = len(ordered_module_ids) == 1
 
         self._ready: dict[str, str] = {}
         self._next = 0
         self._lock = threading.Lock()
+
+    def _prepare(self, content: str) -> str:
+        if self._single:
+            content = re.sub(r"^\s*##[^\n]*\n+", "", content, count=1)
+        if self.numberer is not None:
+            content = self.numberer.rewrite(content)
+        return content
 
     def submit(self, module_id: str, content: str) -> None:
         with self._lock:
@@ -298,14 +570,14 @@ class _OrderedSectionEmitter:
             if self.cancel_check and self.cancel_check():
                 return
 
-            bridge_push(self.request_id, ("section", mid, content))
+            bridge_push(self.request_id, ("section", mid, self._prepare(content)))
 
     def flush_remaining(self) -> None:
         with self._lock:
             for mid in self.order[self._next:]:
                 if mid in self._ready:
                     content = self._ready.pop(mid)
-                    bridge_push(self.request_id, ("section", mid, content))
+                    bridge_push(self.request_id, ("section", mid, self._prepare(content)))
 
             self._next = len(self.order)
 
@@ -347,6 +619,9 @@ def _strip_internal_monologue(text: str) -> str:
     return text.strip()
 
 
+_DISCLAIMER_RE = re.compile(
+    r"(?im)^[ \t>*_-]*(?:(?:medical|legal|financial)\s+)?disclaimer\b.*\n?"
+    r"|^[^\n]*(?:not a substitute for professional (?:medical|legal|financial) advice|consult a qualified (?:healthcare|medical|legal|financial))[^\n]*\n?")
 
 _MATH_DISPLAY_RE = re.compile(r"\$\$(.*?)\$\$", re.DOTALL)
 _MATH_INLINE_RE  = re.compile(r"\$([^$\n]+?)\$")
@@ -402,7 +677,123 @@ def _rewrite_author_year_markers(text: str, papers: list[dict]) -> str:
 def _section_max_tokens(state: AgentState, plan: dict) -> int:
     if state.get("response_mode", "normal") == "normal":
         return 2048
-    return 3500 if plan.get("depth") == "high" else 2800
+    base = 4096 if plan.get("depth") == "high" else 3200
+    return min(base, int(_request_token_limit() * 0.30))
+
+
+_CITE_MARKER_RE = re.compile(
+    r"[\[【]\s*paper[\s_]?id\s*[=＝]\s*\d+\s*[\]】]",
+    re.IGNORECASE,
+)
+
+_COMPARE_RE = re.compile(
+    r"(?<!\w)(vs\.?|versus|differences?|difference between|differ|compare[sd]?|"
+    r"comparison|better than|which is better)(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def _repair_numeric_citations(text: str) -> str:
+    """
+    Fixes LLMs that ignore the [paper_id=N] rule and output standard [1], [2] citations.
+    Converts [1] -> [paper_id=0], [1, 2] -> [paper_id=0][paper_id=1].
+    """
+    def repl(m):
+        try:
+            nums = [int(n.strip()) - 1 for n in m.group(1).split(",")]
+            return "".join(f"[paper_id={n}]" for n in nums if n >= 0)
+        except ValueError:
+            return m.group(0)
+    return re.sub(r"\[(\d+(?:\s*,\s*\d+)*)\]", repl, text)
+def _is_comparison_query(q: str) -> bool:
+    return bool(_COMPARE_RE.search(q or ""))
+
+
+PLAIN_LANGUAGE_RULES = """
+WRITING STYLE (CRITICAL - overrides any earlier instruction about jargon or labels):
+- Write for a smart non-specialist (a final-year student), not for a journal reviewer and not for a child.
+- Short sentences. One idea per sentence. Prefer common words.
+- When you must use a technical term, add a few plain words the first time (e.g. "beta-1 receptors (the ones mainly in the heart)").
+- Say what a finding means in practice, not just what was measured.
+- NEVER mention "the retrieved sources", "the provided literature", "the evidence set", "the ledger", or "the user". Say "studies show", "research suggests", or "the evidence is limited".
+- Do not use grading labels like Robust / Probable / Unsupported. Use plain words: "strong evidence", "some evidence", "little evidence".
+- Use bullets with one idea each. No inline label chains like "Mechanistic risks - ... Evidence - ... Failure mode - ...".
+""".strip()
+
+
+GROUNDING_RULES = """
+EVIDENCE RULES (CRITICAL - these override anything above that allows guessing):
+You only see each paper's title and a short excerpt. Treat that text as your ONLY evidence for cited claims.
+Put [paper_id=N] only on a claim that paper's excerpt actually states. Never cite a paper whose excerpt you were not shown.
+If a claim relies on a shown paper, include [paper_id=N] in that same sentence.
+Using a source without citing it is a failure.
+Never write a number, range, ratio, percentage, duration or sample size unless it appears word for word in a cited excerpt. If the excerpt gives no figure, describe the effect in words and do not invent one.
+If the excerpts do not cover a sub-topic the question needs, add it under a final sub-heading "### Established background (not from retrieved sources)" as short, textbook-level facts with NO citation markers and NO numbers. Never write "cannot be confirmed" for standard textbook facts.
+Reviews and overviews support only what their excerpt says; do not cite them for mechanisms, side effects or subgroups the excerpt does not mention.
+""".strip()
+
+
+def _comparison_rules(scope: str = "The answer") -> str:
+    return f"""
+COMPARISON QUESTION - {scope} MUST start like this:
+1. One sentence verdict in plain words (what is the main difference, which is preferred, and when).
+2. A compact markdown table: Feature | A | B with 4-6 rows (e.g. main target, main effect, side effects, who it suits, main caution).
+3. Two or three bullets: "Choose A when ...", "Choose B when ...".
+Only after that give supporting evidence. Do not bury the difference.
+""".strip()
+
+
+def _ground_sections(sections: list[dict], papers: list[dict], state: AgentState) -> list[dict]:
+    if not sections or not papers:
+        return sections
+    texts_by_id = {
+        str(i): f"{p.get('title', '')}. {p.get('summary') or p.get('text') or ''}"
+        for i, p in enumerate(papers)
+    }
+    visible = state.get("_seen_paper_ids") or state.get("_visible_paper_ids") or set(texts_by_id)
+    numeric_on = getattr(settings, "GROUNDING_NUMERIC_CHECK_ENABLED", True)
+    is_normal = state.get("response_mode", "normal") == "normal"
+    drops: list[dict] = []
+    bodies = []
+    
+    marker = "### Established background (not from retrieved sources)"
+    
+    for sec in sections:
+        content = sec.get("content") or ""
+        head, sep, tail = content.partition(marker)
+        body, d = ground_text(head, texts_by_id, visible, numeric_on)
+        body = body + (sep + tail if sep else "")
+        bodies.append(body)
+        drops.extend(d)
+        
+    llm_on = getattr(settings, "CITATION_SUPPORT_CHECK_ENABLED", True) and (
+        not is_normal or getattr(settings, "CITATION_SUPPORT_CHECK_NORMAL", False)
+    )
+    if llm_on:
+        timeout = getattr(settings, "CITATION_SUPPORT_TIMEOUT", 12)
+        checker = get_llm(temperature=0, task="fast")
+        def _invoke_json(system: str, user: str):
+            return checker.invoke_json_mode(
+                [SystemMessage(content=system), HumanMessage(content=user)],
+                config={"timeout": timeout},
+            )
+        bodies, d = verify_support(
+            bodies,
+            texts_by_id,
+            _invoke_json,
+            strict=getattr(settings, "CITATION_SUPPORT_STRICT", False),
+        )
+        drops.extend(d)
+    for sec, body in zip(sections, bodies):
+        words = len(re.sub(r"\[paper_id=\d+\]", "", body).split())
+        if (sec.get("content") or "").strip() and words < 12:
+            body = ABSTAIN_TEXT
+        sec["content"] = body
+        sec["cited_paper_ids"] = extract_paper_ids(body)
+    print(f"[ground] dropped/adjusted {len(drops)} claim(s)")
+    for d in drops:
+        print(f"[ground]   - {d['reason']}: {d['sentence']}")
+    return sections
 
 
 def _clean_content(text):
@@ -420,6 +811,7 @@ def _clean_content(text):
         text,
         flags=re.DOTALL,
     )
+    text = _DISCLAIMER_RE.sub("", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
@@ -444,7 +836,8 @@ def _sanitize_preserving_math(text: str) -> str:
 
     protected = _MATH_DISPLAY_RE.sub(_stash, text)
     protected = _MATH_INLINE_RE.sub(_stash, protected)
-
+    protected = _CITE_MARKER_RE.sub(_stash, protected)
+    protected = _repair_numeric_citations(protected)
     sanitized = sanitize_for_web(protected)
 
     for i, block in enumerate(math_blocks):
@@ -525,7 +918,7 @@ def _fast_summaries(papers: list[dict], state: AgentState) -> dict[str, dict]:
             "paper_id": str(i),
             "key_contribution": p.get("title", ""),
             "methodology": "",
-            "findings": (p.get("summary") or p.get("text") or "")[:600],
+            "findings": (p.get("summary") or p.get("text") or "")[:900],
             "relevance_to_query": "",
             "evidence_type": evidence_type,
             "key_metrics": [],
@@ -1159,7 +1552,7 @@ def _section_batch_prompt(
 
         evidence_lines.append(
             f"- {m['module_id']}: status={e.get('evidence_status', 'none')}, "
-            f"allowed_paper_ids={','.join(e.get('paper_ids', [])[:6]) or 'none'}, "
+            f"allowed_paper_ids={','.join([str(x) for x in e.get('paper_ids', []) if str(x) in _visible_ids_from_block(paper_block)][:6]) or 'none'}, "
             f"note={e.get('notes', '')}"
         )
 
@@ -1203,10 +1596,11 @@ def _section_batch_prompt(
         )
 
     dedup_instruction += (
-        "\nREPETITION RULE:\n"
-        "Do not repeat the same paragraph, equation, or explanation across modules.\n"
-        "Each module must contain unique information.\n"
-        "If another section already explains a concept, reference it briefly instead of restating it.\n"
+        "\nSTRICT ANTI-REPETITION RULE:\n"
+        "Do NOT generate identical comparison tables, executive summaries, or verdicts in every section.\n"
+        "Only generate a markdown table if the specific module goal explicitly requires it.\n"
+        "Never repeat the same bullet points or core arguments across different modules.\n"
+        "If a fact was already covered in a previous section, reference it briefly ('as shown above') instead of restating it.\n"
     )
 
     epistemic_mode = (state.get("report_plan") or {}).get(
@@ -1274,8 +1668,14 @@ Do NOT pad the text with unnecessary data, repetitive sentences, or fluff just t
 Write naturally and thoroughly until the topic is fully covered for the module's Goal.
 """
 
+    style_block = GROUNDING_RULES + "\n\n" + PLAIN_LANGUAGE_RULES
+    if _is_comparison_query(state.get("query", "")):
+        style_block += "\n\n" + _comparison_rules("The Direct Answer section")
+
     return f"""
 You are writing part of a dynamic research report.
+
+{_mode_positioning(state.get('response_mode', 'normal'))}
 
 USER QUERY:
 {state.get('query', '')}
@@ -1325,6 +1725,10 @@ CITATION RULES:
 Use inline citations as [paper_id=N].
 Only cite paper_ids that appear in AVAILABLE SOURCES.
 Do not invent citations.
+
+Every used source must be cited.
+If a sentence uses information from a paper, include [paper_id=N] in that sentence.
+Do not silently use a retrieved source.
 Cite a source only if it specifically supports the claim in that sentence.
 Do not cite a source just because it was retrieved. One citation per specific claim, not a stack.
 
@@ -1387,6 +1791,8 @@ QUANTITATIVE ANCHORING: Ban vague adjectives (e.g., "fast", "expensive", "effect
 ACTIVE DEBATES: Identify where the current consensus ends. Highlight active debates, competing schools of thought, or recent paradigm shifts that challenge older literature.
 
 STRATEGIC INFERENCE: In independent analysis, do not give generic advice. Synthesize the evidence into a high-level strategic conclusion that maps trade-offs to specific constraints (e.g., "Choose X when constraint A is binding; choose Y when constraint B dominates").
+
+{style_block}
 
 {FORMAT_INSTRUCTION}
 """.strip()
@@ -1493,6 +1899,7 @@ def _invoke_section_batch(
         + "Do NOT wrap in JSON. Do NOT use code fences."
     )
     full_prompt = _enforce_groq_request_budget(full_prompt, _section_max_tokens(state, plan))
+    _record_seen_ids(state, full_prompt)
     messages = [
         SystemMessage(
             content=(
@@ -1566,6 +1973,7 @@ def _stream_invoke_section_batch(
         + "Do NOT wrap in JSON. Do NOT use code fences."
     )
     full_prompt = _enforce_groq_request_budget(full_prompt, _section_max_tokens(state, plan))
+    _record_seen_ids(state, full_prompt)
     messages = [
         SystemMessage(
             content=(
@@ -1596,8 +2004,7 @@ def _stream_invoke_section_batch(
         cleaned = _rewrite_author_year_markers(cleaned, state.get("ranked_papers", []))
         cited_ids = extract_paper_ids(cleaned)
 
-        display_content = rewrite_inline_citations(cleaned, id_map)
-        display_content = _sanitize_preserving_math(display_content)
+        display_content = _sanitize_preserving_math(cleaned)
 
         if emitter is not None:
             emitter.submit(mid, f"## {m['title']}\n\n{display_content}\n")
@@ -1697,8 +2104,7 @@ def _stream_invoke_section_batch(
 
             cited_ids = extract_paper_ids(cleaned)
 
-            display_content = rewrite_inline_citations(cleaned, id_map)
-            display_content = _sanitize_preserving_math(display_content)
+            display_content = _sanitize_preserving_math(cleaned)
 
             if emitter is not None:
                 emitter.submit(
@@ -1850,8 +2256,7 @@ def _generate_sections_batch_streaming(
 
             cited_ids = extract_paper_ids(cleaned)
 
-            display_content = rewrite_inline_citations(cleaned, id_map)
-            display_content = _sanitize_preserving_math(display_content)
+            display_content = _sanitize_preserving_math(cleaned)
 
             sec["content"] = cleaned
             sec["cited_paper_ids"] = cited_ids
@@ -2293,45 +2698,10 @@ def _select_references(
     summaries: dict,
     target_k: int | None = None,
 ) -> list[dict]:
-    policy = plan.get("reference_policy", "standard")
-    if policy == "none":
+    """Only papers that are actually cited. No padding with retrieved-but-uncited ones."""
+    if plan.get("reference_policy", "standard") == "none":
         return []
-
-
-    if target_k and target_k > 0:
-        max_refs = target_k
-    else:
-        max_refs = {
-            "minimal": 4,
-            "standard": 8,
-            "research": 15,
-            "documentation": 8,
-        }.get(policy, 8)
-
-
-    selected = []
-    seen = set()
-
-
-    for r in references:
-        rid = r.get("id")
-        if rid in cited_ref_ids and rid not in seen:
-            selected.append(r)
-            seen.add(rid)
-
-
-    if len(selected) < max_refs:
-        for r in references:
-            if len(selected) >= max_refs:
-                break
-            rid = r.get("id")
-            if rid in seen:
-                continue
-            selected.append(r)
-            seen.add(rid)
-
-
-    return selected[:max_refs]
+    return [r for r in references if r.get("id") in cited_ref_ids]
 
 
 def _compute_dynamic_confidence(
@@ -2534,6 +2904,13 @@ def _merge_sections(sections: list[dict], plan: dict) -> str:
         if not content:
             continue
 
+        if (
+            "do not contain enough direct evidence" in content 
+            or "do not contain enough relevant research" in content
+            or "treat this as a starting point" in content
+        ):
+            continue
+
         title = s.get("title") or MODULE_LIBRARY.get(
             s.get("module_id"),
             {},
@@ -2541,9 +2918,12 @@ def _merge_sections(sections: list[dict], plan: dict) -> str:
 
         content = _strip_headers(content)
 
-        parts.append(f"## {title}\n\n{content}\n")
+        parts.append((title, content))
 
-    return "\n".join(parts).strip()
+    if len(parts) == 1:
+        return parts[0][1].strip()
+
+    return "\n".join(f"## {t}\n\n{c}\n" for t, c in parts).strip()
 
 
 def _word_count(text: str) -> int:
@@ -2723,7 +3103,6 @@ def _expand_shallow_modules(
 
     for s in sections:
         if s.get("module_id") in (
-            "direct_answer",
             "derivation",
             "research_findings",
             "comparative_analysis",
@@ -2805,11 +3184,10 @@ def _generate_premium_normal_sections(
 ) -> list[dict]:
     if not papers:
         content = (
-            "**Direct answer:** I could not find sufficiently relevant evidence "
-            "in the current retrieval set.\n\n"
-            "**Evidence:** No usable sources were available.\n\n"
-            "**Independent analysis:** The answer should be treated as low confidence.\n\n"
-            "**Limitations:** This response is limited by lack of retrieved evidence."
+            "**Short answer:** I could not find enough relevant research to answer "
+            "this reliably.\n\n"
+            "**What's uncertain:** No usable studies came back for this question. "
+            "Try rephrasing it, or switch to Researched mode for a wider search."
         )
 
         return [
@@ -2829,27 +3207,16 @@ def _generate_premium_normal_sections(
         max_abstract=450,
         max_papers=4,
     )
+    state["_visible_paper_ids"] = _visible_ids_from_block(paper_block)
 
     query = state.get("query", "")
 
-    q = query.lower()
-
-    comparison_hint = ""
-
-    if any(
-        word in q
-        for word in (
-            "compare",
-            "comparison",
-            "versus",
-            "vs",
-            "difference between",
-        )
-    ):
-        comparison_hint = (
-            "Include one compact markdown comparison table if the sources support it. "
-            "Keep the table factual and concise."
-        )
+    comparison_block = _comparison_rules("The Short answer") if _is_comparison_query(query) else ""
+    length_hint = (
+        "Length: 500 to 800 words."
+        if _is_technical_derivation(query, None)
+        else "Length: 350 to 550 words."
+    )
 
     prompt = f"""
 USER QUERY:
@@ -2862,43 +3229,39 @@ AVAILABLE SOURCES:
 
 {_answer_spec_context(state, state.get('evidence_matrix') or {})}
 
-You are a premium research analyst.
-Write a concise, high-quality, evidence-backed answer.
+You are Direct Mode: research assistance on demand.
+You support academic writing by giving a direct, clear, source-supported answer.
 
-Length:
-650 to 900 words.
+{_mode_positioning('normal')}
 
-Start with a direct, unlabeled opening paragraph that answers the question.
-Then, use these exact bold labels for the rest of the response:
-**Evidence:**
-**Analysis:**
-**Limitations:**
+{GROUNDING_RULES}
 
-{comparison_hint}
+{PLAIN_LANGUAGE_RULES}
+
+{comparison_block}
+
+{length_hint}
+
+Structure (use these exact bold labels, no markdown headings):
+**Short answer:** 2-3 plain sentences that fully answer the question.
+(If this is a comparison: put the verdict, the table and the "Choose ... when" bullets here.)
+**What the research shows:** 3-5 bullets, each one claim with its citation [paper_id=N].
+**What's uncertain:** 1-3 bullets on gaps or weak evidence.
 
 Rules:
 Do not output <think>, thinking, analysis, planning, or internal reasoning. Return only final user-facing content.
-If the available source is short or fragmented, give a shorter answer and explicitly state what is missing. Do not expand with outside knowledge.
+If the available sources are short or fragmented, give a shorter answer and say plainly what is missing. Do not expand with outside knowledge.
 Answer the exact question. Do not add unrelated applications, surveys, or background unless required by the answer spec.
 If the question asks about an original system, theory, algorithm, equation, or architecture, describe the original/canonical version first.
 Never invent specific numbers. If quantifying without sources, prefix with "Inference:" or "Estimate:" and state assumptions.
 Use only the available sources.
-Cite sources using [paper_id=N].
+Cite sources using [paper_id=N] right after the claim they support.
 Cite a source only when it directly supports the exact claim; do not cite a source merely because it was retrieved.
-
-Origin/historical claims: cite the primary source when available; otherwise state the claim relies on secondary evidence.
-
+Origin/historical claims: cite the primary source when available; otherwise say the claim rests on secondary evidence.
 For equations and derivations, use canonical notation, define every symbol, and do not drop scaling terms.
-If required components are listed, explicitly include and explain each one.
-
-Do not invent citations.
-Do not invent metrics.
-Do not overstate certainty.
-If critical evidence is missing, reduce certainty and state the gap explicitly.
-
-Clearly separate evidence from inference.
-Keep the answer premium, sharp, and useful.
-
+If required components are listed in the answer spec, explicitly include and explain each one.
+Do not invent citations. Do not invent metrics. Do not overstate certainty.
+If critical evidence is missing, say so plainly.
 Do not write a References section.
 Do not use markdown headings.
 """.strip()
@@ -2935,20 +3298,18 @@ Do not use markdown headings.
         abstract = (first.get("summary") or first.get("text") or "")[:500]
 
         content = (
-            f"The available evidence is limited, but the top retrieved source provides some insight.\n\n"
-            f"**Evidence:** [paper_id=0] {first.get('title', 'Untitled')}: {abstract}\n\n"
-            f"**Analysis:** The answer should be treated as provisional based on this single source.\n\n"
-            f"**Limitations:** Only limited evidence could be retrieved quickly."
+            f"**Short answer:** The evidence is limited, so treat this as provisional.\n\n"
+            f"**What the research shows:**\n- [paper_id=0] {first.get('title', 'Untitled')}: {abstract}\n\n"
+            f"**What's uncertain:** Only one source could be retrieved quickly."
         )
 
     if not content.strip():
         first = papers[0]
 
         content = (
-            f"The top retrieved evidence is: {first.get('title', 'Untitled')}.\n\n"
-            f"**Evidence:** [paper_id=0] {(first.get('summary') or '')[:400]}\n\n"
-            f"**Analysis:** The answer should be treated as provisional.\n\n"
-            f"**Limitations:** Only limited evidence could be retrieved quickly."
+            f"**Short answer:** The best match found is: {first.get('title', 'Untitled')}.\n\n"
+            f"**What the research shows:**\n- [paper_id=0] {(first.get('summary') or '')[:400]}\n\n"
+            f"**What's uncertain:** Only limited evidence could be retrieved quickly."
         )
 
     cited_ids = extract_paper_ids(content)
@@ -3382,64 +3743,24 @@ def summarize_node(state: AgentState) -> AgentState:
         )
 
     else:
-        depth_to_max = {
-            "low": 6,
-            "medium": 8,
-            "high": 10,
-        }
-
-        max_papers = min(len(papers), depth_to_max.get(depth, 8))
-
-        max_abstract = 750
-
-        paper_block = _fit_paper_block_to_budget(
-            papers,
-            summaries,
-            prompt_overhead_tokens=_estimate_tokens(FORMAT_INSTRUCTION) + 3500,  # Increased to account for ledger, spec, epistemic instructions
-            max_output_tokens=_section_max_tokens(state, plan),
-        )
-
+        state["_visible_paper_ids"] = set()
+        emitter = None
         if streaming_enabled:
-            ordered_ids = [m["module_id"] for m in generative_modules]
-
-            emitter = _OrderedSectionEmitter(
-                ordered_module_ids=ordered_ids,
-                request_id=request_id,
-                cancel_check=state.get("_cancel_check"),
-            )
-
-            sections = _generate_all_sections_streaming(
-                generative_modules,
-                paper_block,
-                state,
-                evidence_map,
-                guardrails,
-                plan,
-                depth,
-                emitter,
-                id_map,
-            )
-
-        else:
-            sections = _generate_all_sections(
-                generative_modules,
-                paper_block,
-                state,
-                evidence_map,
-                guardrails,
-                plan,
-                depth,
-            )
-
-        sections = _expand_shallow_modules(
-            sections,
-            state,
-            plan,
-            papers,
-            summaries,
-        )
+            emitter = _OrderedSectionEmitter([m["module_id"] for m in generative_modules],
+                                            request_id, state.get("_cancel_check"), CitationNumberer(id_map))
+        sections = _generate_sections_per_module(generative_modules, papers, summaries, state,
+                                                evidence_map, guardrails, plan, emitter, depth)
+        state["_visible_paper_ids"] = set(state.get("_seen_paper_ids", set()))
+        sections = _expand_shallow_modules(sections, state, plan, papers, summaries)
 
     sections = _dedupe_sections(sections)
+
+
+    for s_ in sections:
+        s_["content"] = _rewrite_author_year_markers(s_.get("content", ""), papers)
+
+    sections = _ground_sections(sections, papers, state)
+    sections = _add_missing_numeric_citations(sections, papers, state)
 
     cited_paper_ids = _collect_cited_paper_ids(sections, papers)
 
@@ -3462,6 +3783,15 @@ def summarize_node(state: AgentState) -> AgentState:
         papers,
         summaries,
         target_k=state.get("target_paper_k"),
+    )
+
+    # TEMP DEBUG: remove once citations look right.
+    _n = lambda t: len(re.findall(r"\[paper_id=\d+\]", t or ""))
+    print(
+        "[cite-debug] markers per section:",
+        [(x.get("module_id"), _n(x.get("content"))) for x in sections],
+        "| cited_paper_ids:", cited_paper_ids,
+        "| refs kept:", len(selected_refs),
     )
 
     dynamic_confidence = _compute_dynamic_confidence(

@@ -395,9 +395,10 @@ export const api = {
       }
     );
   },
-  ensureGraph(sessionId: string, force = false): Promise<FullGraphData> {
+  ensureGraph(sessionId: string, force = false, chatId?: string): Promise<FullGraphData> {
+    const q = queryString({ force: force ? "true" : undefined, chat_id: chatId });
     return request<FullGraphData>(
-      `/graph/${encodeURIComponent(sessionId)}/ensure${force ? "?force=true" : ""}`,
+      `/graph/${encodeURIComponent(sessionId)}/ensure${q ? `?${q}` : ""}`,
       { method: "GET" }
     );
   },

@@ -6,7 +6,7 @@ MODULE_LIBRARY = {
     "direct_answer": {
         "title": "Direct Answer",
         "order": 100,
-        "purpose": "Give the explicit answer to the user's question immediately.",
+        "purpose": "Answer in 60-120 plain-English words. For comparison questions, add a compact comparison table right after. Details belong in later sections.",
         "evidence_policy": "evidence_preferred",
         "requires_citations": True,
         "always": True,
@@ -302,13 +302,12 @@ def _is_definitional(query: str, understanding: dict | None = None) -> bool:
 
 def _has_comparison_signal(query: str, understanding: dict | None = None) -> bool:
     q = (query or "").lower()
-    explicit = any(
-        w in q
-        for w in (
-            "compare ", "comparison ", "versus ", "vs ", "difference between ",
-            "differences between ", "trade-off ", "tradeoff ", "pros and cons ",
-            "advantages and disadvantages ", "better ", "faster ",
-            "more efficient ", "outperform ",
+    explicit = bool(
+        re.search(
+            r"(?<!\w)(compare[sd]?|comparison|versus|vs\.?|differences?|differ|"
+            r"trade-?offs?|pros and cons|advantages and disadvantages|"
+            r"better|faster|more efficient|outperform\w*)(?!\w)",
+            q,
         )
     )
     if explicit:
@@ -664,6 +663,8 @@ def normalize_report_plan(raw_plan: dict, state: dict) -> dict:
                 80,
                 int(target_words * 0.92 * m["importance"] / total_importance),
             )
+            if module_id == "direct_answer":
+                module_target = min(module_target, 160)
         normalized_modules.append(
             {
                 "module_id": module_id,
@@ -699,8 +700,28 @@ def normalize_report_plan(raw_plan: dict, state: dict) -> dict:
         information_needs.append("visualization")
 
 
-    guardrails = raw_plan.get("domain_guardrails") or detect_domain_guardrails(
-        query, understanding
+    guardrails = list(
+        raw_plan.get("domain_guardrails")
+        or detect_domain_guardrails(query, understanding)
+    )
+
+    if response_mode == "normal":
+        guardrails.append(
+            "Position this answer as Direct Mode: research assistance on demand. "
+            "Do not claim systematic research execution, systematic review, PRISMA, "
+            "exhaustive search, or formal source-verification methodology."
+        )
+    else:
+        guardrails.append(
+            "Position this answer as Researched Mode: research execution and evidence synthesis. "
+            "Describe the process accurately as targeted retrieval, source evaluation, "
+            "evidence synthesis, and citation checking."
+        )
+
+    guardrails.append(
+        "Methodological honesty: do not claim systematic-review rigor, PRISMA, "
+        "registered protocol, exhaustive search, formal risk-of-bias assessment, "
+        "or any review methodology that was not actually performed."
     )
     latency_notice = raw_plan.get("latency_notice")
     if not latency_notice:

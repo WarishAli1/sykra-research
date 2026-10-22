@@ -18,6 +18,7 @@ class AgentState(TypedDict):
     domain_keywords: list[str]
     mandatory_domain_keywords: Optional[list[str]]
     search_attempts: int
+    method_note: Optional[str]
     max_search_attempts: int
     raw_search_results: list[dict]
     extracted_papers: list[dict]

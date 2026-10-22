@@ -103,10 +103,10 @@ class Settings(BaseSettings):
     SEMANTIC_CACHE_TTL_SECONDS: int = 3600
     REQUEST_DEDUP_ENABLED: bool = True
 
-    GROQ_MODEL_FAST: str = "qwen/qwen3.8-27b"
+    GROQ_MODEL_FAST: str = "openai/gpt-oss-20b"
     GROQ_MODEL_DEFAULT: str = "qwen/qwen3.8-27b"
     GROQ_MODEL_STRONG: str = "openai/gpt-oss-120b"
-
+    GROQ_GPT_OSS_REASONING_EFFORT: str = "low"
     LLM_THINKING_CONTROL_MAP: str = (
         "qwen=Do not think or output internal reasoning. Return only final answer."
     )
@@ -118,11 +118,17 @@ class Settings(BaseSettings):
     LLM_VERIFY_ENABLED: bool = True
     LLM_REVISE_ENABLED: bool = True
     LLM_ANSWER_SPEC_ENABLED: bool = True
-    LLM_MAX_PROMPT_TOKENS: int = 16000
+    LLM_MAX_PROMPT_TOKENS: int = 8000
     RERANK_MAX_CANDIDATES: int = 10
-    GROQ_TPM_LIMIT: int = 60000
+    GROQ_TPM_LIMIT: int = 8000
     LLM_MAX_OUTPUT_TOKENS: int = 8192
     
+    GROUNDING_NUMERIC_CHECK_ENABLED: bool = True   
+    CITATION_SUPPORT_CHECK_ENABLED: bool = True    
+    CITATION_SUPPORT_CHECK_NORMAL: bool = False   
+    CITATION_SUPPORT_STRICT: bool = False        
+    CITATION_SUPPORT_TIMEOUT: int = 12
+
     EVIDENCE_SUFFICIENCY_THRESHOLD: float = 0.60
     EVIDENCE_SUFFICIENCY_WARNING_THRESHOLD: float = 0.85
 

@@ -59,6 +59,48 @@ _PAPER_ID_MARKER = re.compile(
 )
 _REF_ID_MARKER = re.compile(r"\[(\d+)\]")
 
+
+_MARKER_WITH_LEAD_RE = re.compile(
+    r"(?:(?<=[^\s\-*:#>|])[ \t]+)?" + _PAPER_ID_MARKER.pattern,
+    re.IGNORECASE,
+)
+
+
+class CitationNumberer:
+    """
+    Rewrites [paper_id=N] -> [k], numbering by FIRST APPEARANCE across every
+    call to rewrite(). Unknown / hallucinated ids are dropped (with the space
+    before them). Keep one instance per answer so numbering stays consistent.
+
+    id_map: {"<paper index>": <reference id>} from paper_id_to_ref_id_map().
+    """
+
+    def __init__(self, id_map: dict[str, int]):
+        self.id_map = id_map or {}
+        self.order: dict[int, int] = {}  # reference id -> displayed number
+
+    def rewrite(self, text: str) -> str:
+        if not text:
+            return ""
+
+        def _sub(m):
+            ref_id = self.id_map.get(m.group(1))
+            if ref_id is None:
+                return ""
+            n = self.order.setdefault(ref_id, len(self.order) + 1)
+            return f"[{n}]"
+
+        return _MARKER_WITH_LEAD_RE.sub(_sub, text)
+
+    def renumber_references(self, references: list[dict]) -> list[dict]:
+        """Cited references only, ids = displayed numbers, sorted by number."""
+        by_id = {r["id"]: r for r in references}
+        out = []
+        for ref_id, n in sorted(self.order.items(), key=lambda kv: kv[1]):
+            if ref_id in by_id:
+                out.append({**by_id[ref_id], "id": n})
+        return out
+
 def extract_paper_ids(text: str) -> list[str]:
     if not text:
         return []

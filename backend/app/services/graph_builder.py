@@ -87,12 +87,15 @@ def _enrich(graph: dict) -> dict:
     return {"nodes": nodes, "links": links, "stats": _compute_stats(nodes, links),
             "legend": legend, "rel": rel}
 
-def get_enriched(session_id: str, force: bool = False) -> dict:
+def get_enriched(session_id: str, force: bool = False, focus_links: list[str] | None = None) -> dict:
     if not settings.GRAPH_ENABLED:
         return {"nodes": [], "links": [], "stats": _compute_stats([], []), "legend": [], "rel": {}}
-    build_session_graph(session_id, force=force)   # fast on cache hit
+    
+    build_session_graph(session_id, force=force, focus_links=focus_links)
+    
     cache = _load_cache(session_id)
     return cache.get("enriched") or _enrich(cache.get("graph") or {"nodes": [], "links": []})
+
 
 def filter_view(enriched: dict, paper_links: list[str] | None = None,
                 max_year: int | None = None) -> dict:
@@ -122,7 +125,24 @@ def filter_view(enriched: dict, paper_links: list[str] | None = None,
                 keep.add(l["source"]); keep.add(l["target"])
         nodes = [n for n in nodes if n["id"] in keep]
         links = [l for l in links if l["source"] in keep and l["target"] in keep]
-    return {"nodes": nodes, "links": links, "stats": _compute_stats(nodes, links)}
+    seen_n: set[str] = set()
+    out_nodes = []
+    for n in nodes:
+        if n["id"] in seen_n:
+            continue
+        seen_n.add(n["id"])
+        out_nodes.append(n)
+    seen_l: set[tuple[str, str, str]] = set()
+    out_links = []
+    for l in links:
+        k = (l["source"], l["target"], l["type"])
+        if k in seen_l:
+            continue
+        seen_l.add(k)
+        out_links.append(l)
+    return {"nodes": out_nodes, "links": out_links,
+            "stats": _compute_stats(out_nodes, out_links)}
+
 
 def suggest_nodes(enriched: dict, q: str, top_k: int = 8) -> list[dict]:
     """Fast lexical typeahead: exact > prefix > token-prefix > substring > subsequence."""
@@ -223,6 +243,15 @@ def _safe_session(session_id: str) -> str:
 
 def _cache_path(session_id: str) -> str:
     return os.path.join(settings.GRAPH_CACHE_DIR, f"{_safe_session(session_id)}.json")
+
+
+def drop_cache(session_id: str) -> None:
+    try:
+        os.remove(_cache_path(session_id))
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[graph_builder] cache drop failed: {e}")
 
 
 def _load_cache(session_id: str) -> dict:
@@ -326,10 +355,28 @@ def _fetch_cites_edges(papers_meta: list[dict], cache: dict, force: bool) -> tup
 
 def _assemble_graph(papers_meta: list[dict], entities: dict[str, dict], cites_edges: list[dict]) -> dict:
     nodes, links = [], []
+    node_ids: set[str] = set()
     link_set: set[tuple[str, str]] = set()
+    link_triples: set[tuple[str, str, str]] = set()
+
+    def add_node(n: dict) -> None:
+        if n["id"] in node_ids:
+            return
+        node_ids.add(n["id"])
+        nodes.append(n)
+
+    def add_link(l: dict) -> None:
+        if l["source"] == l["target"]:
+            return
+        triple = (l["source"], l["target"], l["type"])
+        if triple in link_triples:
+            return
+        link_triples.add(triple)
+        link_set.add(tuple(sorted((l["source"], l["target"]))))
+        links.append(l)
 
     for p in papers_meta:
-        nodes.append({
+        add_node({
             "id": p["link"], "name": p.get("title", "Untitled"),
             "type": "paper", "val": 10, "source": p.get("source", "unknown"),
             "published": p.get("published", "") or "",
@@ -337,12 +384,12 @@ def _assemble_graph(papers_meta: list[dict], entities: dict[str, dict], cites_ed
             "citation_count": int(p.get("citation_count", 0) or 0),
             "excerpt": (p.get("_text", "") or "")[:300],
         })
+
     texts_embed = [f"{p.get('title', '')}. {p.get('_text', '')[:500]}" for p in papers_meta]
     vecs = embed_texts(texts_embed) if texts_embed else []
 
     for e in cites_edges:
-        links.append(e)
-        link_set.add(tuple(sorted((e["source"], e["target"]))))
+        add_link(dict(e))
 
     best: dict[str, list[tuple[float, str]]] = {p["link"]: [] for p in papers_meta}
     for i in range(len(papers_meta)):
@@ -355,29 +402,21 @@ def _assemble_graph(papers_meta: list[dict], entities: dict[str, dict], cites_ed
     for src, neigh in best.items():
         neigh.sort(key=lambda x: x[0], reverse=True)
         for s, dst in neigh[: settings.GRAPH_MAX_SIMILAR_EDGES_PER_PAPER]:
-            key = tuple(sorted((src, dst)))
-            if key in link_set:
+            if tuple(sorted((src, dst))) in link_set:
                 continue
-            link_set.add(key)
-            links.append({"source": src, "target": dst, "type": "similar", "weight": round(s, 3)})
+            add_link({"source": src, "target": dst, "type": "similar", "weight": round(s, 3)})
 
     for p in papers_meta:
         ent = entities.get(p["link"], {})
         for c in ent.get("concepts", []):
-            cid = f"concept_{c}"
-            if not any(n["id"] == cid for n in nodes):
-                nodes.append({"id": cid, "name": c, "type": "concept", "val": 5})
-            links.append({"source": p["link"], "target": cid, "type": "discusses"})
+            add_node({"id": f"concept_{c}", "name": c, "type": "concept", "val": 5})
+            add_link({"source": p["link"], "target": f"concept_{c}", "type": "discusses"})
         for m in ent.get("methods", []):
-            mid = f"method_{m}"
-            if not any(n["id"] == mid for n in nodes):
-                nodes.append({"id": mid, "name": m, "type": "method", "val": 5})
-            links.append({"source": p["link"], "target": mid, "type": "uses"})
+            add_node({"id": f"method_{m}", "name": m, "type": "method", "val": 5})
+            add_link({"source": p["link"], "target": f"method_{m}", "type": "uses"})
         for d in ent.get("datasets", []):
-            did = f"dataset_{d}"
-            if not any(n["id"] == did for n in nodes):
-                nodes.append({"id": did, "name": d, "type": "dataset", "val": 5})
-            links.append({"source": p["link"], "target": did, "type": "evaluates"})
+            add_node({"id": f"dataset_{d}", "name": d, "type": "dataset", "val": 5})
+            add_link({"source": p["link"], "target": f"dataset_{d}", "type": "evaluates"})
 
     degree: dict[str, int] = {}
     for l in links:
@@ -427,7 +466,7 @@ def _mirror_neo4j(session_id: str, papers_meta: list[dict], entities: dict, grap
 
 def semantic_query(session_id: str, q: str, top_k: int = 6) -> list[dict]:
     """Natural-language navigation: rank graph nodes by embedding similarity."""
-    graph = build_session_graph(session_id)
+    graph = build_session_graph(session_id, focus_links=focus_links)
     nodes = graph["nodes"]
     if not nodes or not (q or "").strip():
         return []
@@ -444,24 +483,41 @@ def semantic_query(session_id: str, q: str, top_k: int = 6) -> list[dict]:
     ]
 
 
-def build_session_graph(session_id: str, force: bool = False) -> dict:
+def build_session_graph(session_id: str, force: bool = False, focus_links: list[str] | None = None) -> dict:
     if not settings.GRAPH_ENABLED:
         return {"nodes": [], "links": []}
+        
     with _session_lock(session_id):
         cache = _load_cache(session_id)
-        papers_meta = [
+        all_papers = [
             p for p in vector_store.get_session_papers(session_id)
             if p.get("link") and p.get("title")
-        ][: settings.GRAPH_MAX_PAPERS]
+        ]
+        
+        focus_set = set(focus_links) if focus_links else set()
+        focused_papers = [p for p in all_papers if p["link"] in focus_set]
+        other_papers = [p for p in all_papers if p["link"] not in focus_set]
+        remaining_slots = max(0, settings.GRAPH_MAX_PAPERS - len(focused_papers))
+        papers_meta = focused_papers + other_papers[:remaining_slots]
+        
+        _seen = set()
+        _deduped = []
+        for p in papers_meta:
+            if p["link"] in _seen:
+                continue
+            _seen.add(p["link"])
+            _deduped.append(p)
+        papers_meta = _deduped
+
         if not papers_meta:
             return {"nodes": [], "links": []}
-
+            
         current_links = sorted(p["link"] for p in papers_meta)
         schema_ok = cache.get("schema") == CACHE_SCHEMA
-
+        
         if not force and schema_ok and cache.get("graph") and cache.get("paper_links") == current_links:
             return cache["graph"]
-
+            
         if force or not schema_ok:
             entities: dict[str, dict] = {}
             no_entities: set[str] = set()
@@ -471,7 +527,7 @@ def build_session_graph(session_id: str, force: bool = False) -> dict:
             no_entities = {k for k in cache.get("no_entity_links", []) if k in set(current_links)}
             known = set(entities) | no_entities
             new_papers = [p for p in papers_meta if p["link"] not in known]
-
+            
         if new_papers:
             for p in new_papers:
                 p["_text"] = (vector_store.get_full_text_for_paper(p["link"], session_id) or "")
@@ -485,13 +541,14 @@ def build_session_graph(session_id: str, force: bool = False) -> dict:
                         entities[p["link"]] = extracted[p["link"]]
                     else:
                         no_entities.add(p["link"])
-
+                        
         for p in papers_meta:
             if "_text" not in p:
                 p["_text"] = (vector_store.get_full_text_for_paper(p["link"], session_id) or "")
-
+                
         cites_edges, cites_map = _fetch_cites_edges(papers_meta, cache, force)
         graph = _assemble_graph(papers_meta, entities, cites_edges)
+        
         _save_cache(session_id, {
             "schema": CACHE_SCHEMA,
             "built_at": time.time(),
@@ -508,7 +565,7 @@ def build_session_graph(session_id: str, force: bool = False) -> dict:
 
 
 def get_clusters(session_id: str, paper_links: list[str] | None = None) -> list[dict]:
-    graph = build_session_graph(session_id)
+    graph = build_session_graph(session_id, focus_links=paper_links)
     allowed = set(paper_links) if paper_links is not None else None
     clusters: dict[str, list[str]] = {}
     paper_names = {

@@ -4,6 +4,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from app.agents.state import AgentState
 from app.services.llm_client import get_llm
 from app.config import settings
+from app.services.citation_grounding import (
+    MARKER_RE,
+    extract_quantities,
+    rewrite_sentences,
+)
 
 _MAX_REVISIONS = 2
 _MIN_MODULES_FOR_CRITIQUE = 1
@@ -54,6 +59,45 @@ def _normalize_component(text: str) -> str:
     text = re.sub(r"[^\w\s-]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+_SYSTEMATIC_CLAIM_RE = re.compile(
+    r"\b(?:this|we|our|the)\b.{0,120}?"
+    r"\b(systematic review|systematic literature review|PRISMA|"
+    r"registered protocol|exhaustive search|risk of bias assessment)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _has_systematic_overclaim(state: AgentState) -> bool:
+    query = (state.get("query") or "").lower()
+
+    if any(
+        term in query
+        for term in (
+            "systematic review",
+            "prisma",
+            "systematic literature review",
+        )
+    ):
+        return False
+
+    return bool(_SYSTEMATIC_CLAIM_RE.search(state.get("final_answer") or ""))
+
+
+def _uncited_quantitative_count(text: str) -> int:
+    count = 0
+
+    def _count(sent: str) -> str:
+        nonlocal count
+
+        if not MARKER_RE.search(sent) and extract_quantities(sent):
+            count += 1
+
+        return sent
+
+    rewrite_sentences(text or "", _count)
+    return count
+
 
 def component_appears_in_answer(component: str, answer: str) -> bool:
     comp = _normalize_component(component)
@@ -232,6 +276,20 @@ def critique_node(state: AgentState) -> AgentState:
         return {"needs_revision": False}
 
     hard_failures = []
+    if _has_systematic_overclaim(state):
+        hard_failures.append(
+            "Answer claims systematic-review-level methodology. "
+            "Rewrite it as targeted retrieval and evidence synthesis unless a formal "
+            "systematic-review protocol was actually followed."
+        )
+
+    uncited_quant_count = _uncited_quantitative_count(state.get("final_answer", ""))
+    if uncited_quant_count >= 2:
+        hard_failures.append(
+            "Quantitative claims appear without citations. "
+            "Add citations for every used source or remove the unsupported numbers."
+        )
+
     epistemic_report = state.get("epistemic_report") or {}
     if epistemic_report.get("unsupported_quantitative_claims", 0) >= 2:
         hard_failures.append(

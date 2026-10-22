@@ -66,6 +66,9 @@ def _needs_verification(state: AgentState) -> bool:
     Run expensive verification only for higher-risk researched answers.
     """
     answer_spec = state.get("answer_spec") or {}
+    
+    if state.get("response_mode") in ("researched", "graph_research"):
+        return True
 
     if answer_spec.get("equation_verification_required"):
         return True

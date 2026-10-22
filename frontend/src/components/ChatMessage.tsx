@@ -26,7 +26,6 @@ import {
   Zap,
   ChevronDown,
   Table2,
-  AlertTriangle,
 } from "lucide-react";
 import type { ChatTurn } from "@/lib/types";
 import { api, ApiError, resolveAssetUrl } from "@/lib/api";
@@ -34,9 +33,9 @@ import { api, ApiError, resolveAssetUrl } from "@/lib/api";
 function stripReferencesBlock(text: string): string {
   let s = text;
   const refPatterns = [
-    /\n\n---\n\n\*\*References\*\*[\s\S]*$/i,  
+    /\n\n---\n\n\*\*References\*\*[\s\S]*$/i,
     /\n\n---\n\n#{1,6}\s*References\b[\s\S]*$/i,
-    /\n\n#{1,6}\s*References\b[\s\S]*$/i,      
+    /\n\n#{1,6}\s*References\b[\s\S]*$/i,
   ];
   for (const p of refPatterns) {
     if (p.test(s)) {
@@ -50,7 +49,10 @@ function stripReferencesBlock(text: string): string {
 const DISCLAIMER_PATTERN = /(?:^|\n+)\s*\*?_?Sykra can make mistakes\.[^\n]*?starting baseline\.?_?\*?\s*$/i;
 
 function stripDisclaimerLine(text: string): string {
-  return text.replace(DISCLAIMER_PATTERN, "").trim();
+  return text
+    .replace(DISCLAIMER_PATTERN, "")
+    .replace(/\n+---\s*$/, "")
+    .trim();
 }
 
 function stripMarkdown(text: string): string {
@@ -79,6 +81,18 @@ function formatRefMarkdown(ref: { id: number; title: string; authors?: string[];
   const authors = ref.authors?.length ? `— ${ref.authors.slice(0, 3).join(", ")}` : "";
   const year = ref.published ? `(${ref.published})` : "";
   return `${ref.id}. [${ref.title}](${ref.link ?? ""})${authors}${year}`;
+}
+
+function refYear(published?: string | null): string {
+  if (!published) return "";
+  const m = String(published).match(/^\d{4}/);
+  return m ? m[0] : String(published);
+}
+
+function refAuthors(authors?: string[]): string {
+  if (!authors?.length) return "";
+  const first = authors.slice(0, 3).join(", ");
+  return authors.length > 3 ? `${first} et al.` : first;
 }
 
 function downloadTextFile(filename: string, content: string, mime: string) {
@@ -164,60 +178,24 @@ function normalizeMathFences(md: string): string {
   return out.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
-const markdownComponents: Components = {
-  ul({ children, ...props }: HTMLAttributes<HTMLUListElement>) {
-    return <ul {...props} className="my-2 space-y-1 pl-1">{children}</ul>;
-  },
-  ol({ children, ...props }: HTMLAttributes<HTMLOListElement>) {
-    return (
-      <ol {...props} className="my-2 space-y-1 pl-1 list-decimal list-inside marker:text-ink-soft">
-        {children}
-      </ol>
-    );
-  },
-  li({ children, ordered, ...props }: HTMLAttributes<HTMLLIElement> & { ordered?: boolean }) {
-    if (ordered) {
-      return (
-        <li {...props} className="pl-1 text-body leading-relaxed">
-          {children}
-        </li>
-      );
-    }
-    return (
-      <li {...props} className="flex gap-2 text-body leading-relaxed">
-        <span aria-hidden="true" className="shrink-0 text-ink-soft select-none">•</span>
-        <span className="flex-1">{children}</span>
-      </li>
-    );
-  },
+function polishAnswer(md: string, turnKey: string): string {
+  const spans: string[] = [];
+  const stash = (m: string) => {
+    spans.push(m);
+    return `\u0000S${spans.length - 1}\u0000`;
+  };
+  let s = md.replace(/```[\s\S]*?```|\$\$[\s\S]*?\$\$|\$[^$\n]+?\$|`[^`\n]+`/g, stash);
+  s = s.replace(/(?<=\S)[ \t]+([.,;:!?])(?=\s|$)/g, "$1");
+  s = s.replace(/\[(\d{1,3})\](?![(:])/g, (_, n) => `[${n}](#ref-${turnKey}-${n})`);
+  return s.replace(/\u0000S(\d+)\u0000/g, (_, i) => spans[Number(i)]);
+}
+
+const baseMarkdownComponents: Components = {
   table({ children, ...props }: HTMLAttributes<HTMLTableElement>) {
     return (
-      <div className="my-3 overflow-x-auto rounded-md border border-line">
-        <table {...props} className="w-full border-collapse text-caption">
-          {children}
-        </table>
+      <div className="my-5 overflow-x-auto rounded-xl border border-sage/60 bg-paper shadow-soft">
+        <table {...props}>{children}</table>
       </div>
-    );
-  },
-  thead({ children, ...props }: HTMLAttributes<HTMLTableSectionElement>) {
-    return (
-      <thead {...props} className="bg-paper-dim text-ink">
-        {children}
-      </thead>
-    );
-  },
-  th({ children, ...props }: HTMLAttributes<HTMLTableCellElement>) {
-    return (
-      <th {...props} className="border-b border-line px-3 py-1.5 text-left font-semibold">
-        {children}
-      </th>
-    );
-  },
-  td({ children, ...props }: HTMLAttributes<HTMLTableCellElement>) {
-    return (
-      <td {...props} className="border-b border-line/60 px-3 py-1.5 align-top">
-        {children}
-      </td>
     );
   },
   img({ src, alt, ...props }: ImgHTMLAttributes<HTMLImageElement>) {
@@ -235,7 +213,49 @@ const markdownComponents: Components = {
       </span>
     );
   },
+  a({ href, children }) {
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer">
+        {children}
+      </a>
+    );
+  },
 };
+
+function buildMarkdownComponents(turnKey: string): Components {
+  const prefix = `#ref-${turnKey}-`;
+  return {
+    ...baseMarkdownComponents,
+    a({ href, children }) {
+      if (href && href.startsWith(prefix)) {
+        const targetId = href.slice(1);
+        return (
+          <sup className="cite">
+            <a
+              href={href}
+              onClick={(e) => {
+                e.preventDefault();
+                const el = document.getElementById(targetId);
+                if (el) {
+                  el.scrollIntoView({ behavior: "smooth", block: "center" });
+                  el.classList.add("ref-flash");
+                  setTimeout(() => el.classList.remove("ref-flash"), 1600);
+                }
+              }}
+            >
+              [{children}]
+            </a>
+          </sup>
+        );
+      }
+      return (
+        <a href={href} target="_blank" rel="noopener noreferrer">
+          {children}
+        </a>
+      );
+    },
+  };
+}
 
 function PreviewAnswer({ preview, hasFinal, streaming }: { preview: string; hasFinal: boolean; streaming: boolean }) {
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
@@ -243,7 +263,7 @@ function PreviewAnswer({ preview, hasFinal, streaming }: { preview: string; hasF
   const generating = streaming && !hasFinal;
 
   return (
-    <div className="mb-3 animate-fade-up overflow-hidden rounded-lg border border-gold/35 bg-gold-tint/40">
+    <div className="mb-4 animate-fade-up overflow-hidden rounded-lg border border-gold/35 bg-gold-tint/40">
       <button
         onClick={() => setUserOpen(!open)}
         aria-expanded={open}
@@ -252,9 +272,7 @@ function PreviewAnswer({ preview, hasFinal, streaming }: { preview: string; hasF
         <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-accent/40 bg-accent/15">
           <Zap className={`h-3 w-3 text-accent ${generating ? "animate-pulse" : ""}`} />
         </span>
-        <span className="shrink-0 text-label text-ink">
-          Quick answer
-        </span>
+        <span className="shrink-0 text-label text-ink">Quick answer</span>
         <span className="hidden truncate text-micro text-ink-soft sm:inline">
           {generating ? "summarizing…" : hasFinal ? "at a glance · full answer below" : "at a glance"}
         </span>
@@ -277,12 +295,12 @@ function PreviewAnswer({ preview, hasFinal, streaming }: { preview: string; hasF
             transition={{ duration: 0.25, ease: "easeInOut" }}
             className="overflow-hidden"
           >
-            <div className="border-t border-gold/25 px-3.5 py-2.5">
-              <div className="prose-chat border-l-2 border-gold/50 pl-3 text-body leading-relaxed text-ink">
+            <div className="border-t border-gold/25 px-3.5 py-3">
+              <div className="prose-chat border-l-2 border-gold/50 pl-3">
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm, remarkMath]}
                   rehypePlugins={[[rehypeKatex, { throwOnError: false, errorColor: "#8a9099" }]]}
-                  components={markdownComponents}
+                  components={baseMarkdownComponents}
                 >
                   {normalizeMathFences(preview)}
                 </ReactMarkdown>
@@ -327,12 +345,16 @@ export function ChatMessage({
     () => (isAssistant ? stripDisclaimerLine(stripReferencesBlock(turn.text)) : ""),
     [turn.text, isAssistant]
   );
-  const displayAnswer = useMemo(() => normalizeMathFences(rawAnswer), [rawAnswer]);
+  const displayAnswer = useMemo(
+    () => polishAnswer(normalizeMathFences(rawAnswer), turn.id),
+    [rawAnswer, turn.id]
+  );
+  const markdownComponents = useMemo(() => buildMarkdownComponents(turn.id), [turn.id]);
 
   if (turn.role === "user") {
     return (
       <div className="flex justify-end animate-fade-up">
-        <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-indigo px-3.5 py-2.5 text-body text-white">
+        <div className="max-w-[85%] rounded-2xl rounded-br-md bg-indigo px-4 py-2.5 text-[15px] leading-relaxed text-white">
           {turn.text}
         </div>
       </div>
@@ -347,7 +369,6 @@ export function ChatMessage({
   const hasPreview = !!turn.previewText;
   const showMetadata = !isStreaming && (hasText || hasPreview);
   const artifacts = turn.artifacts;
-  const showDisclaimer = showMetadata && hasText;
 
   async function handleExport(format: "standard" | "latex") {
     setExporting(true);
@@ -437,279 +458,275 @@ export function ChatMessage({
   const isEmptyFailure = !isStreaming && !isStopped && !regenerating && !hasText && !hasPreview && !hasSteps;
 
   return (
-    <div className="animate-fade-up space-y-3">
-      <div className="rounded-2xl rounded-bl-sm border border-line bg-paper/85 px-4 py-3 shadow-sm shadow-black/5">
-        {turn.reportNotice && isStreaming && (
-          <div className="mb-2.5 flex items-start gap-2 rounded-md border border-indigo/30 bg-indigo/5 px-2.5 py-2 text-caption leading-relaxed text-indigo animate-fade-up">
-            <Clock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span>{turn.reportNotice}</span>
-          </div>
-        )}
+    <div className="animate-fade-up px-1">
+      {turn.reportNotice && isStreaming && (
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-indigo/30 bg-indigo/5 px-3 py-2 text-caption leading-relaxed text-indigo animate-fade-up">
+          <Clock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{turn.reportNotice}</span>
+        </div>
+      )}
 
-        {hasSteps && <ResearchSteps embedded steps={turn.statusSteps!} streaming={isStreaming} />}
+      {hasSteps && (
+        <div className="mb-3">
+          <ResearchSteps embedded steps={turn.statusSteps!} streaming={isStreaming} />
+        </div>
+      )}
 
-        {showStatusFallback && (
-          <div className="flex items-center gap-2 text-caption text-ink-soft">
-            <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
-            <span>{turn.statusLabel}</span>
-          </div>
-        )}
+      {showStatusFallback && (
+        <div className="flex items-center gap-2 text-caption text-ink-soft">
+          <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+          <span>{turn.statusLabel}</span>
+        </div>
+      )}
 
-        {isEmptyFailure && (
-          <div className="flex items-center gap-1.5 text-caption text-ink-soft">
-            <OctagonX className="h-3.5 w-3.5 shrink-0" />
-            <span>No answer was generated. Please try again.</span>
-          </div>
-        )}
+      {isEmptyFailure && (
+        <div className="flex items-center gap-1.5 text-caption text-ink-soft">
+          <OctagonX className="h-3.5 w-3.5 shrink-0" />
+          <span>No answer was generated. Please try again.</span>
+        </div>
+      )}
 
-        {hasPreview && <PreviewAnswer preview={turn.previewText!} hasFinal={hasText} streaming={isStreaming} />}
+      {hasPreview && <PreviewAnswer preview={turn.previewText!} hasFinal={hasText} streaming={isStreaming} />}
 
-        {hasBody && (
-          <div className={hasSteps || hasPreview ? "border-t border-line pt-3" : ""}>
-            {hasText && (
-              <>
-                {hasPreview && (
-                  <div className="mb-2 flex items-center gap-1.5 text-label text-ink-soft">
-                    <FileText className="h-3.5 w-3.5" />
-                    Full answer
-                  </div>
+      {hasBody && (
+        <div>
+          {hasText && (
+            <>
+              {hasPreview && (
+                <div className="mb-2 flex items-center gap-1.5 text-label text-ink-soft">
+                  <FileText className="h-3.5 w-3.5" />
+                  Full answer
+                </div>
+              )}       
+              <div className="prose-chat">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm, remarkMath]}
+                  rehypePlugins={[[rehypeKatex, { throwOnError: false, errorColor: "#8a9099" }]]}
+                  components={markdownComponents}
+                >
+                  {displayAnswer}
+                </ReactMarkdown>
+                {isStreaming && (
+                  <span
+                    aria-hidden="true"
+                    className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-indigo/70"
+                  />
                 )}
-                <div className="prose-chat text-body leading-relaxed text-ink">
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm, remarkMath]}
-                    rehypePlugins={[[rehypeKatex, { throwOnError: false, errorColor: "#8a9099" }]]}
-                    components={markdownComponents}
-                  >
-                    {displayAnswer}
-                  </ReactMarkdown>
-                  {isStreaming && (
-                    <span
-                      aria-hidden="true"
-                      className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-indigo/70"
-                    />
-                  )}
-                </div>
-              </>
-            )}
+              </div>
 
-            {artifacts?.chartUrl && (
-              <figure className="mt-3 animate-fade-up">
-                <img
-                  src={resolveAssetUrl(artifacts.chartUrl) ?? artifacts.chartUrl}
-                  alt="Generated chart"
-                  className="max-w-full max-h-[360px] w-auto h-auto rounded-md border border-line shadow-sm shadow-black/5 object-contain"
-                />
-                <figcaption className="mt-1 text-center text-micro text-ink-soft">Generated chart</figcaption>
-              </figure>
-            )}
+              {/* {!isStreaming && turn.methodNote && (
+                <p className="mt-3 text-sm leading-relaxed text-ink-soft">
+                  {turn.methodNote}
+                </p>
+              )} */}
 
-            {artifacts?.comparisonTableMarkdown && (
-              <div className="mt-3 animate-fade-up">
-                <div className="mb-1.5 flex items-center gap-1.5 text-label text-ink-soft">
-                  <Table2 className="h-3.5 w-3.5 text-indigo" />
-                  {artifacts.comparisonTableCaption || "Comparison"}
-                </div>
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+            </>
+          )}
+          {artifacts?.chartUrl && (
+            <figure className="mt-4 animate-fade-up">
+              <img
+                src={resolveAssetUrl(artifacts.chartUrl) ?? artifacts.chartUrl}
+                alt="Generated chart"
+                className="max-w-full max-h-[360px] w-auto h-auto rounded-lg border border-line shadow-sm shadow-black/5 object-contain"
+              />
+              <figcaption className="mt-1 text-center text-micro text-ink-soft">Generated chart</figcaption>
+            </figure>
+          )}
+
+          {artifacts?.comparisonTableMarkdown && (
+            <div className="mt-4 animate-fade-up">
+              <div className="mb-1.5 flex items-center gap-1.5 text-label text-ink-soft">
+                <Table2 className="h-3.5 w-3.5 text-indigo" />
+                {artifacts.comparisonTableCaption || "Comparison"}
+              </div>
+              <div className="prose-chat">
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={baseMarkdownComponents}>
                   {artifacts.comparisonTableMarkdown}
                 </ReactMarkdown>
               </div>
-            )}
+            </div>
+          )}
 
-            {isStopped && (
-              <div className="mt-2 flex items-center gap-1.5 text-micro text-ink-soft">
-                <OctagonX className="h-3 w-3 shrink-0" />
-                <span>Generation stopped.</span>
-              </div>
-            )}
+          {isStopped && (
+            <div className="mt-2 flex items-center gap-1.5 text-micro text-ink-soft">
+              <OctagonX className="h-3 w-3 shrink-0" />
+              <span>Generation stopped.</span>
+            </div>
+          )}
 
-            {showMetadata && !!turn.sources?.length && (
-              <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-line pt-2.5">
-                <BookMarked className="h-3.5 w-3.5 text-ink-soft" />
-                {turn.sources.map((s, i) => (
-                  <span key={i} className="rounded-full bg-paper-dim px-2 py-0.5 text-micro text-ink-soft">
-                    {s}
-                  </span>
-                ))}
-              </div>
-            )}
-
-            {showMetadata && showReferencesInline && (
-              <div className="mt-3 border-t border-line pt-2.5">
-                <div className="mb-1.5 flex items-center gap-1.5 text-label text-ink-soft">
-                  <BookMarked className="h-3.5 w-3.5" />
-                  {isResearched ? "References" : "Key References"}
-                </div>
-                {isResearched ? (
-                  <ol className="space-y-1 text-caption text-ink-soft list-decimal list-inside">
-                    {turn.references!.map((r) => (
-                      <li key={r.id} value={r.id}>
-                        <a href={r.link} target="_blank" rel="noopener noreferrer" className="text-indigo hover:underline">
-                          {r.title}
-                        </a>
-                        {r.authors?.length ? ` — ${r.authors.slice(0, 3).join(", ")}` : ""}
-                        {r.published ? ` (${r.published})` : ""}
-                        {r.why_cited && (
-                          <div className="mt-1 text-micro text-ink-soft">
-                            {r.why_cited}
-                          </div>
-                        )}
-                      </li>
-                    ))}
-                  </ol>
-                ) : (
-                  <ul className="space-y-1.5 text-caption">
-                    {turn.references!.map((r) => (
-                      <li key={r.id} className="flex items-baseline gap-2">
-                        <span className="shrink-0 text-ink-soft tabular-nums">[{r.id}]</span>
-                        <a href={r.link} target="_blank" rel="noopener noreferrer" className="text-indigo hover:underline font-medium">
-                          {r.title}
-                        </a>
-                        {r.published && <span className="text-ink-soft shrink-0">({r.published})</span>}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            )}
-
-            {showMetadata && !showReferencesInline && !!turn.references?.length && (
-              <div className="mt-2 text-micro text-ink-soft">
-                {turn.references.length} reference{turn.references.length === 1 ? "" : "s"} added to Library.
-              </div>
-            )}
-
-            {showMetadata && !!turn.papers?.length && (
-              <div className="mt-3 flex items-center gap-1.5 border-t border-line pt-2.5 text-micro text-ink-soft">
-                <BookMarked className="h-3.5 w-3.5 shrink-0" />
-                {turn.papers.length} paper{turn.papers.length === 1 ? "" : "s"} added to Library
-              </div>
-            )}
-
-            {showDisclaimer && (
-              <div className="mt-3 flex items-start gap-2 rounded-md border border-gold/30 bg-gold-tint px-3 py-2 text-micro leading-relaxed text-indigo-dark animate-fade-up">
-                <AlertTriangle className="mt-[1px] h-3.5 w-3.5 shrink-0 text-gold" />
-                <span>
-                  <strong className="font-semibold">Sykra can make mistakes.</strong>{" "}
-                  Verify important claims independently and treat this research as a starting baseline.
+          {showMetadata && !!turn.sources?.length && (
+            <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t border-line pt-3">
+              <BookMarked className="h-3.5 w-3.5 text-ink-soft" />
+              {turn.sources.map((s, i) => (
+                <span key={i} className="rounded-full bg-paper-dim px-2 py-0.5 text-micro text-ink-soft">
+                  {s}
                 </span>
-              </div>
-            )}
+              ))}
+            </div>
+          )}
 
-            {regenerating && (
-              <div className="mt-3 flex items-center gap-2 border-t border-line pt-2.5 text-micro text-ink-soft">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                Regenerating this answer…
+          {showMetadata && showReferencesInline && (
+            <div className="mt-6 border-t border-line pt-4">
+              <div className="mb-3 flex items-center gap-1.5 text-label text-ink-soft">
+                <BookMarked className="h-3.5 w-3.5" />
+                {isResearched ? "References" : "Key references"}
               </div>
-            )}
-
-            {showMetadata && !regenerating && (
-              <div className="mt-3 flex items-center gap-1 border-t border-line pt-2.5">
-                <button
-                  onClick={() => handleExport("standard")}
-                  disabled={exporting}
-                  aria-label="Download standard PDF"
-                  title="Download standard PDF"
-                  className="flex items-center gap-1 rounded-md bg-paper-dim px-2 py-1 text-micro text-ink-soft hover:text-indigo disabled:opacity-50"
-                >
-                  {exporting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
-                  PDF
-                </button>
-                <button
-                  onClick={handleShare}
-                  aria-label="Share answer"
-                  title="Share"
-                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-indigo"
-                >
-                  <Share2 className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  onClick={handleCopy}
-                  aria-label="Copy answer"
-                  title="Copy"
-                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-indigo"
-                >
-                  {copied ? <Check className="h-3.5 w-3.5 text-green-600" /> : <Copy className="h-3.5 w-3.5" />}
-                </button>
-                <button
-                  onClick={() => setFeedback((f) => (f === "up" ? null : "up"))}
-                  aria-label="Good response"
-                  aria-pressed={feedback === "up"}
-                  title="Good response"
-                  className={`flex h-6 w-6 items-center justify-center rounded-md hover:bg-paper-dim ${feedback === "up" ? "text-indigo" : "text-ink-soft hover:text-indigo"}`}
-                >
-                  <ThumbsUp className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  onClick={() => setFeedback((f) => (f === "down" ? null : "down"))}
-                  aria-label="Bad response"
-                  aria-pressed={feedback === "down"}
-                  title="Bad response"
-                  className={`flex h-6 w-6 items-center justify-center rounded-md hover:bg-paper-dim ${feedback === "down" ? "text-danger" : "text-ink-soft hover:text-danger"}`}
-                >
-                  <ThumbsDown className="h-3.5 w-3.5" />
-                </button>
-                <div className="relative ml-1" ref={menuRef}>
-                  <button
-                    onClick={() => setMenuOpen((o) => !o)}
-                    aria-label="More actions"
-                    aria-haspopup="menu"
-                    aria-expanded={menuOpen}
-                    title="More actions"
-                    className="flex h-6 w-6 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-indigo"
-                  >
-                    <MoreHorizontal className="h-3.5 w-3.5" />
-                  </button>
-                  {menuOpen && (
-                    <div
-                      role="menu"
-                      className="absolute left-0 bottom-full z-20 mb-1.5 w-48 rounded-lg border border-line bg-paper shadow-lg shadow-black/10 py-1"
+              <ul className="space-y-1">
+                {turn.references!.map((r) => {
+                  const meta = [refAuthors(r.authors), refYear(r.published)].filter(Boolean).join(" · ");
+                  return (
+                    <li
+                      key={r.id}
+                      id={`ref-${turn.id}-${r.id}`}
+                      className="grid scroll-mt-24 grid-cols-[2.5rem_minmax(0,1fr)] gap-x-1 rounded-md px-1.5 py-1.5 transition-colors"
                     >
-                      <button
-                        role="menuitem"
-                        onClick={handleExportMarkdown}
-                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-caption text-ink hover:bg-paper-dim"
-                      >
-                        <FileText className="h-3.5 w-3.5 text-ink-soft" />
-                        Export Markdown
-                      </button>
-                      <button
-                        role="menuitem"
-                        onClick={handleExportText}
-                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-caption text-ink hover:bg-paper-dim"
-                      >
-                        <FileDown className="h-3.5 w-3.5 text-ink-soft" />
-                        Export Text
-                      </button>
-                      {onRegenerate && (
-                        <button
-                          role="menuitem"
-                          onClick={handleRegenerateClick}
-                          disabled={regenerating}
-                          className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-caption text-ink hover:bg-paper-dim disabled:opacity-50"
+                      <span className="pt-px text-right text-caption tabular-nums text-ink-soft">[{r.id}]</span>
+                      <div className="min-w-0 text-[14px] leading-snug">
+                        <a
+                          href={r.link}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-medium text-indigo hover:underline"
                         >
-                          <RefreshCw className={`h-3.5 w-3.5 text-ink-soft ${regenerating ? "animate-spin" : ""}`} />
-                          Regenerate
-                        </button>
-                      )}
+                          {r.title}
+                        </a>
+                        {meta && <div className="mt-0.5 text-caption text-ink-soft">{meta}</div>}
+                        {r.why_cited && <div className="mt-0.5 text-caption text-ink-soft">{r.why_cited}</div>}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+
+          {showMetadata && !showReferencesInline && !!turn.references?.length && (
+            <div className="mt-2 text-micro text-ink-soft">
+              {turn.references.length} reference{turn.references.length === 1 ? "" : "s"} added to Library.
+            </div>
+          )}
+
+          {showMetadata && !!turn.papers?.length && (
+            <div className="mt-3 flex items-center gap-1.5 text-micro text-ink-soft">
+              <BookMarked className="h-3.5 w-3.5 shrink-0" />
+              {turn.papers.length} paper{turn.papers.length === 1 ? "" : "s"} added to Library
+            </div>
+          )}
+
+          {regenerating && (
+            <div className="mt-3 flex items-center gap-2 border-t border-line pt-2.5 text-micro text-ink-soft">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Regenerating this answer…
+            </div>
+          )}
+
+          {showMetadata && !regenerating && (
+            <div className="mt-4 flex items-center gap-1">
+              <button
+                onClick={() => handleExport("standard")}
+                disabled={exporting}
+                aria-label="Download standard PDF"
+                title="Download standard PDF"
+                className="flex items-center gap-1 rounded-md bg-paper-dim px-2 py-1 text-micro text-ink-soft hover:text-indigo disabled:opacity-50"
+              >
+                {exporting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                PDF
+              </button>
+              <button
+                onClick={handleShare}
+                aria-label="Share answer"
+                title="Share"
+                className="flex h-6 w-6 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-indigo"
+              >
+                <Share2 className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={handleCopy}
+                aria-label="Copy answer"
+                title="Copy"
+                className="flex h-6 w-6 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-indigo"
+              >
+                {copied ? <Check className="h-3.5 w-3.5 text-green-600" /> : <Copy className="h-3.5 w-3.5" />}
+              </button>
+              <button
+                onClick={() => setFeedback((f) => (f === "up" ? null : "up"))}
+                aria-label="Good response"
+                aria-pressed={feedback === "up"}
+                title="Good response"
+                className={`flex h-6 w-6 items-center justify-center rounded-md hover:bg-paper-dim ${feedback === "up" ? "text-indigo" : "text-ink-soft hover:text-indigo"}`}
+              >
+                <ThumbsUp className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={() => setFeedback((f) => (f === "down" ? null : "down"))}
+                aria-label="Bad response"
+                aria-pressed={feedback === "down"}
+                title="Bad response"
+                className={`flex h-6 w-6 items-center justify-center rounded-md hover:bg-paper-dim ${feedback === "down" ? "text-danger" : "text-ink-soft hover:text-danger"}`}
+              >
+                <ThumbsDown className="h-3.5 w-3.5" />
+              </button>
+              <div className="relative ml-1" ref={menuRef}>
+                <button
+                  onClick={() => setMenuOpen((o) => !o)}
+                  aria-label="More actions"
+                  aria-haspopup="menu"
+                  aria-expanded={menuOpen}
+                  title="More actions"
+                  className="flex h-6 w-6 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-indigo"
+                >
+                  <MoreHorizontal className="h-3.5 w-3.5" />
+                </button>
+                {menuOpen && (
+                  <div
+                    role="menu"
+                    className="absolute left-0 bottom-full z-20 mb-1.5 w-48 rounded-lg border border-line bg-paper shadow-lg shadow-black/10 py-1"
+                  >
+                    <button
+                      role="menuitem"
+                      onClick={handleExportMarkdown}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-caption text-ink hover:bg-paper-dim"
+                    >
+                      <FileText className="h-3.5 w-3.5 text-ink-soft" />
+                      Export Markdown
+                    </button>
+                    <button
+                      role="menuitem"
+                      onClick={handleExportText}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-caption text-ink hover:bg-paper-dim"
+                    >
+                      <FileDown className="h-3.5 w-3.5 text-ink-soft" />
+                      Export Text
+                    </button>
+                    {onRegenerate && (
                       <button
                         role="menuitem"
-                        onClick={() => handleExport("latex")}
-                        disabled={exporting}
+                        onClick={handleRegenerateClick}
+                        disabled={regenerating}
                         className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-caption text-ink hover:bg-paper-dim disabled:opacity-50"
                       >
-                        <GraduationCap className="h-3.5 w-3.5 text-ink-soft" />
-                        Academic PDF
+                        <RefreshCw className={`h-3.5 w-3.5 text-ink-soft ${regenerating ? "animate-spin" : ""}`} />
+                        Regenerate
                       </button>
-                    </div>
-                  )}
-                </div>
+                    )}
+                    <button
+                      role="menuitem"
+                      onClick={() => handleExport("latex")}
+                      disabled={exporting}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-caption text-ink hover:bg-paper-dim disabled:opacity-50"
+                    >
+                      <GraduationCap className="h-3.5 w-3.5 text-ink-soft" />
+                      Academic PDF
+                    </button>
+                  </div>
+                )}
               </div>
-            )}
+            </div>
+          )}
 
-            {exportError && <div className="mt-1.5 text-micro text-danger">{exportError}</div>}
-          </div>
-        )}
-      </div>
+          {exportError && <div className="mt-1.5 text-micro text-danger">{exportError}</div>}
+        </div>
+      )}
     </div>
   );
 }

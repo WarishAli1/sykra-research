@@ -170,11 +170,14 @@ class GraphPathRequest(GraphViewRequest):
     b: str
 
 @router.post("/graph/{session_id}/view")
-def graph_view(session_id: str, req: GraphViewRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+def graph_view(session_id: str, req: GraphViewRequest,
+               user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     rs = require_research_session(db, user, session_id)
-    enriched = graph_builder.get_enriched(session_id)
     links = req.paper_links if req.scope == "message" else _chat_links(db, user, rs, req.chat_id)
+    enriched = graph_builder.get_enriched(session_id, focus_links=links)
     view = graph_builder.filter_view(enriched, links, req.max_year)
+    if not view:
+        view = {"nodes": [], "links": [], "stats": graph_builder._compute_stats([], [])}
     return {**view, "legend": enriched["legend"], "rel": enriched["rel"],
             "global_stats": enriched["stats"]}
 
@@ -188,8 +191,8 @@ def graph_path(session_id: str, req: GraphPathRequest, user: User = Depends(get_
 @router.get("/graph/{session_id}/suggest")
 def graph_suggest(session_id: str, q: str = "", chat_id: str | None = None, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     rs = require_research_session(db, user, session_id)
-    enriched = graph_builder.get_enriched(session_id)
-    links = _chat_links(db, user, rs, chat_id)
+    links = _chat_links(db, user, rs, chat_id) 
+    enriched = graph_builder.get_enriched(session_id, focus_links=links)    
     if links is not None:
         enriched = {**enriched, **graph_builder.filter_view(enriched, links)}
     return {"matches": graph_builder.suggest_nodes(enriched, q)}
@@ -199,19 +202,20 @@ def graph_suggest(session_id: str, q: str = "", chat_id: str | None = None, user
 def graph_query(session_id: str, req: GraphQueryRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     rs = require_research_session(db, user, session_id)
     links = _chat_links(db, user, rs, req.chat_id)
-    matches = graph_builder.semantic_query(session_id, req.q, top_k=30)
+    matches = graph_builder.semantic_query(session_id, req.q, top_k=30, focus_links=links)
     if links is not None:
-        allowed = {n["id"] for n in graph_builder.filter_view(graph_builder.get_enriched(session_id), links)["nodes"]}
+        allowed = {n["id"] for n in graph_builder.filter_view(graph_builder.get_enriched(session_id, focus_links=links), links)["nodes"]}
         matches = [m for m in matches if m["id"] in allowed]
     return {"matches": matches[:6]}
 
 
 @router.get("/graph/{session_id}/ensure")
-def ensure_graph(session_id: str, force: bool = False, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
-    """Single on-demand call used by the Explore view.
-    Builds the session graph the first time (few seconds), cached afterwards."""
-    require_research_session(db, user, session_id)
-    return graph_builder.build_session_graph(session_id, force=force)
+def ensure_graph(session_id: str, force: bool = False, chat_id: str | None = None,
+                 user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    rs = require_research_session(db, user, session_id)
+    return graph_builder.build_session_graph(
+        session_id, force=force, focus_links=_chat_links(db, user, rs, chat_id)
+    )
 
 
 @router.get("/graph/{session_id}/clusters")

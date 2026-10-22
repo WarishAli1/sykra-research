@@ -45,6 +45,14 @@ def _normalize_str_list(value) -> list[str]:
         return [str(x) for x in value if x is not None and str(x).strip()]
     return []
 
+def _dynamic_target_k(state, prefiltered):
+    if state.get("response_mode", "normal") == "normal":
+        lo, hi = settings.TOP_K_PAPERS_NORMAL_MIN, settings.TOP_K_PAPERS_NORMAL_MAX
+    else:
+        lo, hi = settings.TOP_K_PAPERS_RESEARCH_MIN, min(15, settings.TOP_K_PAPERS_RESEARCH_MAX)
+    strong = sum(1 for p in prefiltered if p.get("final_score", 0) >= settings.MIN_FINAL_SCORE)
+    return max(lo, min(hi, strong + 2))
+    
 def _normalize_judgments(raw, candidate_count: int) -> dict[int, dict]:
     items = []
     if isinstance(raw, dict):
@@ -159,6 +167,8 @@ def _source_authority_score(paper: dict) -> float:
     cites = paper.get("citation_count", 0) or 0
     base = _citation_score(cites)
     if "openalex" in source:
+        return min(1.0, base + 0.08)
+    if "europepmc" in source:
         return min(1.0, base + 0.08)
     if "arxiv" in source:
         return min(1.0, base + 0.04)
@@ -576,7 +586,7 @@ def _source_tier(paper: dict) -> int:
         return 2
     if cites >= 1000:
         return 2
-    if source in ("openalex", "arxiv", "semantic_scholar", "semanticscholar"):
+    if source in ("openalex", "arxiv", "semantic_scholar", "semanticscholar", "europepmc"):
         return 3
     return 4
 
@@ -871,7 +881,7 @@ def rank_node(state: AgentState) -> AgentState:
             f"{state.get('target_paper_k')!r})"
         )
     else:
-        target_k_setting = int(state.get("target_paper_k") or settings.TOP_K_PAPERS_MAX)
+        target_k_setting = int(state.get("target_paper_k") or 0) or _dynamic_target_k(state, prefiltered)
         target_k_setting = max(settings.TOP_K_PAPERS_MIN, target_k_setting)
         target_k_setting = min(settings.TOP_K_PAPERS_MAX, target_k_setting)
     target_k = min(len(prefiltered), target_k_setting)

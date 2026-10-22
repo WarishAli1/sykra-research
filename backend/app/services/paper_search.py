@@ -828,3 +828,39 @@ async def fetch_openalex_citation_graph_async(openalex_ids: list[str], limit_per
             continue
 
     return papers
+
+
+def search_europepmc(query: str, n: int = 15) -> list[dict]:
+    r = httpx.get(
+        "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+        params={"query": f"({query}) AND HAS_ABSTRACT:y", "format": "json",
+                "resultType": "core", "pageSize": n},
+        timeout=15,
+    )
+    out = []
+    for x in r.json().get("resultList", {}).get("result", []):
+        out.append({
+            "title": x.get("title", ""),
+            "summary": x.get("abstractText", ""),
+            "authors": [a.strip() for a in (x.get("authorString") or "").split(",")][:10],
+            "doi": x.get("doi", ""),
+            "published": x.get("firstPublicationDate", ""),
+            "citation_count": x.get("citedByCount", 0),
+            "venue": x.get("journalTitle", ""),
+            "source": "europepmc",
+            "link": f"https://europepmc.org/article/{x.get('source')}/{x.get('id')}",
+        })
+    return out
+
+
+async def search_europepmc_async(query: str, n: int = 12, **_) -> list[dict]:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(search_europepmc, query, n),
+            timeout=6.0,
+        )
+    except asyncio.TimeoutError:
+        print(f"[paper_search] europepmc search timed out for '{query[:80]}'")
+        return []
+    except Exception:
+        return []

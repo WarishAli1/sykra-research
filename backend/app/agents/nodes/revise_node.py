@@ -5,11 +5,15 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from app.agents.state import AgentState
 from app.services.llm_client import get_llm
 from app.config import settings
+from app.services.citation_grounding import ground_text
 
 
 QUALITY_RULES = """
 Do NOT remove or alter existing citation markers like [1], [2], or [paper_id=N].
 Do NOT invent new citations. Only cite paper_ids present in AVAILABLE SOURCES.
+Every used source must be cited. If you add information from a source, cite it in the same sentence.
+Do not silently use a source.
+Do not claim systematic-review rigor, PRISMA, registered protocol, exhaustive search, or formal risk-of-bias assessment unless those methods were actually performed.
 If the gap exists because the literature does not cover it, say so explicitly
 with a clear limitation sentence rather than filling it with speculation.
 Preserve the existing markdown structure (headings, tables, bullet lists).
@@ -17,7 +21,38 @@ Do NOT repeat facts, numbers, or arguments already present elsewhere in the repo
 NEVER invent numbers, dates, costs, or statistics to fill a gap. If a required
 figure is missing from the sources, state that it is UNKNOWN or give the
 formula/inputs needed to derive it.
+Only cite a paper for something its Abstract in AVAILABLE SOURCES actually states.
+Never write a number, range or percentage that is not word for word in a cited Abstract.
 """
+
+
+def _sources_block(papers: list[dict], n: int = 6, chars: int = 600) -> str:
+    """Same [paper_id=N] ids the report uses, with enough abstract text to check claims against."""
+    return "\n\n".join(
+        f"[paper_id={i}] Title: {p.get('title', '')}\n"
+        f"Abstract: {(p.get('summary') or p.get('text') or '')[:chars]}"
+        for i, p in enumerate(papers[:n])
+    )
+
+
+def _ground(text: str, papers: list[dict], shown: int = 6) -> str:
+    """Re-run the numeric/citation grounding on text the reviser just wrote."""
+    if not text or not papers:
+        return text
+    texts_by_id = {
+        str(i): f"{p.get('title', '')}. {p.get('summary') or p.get('text') or ''}"
+        for i, p in enumerate(papers)
+    }
+    out, drops = ground_text(
+        text,
+        texts_by_id,
+        None,
+        numeric_check=getattr(settings, "GROUNDING_NUMERIC_CHECK_ENABLED", True),
+    )
+    for d in drops:
+        print(f"[revise:ground] {d['reason']}: {d['sentence']}")
+    return out
+
 
 
 REVISE_TIMEOUT = getattr(settings, "REPORT_REVISE_TIMEOUT", 30)
@@ -188,10 +223,7 @@ def _redo_specific_sections(
     if not redo_titles:
         return {"needs_revision": False}
 
-    paper_block = "\n\n".join(
-        f"[paper_id={i}] {p.get('title', '')}: {(p.get('summary') or '')[:400]}"
-        for i, p in enumerate(papers[:6])
-    )
+    paper_block = _sources_block(papers)
 
     prompt = f"""Rewrite ONLY these sections of a research report.
 
@@ -210,8 +242,9 @@ AVAILABLE SOURCES:
 Rules:
 Start each section with a ## heading matching its title.
 Keep each section to 150–350 words.
-Cite sources as [paper_id=N].
-Do NOT invent numbers or citations.
+Cite sources as [paper_id=N], only for what that paper's Abstract states.
+Do NOT invent numbers or citations; a number must appear word for word in a cited Abstract.
+If the sources do not cover something, say so plainly instead of guessing.
 Return markdown only.
 """
 
@@ -237,7 +270,7 @@ Return markdown only.
             return {"needs_revision": False}
 
         from app.services.reference_builder import extract_paper_ids
-        from app.agents.summarize_node import _merge_sections, _clean_content
+        from app.agents.nodes.summarize_node import _merge_sections, _clean_content
         from app.agents.report_modules import get_disclaimer
 
         for s in section_outputs:
@@ -253,7 +286,9 @@ Return markdown only.
             match = re.search(pattern, new_content, re.DOTALL)
 
             if match:
-                s["content"] = _clean_content(match.group(1).strip())
+                s["content"] = _ground(
+                    _clean_content(match.group(1).strip()), papers
+                )
                 s["cited_paper_ids"] = extract_paper_ids(s["content"])
 
         new_answer = _merge_sections(section_outputs, plan).strip()
@@ -329,10 +364,7 @@ def revise_node(state: AgentState) -> AgentState:
     if missing_kind == "modules" and missing_items:
         papers = state.get("ranked_papers", [])
 
-        paper_block = "\n\n".join(
-            f"[{i}] {p.get('title', '')}: {(p.get('summary') or '')[:400]}"
-            for i, p in enumerate(papers[:6])
-        )
+        paper_block = _sources_block(papers)
 
         sections_prompt = f"""
 You are adding missing sections to an existing research report.
@@ -375,7 +407,7 @@ Return markdown only. No JSON.
             new_sections = response.content.strip()
 
             if new_sections and len(new_sections) > 100:
-                revised = body.rstrip() + "\n\n" + new_sections + refs_block
+                revised = body.rstrip() + "\n\n" + _ground(new_sections, papers) + refs_block
 
                 print(
                     f"[revise_node] targeted path succeeded ({len(missing_items)} sections)"
@@ -404,10 +436,7 @@ Return markdown only. No JSON.
     elif missing_kind == "components" and missing_items:
         papers = state.get("ranked_papers", [])
 
-        paper_block = "\n\n".join(
-            f"[{i}] {p.get('title', '')}: {(p.get('summary') or '')[:400]}"
-            for i, p in enumerate(papers[:6])
-        )
+        paper_block = _sources_block(papers)
 
         components_prompt = f"""
 You are patching specific missing content into an existing research report.
@@ -464,7 +493,7 @@ Return the full revised report body only. No JSON, no commentary.
                 )
 
                 return {
-                    "final_answer": patched + refs_block,
+                    "final_answer": _ground(patched, papers) + refs_block,
                     "needs_revision": False,
                 }
 
@@ -540,7 +569,7 @@ Return the full revised answer body only.
         print("[revise_node] fallback path used")
 
         return {
-            "final_answer": revised + refs_block,
+            "final_answer": _ground(revised, state.get("ranked_papers", [])) + refs_block,
             "needs_revision": False,
         }
 

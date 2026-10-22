@@ -1,4 +1,5 @@
 import re
+from app.services.embeddings import embed_texts, similarity
 from langchain_core.messages import SystemMessage, HumanMessage
 from pydantic import BaseModel, Field
 from typing import Literal
@@ -6,6 +7,20 @@ from app.agents.state import AgentState
 from app.agents.research_engine import derive_research_needs
 from app.services.llm_client import get_llm
 from app.agents.report_modules import _is_technical_derivation
+
+
+_FOLLOWUP_RE = re.compile(
+    r"\b(it|its|this|that|they|them|those|these|he|she|the above|same|former|latter)\b"
+    r"|^\s*(and|also|what about|how about|but|why|how come)\b", re.I)
+
+def _looks_like_followup(q: str) -> bool:
+    return len(q.split()) <= 14 and bool(_FOLLOWUP_RE.search(q))
+
+def _shares_topic(a: str, b: str) -> bool:
+    ta = set(re.findall(r"[a-z0-9]{4,}", a.lower()))
+    tb = set(re.findall(r"[a-z0-9]{4,}", b.lower()))
+    return not ta or bool(ta & tb)
+
 
 class QueryAnalysis(BaseModel):
     main_topic: str = Field(default="")
@@ -256,16 +271,17 @@ def plan_query_node(state: AgentState) -> AgentState:
 
     refined_query = None
 
-    if history:
+    if history and _looks_like_followup(query):
         rewrite_prompt = f"""You are an expert search strategist.
 Rewrite this follow-up question into a standalone search query.
-
+If the question is already self-contained or on a different topic than the history, return it EXACTLY unchanged.
 Conversation History:
 {history[-4:]}
 
 Current Follow-up Question:
 {query}
 
+Fix any obvious spelling mistakes in the rewritten query.
 Return ONLY the rewritten search query.
 """
         try:
@@ -279,10 +295,11 @@ Return ONLY the rewritten search query.
                 config={"timeout": 3 if is_normal else 6},
             ).content.strip()
 
-            if rewritten and len(rewritten) < 200:
+            if rewritten and len(rewritten) < 200 and _shares_topic(query, rewritten):
                 refined_query = rewritten
                 query = rewritten
-                print(f"[plan_query] Rewritten follow-up query: {query}")
+            else:
+                print("[plan_query] rewrite discarded (topic shift)")
 
         except Exception as e:
             print(f"[plan_query] Query rewrite failed: {type(e).__name__}: {e}")
@@ -328,6 +345,7 @@ Target around {target_count} total search queries.
 Every list field MUST be a JSON array.
 If there is only one item, still use an array like ["item"].
 Keep queries concise and high precision.
+Fix obvious spelling mistakes in every generated query (e.g. "inhibitorz" -> "inhibitors").
 Do not return the original query inside generated query lists.
 """
 

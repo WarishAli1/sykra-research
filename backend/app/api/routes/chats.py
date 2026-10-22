@@ -8,7 +8,9 @@ from sqlalchemy.orm import Session as DBSession
 
 from app.auth import get_current_user
 from app.db.database import get_db
-from app.db.models import Chat, Message, User
+from app.db.models import Chat, LibraryPaper, Message, User
+from app.services.vector_store import vector_store
+from app.services.graph_store import graph_store
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
@@ -99,5 +101,33 @@ def delete_chat(chat_id: UUID, user: User = Depends(get_current_user), db: DBSes
     chat = db.scalar(select(Chat).where(Chat.id == chat_id, Chat.user_id == user.id, Chat.deleted_at.is_(None)))
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found.")
+    session_id = chat.session_id
+    chat_links = list(db.scalars(select(LibraryPaper.link).where(
+        LibraryPaper.session_id == session_id,
+        LibraryPaper.chat_id == chat_id,
+    )))
     chat.deleted_at = datetime.now(timezone.utc)
+    for row in db.scalars(select(LibraryPaper).where(
+        LibraryPaper.session_id == session_id,
+        LibraryPaper.chat_id == chat_id,
+    )):
+        db.delete(row)
     db.commit()
+
+    if session_id and chat_links:
+        still_live = set(db.scalars(select(LibraryPaper.link).where(
+            LibraryPaper.session_id == session_id,
+            LibraryPaper.link.in_(chat_links),
+        )))
+        for link in chat_links:
+            if link in still_live:
+                continue
+            try:
+                vector_store.delete_paper(link, str(session_id))
+            except Exception as e:
+                print(f"[chats] vector purge failed for {link}: {type(e).__name__}: {e}")
+            try:
+                graph_store.delete_paper(link)
+            except Exception as e:
+                print(f"[chats] neo4j purge failed for {link}: {type(e).__name__}: {e}")
+    return None

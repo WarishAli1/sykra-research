@@ -166,7 +166,6 @@ export function GraphView({
     let settled = false;
     const t = setTimeout(() => {
       if (!chatId) {
-        // new chat with nothing saved yet: show the empty state, don't load the whole session
         settled = true;
         setRawView(null);
         setError(null);
@@ -190,13 +189,12 @@ export function GraphView({
       }
     }, 60000);
     return () => { cancelled = true; clearTimeout(t); clearTimeout(wd); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- paperLinksKey stands in for messagePaperLinks
   }, [sessionId, chatId, scope, paperLinksKey, nonce, requestKey]);
 
   const rebuild = () => {
     setRebuilding(true); setError(null); setSelectedNode(null); setTrail([]);
     setHighlightSet(null); setPathResult(null); setYearCut(null);
-    api.ensureGraph(sessionId, true).finally(() => {
+    api.ensureGraph(sessionId, true, chatId).finally(() => {
       setNonce((n) => n + 1);
       setRebuilding(false);
     });
@@ -215,7 +213,11 @@ export function GraphView({
 
   const colored = useMemo(() => {
     if (!view) return null;
-    const nodes: RichNode[] = view.nodes.map((n) => {
+    const seenIds = new Set<string>();
+    const nodes: RichNode[] = [];
+    for (const n of view.nodes) {
+      if (seenIds.has(n.id)) continue;
+      seenIds.add(n.id);
       const deg = n.degree ?? 0;
       let color: string, radius: number;
       if (n.type === "paper") {
@@ -230,20 +232,28 @@ export function GraphView({
         color = CFG.datasetColor; radius = 3 + Math.min(deg, 10) * 0.4;
       }
       const cached = posCache.get(n.id);
-      return { ...n, color, radius, ...(cached ? { x: cached.x, y: cached.y } : {}) };
-    });
+      nodes.push({ ...n, color, radius, ...(cached ? { x: cached.x, y: cached.y } : {}) });
+    }
     const nodeById = new Map(nodes.map((n) => [n.id, n]));
-    const links: RichLink[] = view.links.map((l) => ({
-      ...l, sourceId: l.source, targetId: l.target,
-      color:
-        l.type === "uses" ? CFG.edgeColors.uses
-        : l.type === "evaluates" ? CFG.edgeColors.evaluates
-        : l.type === "cites" ? CFG.edgeColors.cites
-        : l.type === "similar" ? CFG.edgeColors.similar
-        : l.type === "discusses" ? (nodeById.get(l.target)?.color ?? CFG.conceptFallbackColor)
-        : CFG.conceptFallbackColor,
-      dash: l.type === "similar" ? CFG.dashForWeight(l.weight ?? 0.6) : null,
-    }));
+    const seenLinks = new Set<string>();
+    const links: RichLink[] = [];
+    for (const l of view.links) {
+      if (!nodeById.has(l.source) || !nodeById.has(l.target)) continue;
+      const k = `${l.source}|${l.target}|${l.type}`;
+      if (seenLinks.has(k)) continue;
+      seenLinks.add(k);
+      links.push({
+        ...l, sourceId: l.source, targetId: l.target,
+        color:
+          l.type === "uses" ? CFG.edgeColors.uses
+          : l.type === "evaluates" ? CFG.edgeColors.evaluates
+          : l.type === "cites" ? CFG.edgeColors.cites
+          : l.type === "similar" ? CFG.edgeColors.similar
+          : l.type === "discusses" ? (nodeById.get(l.target)?.color ?? CFG.conceptFallbackColor)
+          : CFG.conceptFallbackColor,
+        dash: l.type === "similar" ? CFG.dashForWeight(l.weight ?? 0.6) : null,
+      });
+    }
     return { nodes, links, nodeById };
   }, [view]);
 
@@ -597,7 +607,6 @@ export function GraphView({
             tooltipRef.current.style.transform = `translate(${mouseRef.current.x + 12}px, ${mouseRef.current.y + 12}px)`;
           }
         }}>
-        {/* scope toggle */}
         <div className={`flex items-center gap-1 px-3 py-1.5 shrink-0 border-b ${theme === "dark" ? "border-white/5" : "border-slate-900/10"}`}>
           <button onClick={() => activeTurnId && setScope("message")} disabled={!activeTurnId}
             className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors ${scope === "message" ? "bg-indigo-500 text-white" : `${ui.dim} hover:bg-white/5 ${theme === "dark" ? "hover:text-white/80" : "hover:text-slate-700"} disabled:opacity-40`}`}>
@@ -667,7 +676,6 @@ export function GraphView({
             </div>
           )}
 
-          {/* search + typeahead */}
           <div className="absolute top-3 left-3 w-72">
             <div className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 ${ui.panel}`}>
               {searching ? <Loader2 className="h-3.5 w-3.5 animate-spin opacity-50" /> : <Search className={`h-3.5 w-3.5 ${ui.faint}`} />}
@@ -696,7 +704,6 @@ export function GraphView({
             )}
           </div>
 
-          {/* breadcrumb */}
           {(trail.length > 0 || pathResult) && (
             <div className={`absolute top-14 left-3 flex max-w-[70%] items-center gap-1 overflow-hidden rounded-lg border px-2 py-1 ${ui.panel}`}>
               <button onClick={() => { setTrail([]); setSelectedNode(null); setPathResult(null); }}

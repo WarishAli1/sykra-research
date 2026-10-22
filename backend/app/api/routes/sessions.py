@@ -3,13 +3,15 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import Session as DBSession
 
 from app.auth import get_current_user
 from app.db.database import get_db
-from app.db.models import Chat, LibraryPaper, ResearchSession, User
-
+from app.db.models import Chat, LibraryPaper, Message, ResearchSession, User
+from app.services.vector_store import vector_store
+from app.services.graph_store import graph_store
+from app.services import graph_builder
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
@@ -31,13 +33,28 @@ class SessionUpdate(BaseModel):
 
 
 def _read(session: ResearchSession, db: DBSession) -> SessionRead:
+    chat_count = db.scalar(
+        select(func.count()).select_from(Chat).where(
+            Chat.session_id == session.id,
+            Chat.deleted_at.is_(None),
+            Chat.messages.any(),
+        )
+    ) or 0
+    paper_count = db.scalar(
+        select(func.count(func.distinct(LibraryPaper.link)))
+        .join(Chat, Chat.id == LibraryPaper.chat_id)
+        .where(
+            LibraryPaper.session_id == session.id,
+            Chat.deleted_at.is_(None),
+        )
+    ) or 0
     return SessionRead(
         id=session.id,
         name=session.name,
         created_at=session.created_at,
         updated_at=session.updated_at,
-            chat_count=len(db.scalars(select(Chat).where(Chat.session_id == session.id, Chat.deleted_at.is_(None), Chat.messages.any()).limit(1000)).all()),
-        paper_count=len(db.scalars(select(LibraryPaper).where(LibraryPaper.session_id == session.id).limit(1000)).all()),
+        chat_count=chat_count,
+        paper_count=paper_count,
     )
 
 
@@ -81,5 +98,31 @@ def rename_session(session_id: UUID, payload: SessionUpdate, user: User = Depend
 @router.delete("/{session_id}", status_code=204)
 def delete_session(session_id: UUID, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     session = _owned(session_id, user, db)
+    sid = str(session.id)
+
+    try:
+        vector_store.delete_session(sid)
+    except Exception as e:
+        print(f"[sessions] vector purge failed: {type(e).__name__}: {e}")
+    try:
+        graph_store.clear_session(sid)
+    except Exception as e:
+        print(f"[sessions] neo4j purge failed: {type(e).__name__}: {e}")
+    try:
+        graph_builder.drop_cache(sid)
+    except Exception as e:
+        print(f"[sessions] cache purge failed: {type(e).__name__}: {e}")
+    chat_ids = [c.id for c in db.scalars(select(Chat).where(Chat.session_id == session.id))]
+    if chat_ids:
+        for msg in db.scalars(select(Message).where(Message.chat_id.in_(chat_ids))):
+            db.delete(msg)
+        for lp in db.scalars(select(LibraryPaper).where(LibraryPaper.chat_id.in_(chat_ids))):
+            db.delete(lp)
+        for c in db.scalars(select(Chat).where(Chat.id.in_(chat_ids))):
+            db.delete(c)
+    for lp in db.scalars(select(LibraryPaper).where(LibraryPaper.session_id == session.id)):
+        db.delete(lp)
+
     db.delete(session)
     db.commit()
+    return None

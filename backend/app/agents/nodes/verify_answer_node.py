@@ -38,6 +38,9 @@ CLAIMS:
 AVAILABLE PAPERS:
 {papers_block}
 
+Judge ONLY from the Abstract text shown for each paper. If a paper's Abstract does not state the claim
+(including every number in it), the claim is unsupported by that paper - do not use outside knowledge.
+
 For each claim return one CitationAudit object with the same claim_id.
 For every claim decide:
 citation_valid: whether the cited papers exist and plausibly support the claim.
@@ -198,7 +201,7 @@ def _draft_truncated(draft: str, limit: int = 6000) -> str:
 def _papers_block(
     papers: list[dict],
     claims: list[dict],
-    limit: int = 12,
+    limit: int = 8,
 ) -> str:
     """
     Build a compact paper block for citation audit.
@@ -238,7 +241,8 @@ def _papers_block(
             f"Title: {title}\n"
             f"Year: {year}\n"
             f"Source: {source}\n"
-            f"Role: {role}"
+            f"Role: {role}\n"
+            f"Abstract: {(paper.get('summary') or paper.get('text') or '')[:500]}"
         )
 
     return "\n\n".join(blocks)

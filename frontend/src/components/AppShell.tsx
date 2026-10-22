@@ -174,9 +174,11 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
 
   const [hasUpload, setHasUpload] = useState(false);
   const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>("literature");
-  // Session IDs are client-only so the app can keep server and client markup aligned.
+  const refreshLibrary = useCallback(() => {
+    if (!initialSessionId || !initialChatId) return;
+    api.listLibraryPapers(initialSessionId, initialChatId).then(setPapers).catch(() => {});
+  }, [initialSessionId, initialChatId]);
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSessionId(initialSessionId || crypto.randomUUID());
   }, [initialSessionId]);
 
@@ -201,13 +203,21 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
   useEffect(() => {
     if (!initialChatId) return;
     api.getChat(initialChatId).then((messages) => {
-      setTurns(messages.map((message) => ({
-        id: message.id,
-        role: message.role as ChatTurn["role"],
-        text: message.content,
-        references: Array.isArray(message.citations?.references) ? message.citations.references as ChatTurn["references"] : [],
-        statusSteps: Array.isArray(message.citations?.status_steps) ? message.citations.status_steps as StatusStep[] : undefined,
-      })));
+      setTurns(messages.map((message) => {
+        const c = (message.citations ?? {}) as Record<string, unknown>;
+        const isA = message.role === "assistant";
+        return {
+          id: message.id,
+          role: message.role as ChatTurn["role"],
+          text: message.content,
+          references: Array.isArray(c.references) ? c.references as ChatTurn["references"] : [],
+          statusSteps: Array.isArray(c.status_steps) ? c.status_steps as StatusStep[] : undefined,
+          responseMode: isA ? ((c.response_mode as ChatTurn["responseMode"]) ?? (/^## /m.test(message.content) ? "researched" : "normal")) : undefined,
+          sourceEvidenceMode: c.evidence_mode as ChatTurn["sourceEvidenceMode"],
+          sourceQuery: c.source_query as string | undefined,
+          paperLinks: Array.isArray(c.paper_links) ? c.paper_links as string[] : undefined,
+        };
+      }));
     }).catch(() => setTurns([]));
   }, [initialChatId]);
 
@@ -254,9 +264,9 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
   const lastAssistantTurnId = lastAssistantTurn?.turnId ?? lastAssistantTurn?.id ?? null;
 
   const lastAssistantPaperLinks = (
-    lastAssistantTurn?.references?.length
-      ? lastAssistantTurn.references.map((r) => r.link)
-      : lastAssistantTurn?.papers?.map((p) => p.link) ?? []
+    lastAssistantTurn?.papers?.length ? lastAssistantTurn.papers.map((p) => p.link)
+    : lastAssistantTurn?.paperLinks?.length ? lastAssistantTurn.paperLinks
+    : lastAssistantTurn?.references?.map((r) => r.link) ?? []
   ).filter(Boolean);
 
   const getConversationContext = useCallback(() => {
@@ -744,12 +754,14 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                   };
                 await handleDeletePaper(paper as Paper);
               }}
+              onRegenerated={refreshLibrary}
               uploadState={uploadState}
               setUploadState={setUploadState}
               hasUpload={hasUpload}
               setHasUpload={setHasUpload}
               evidenceMode={evidenceMode}
               setEvidenceMode={setEvidenceMode}
+              wide={!sidebarOpen && !railOpen}
             />
           )}
         </main>

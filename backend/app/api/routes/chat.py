@@ -15,6 +15,7 @@ from app.models.schemas import (
     FollowupRequest,
     FollowupResponse,
 )
+from app.db.models import LibraryPaper
 from app.agents.graph import research_graph, run_enrichment
 from app.agents.report_modules import get_disclaimer
 from app.agents.state import AgentState
@@ -80,7 +81,7 @@ def _persist_message(db: DBSession, chat: Chat, role: str, content: str, citatio
     chat.updated_at = now
     if chat.research_session:
         chat.research_session.updated_at = now
-    db.add(Message(chat_id=chat.id, role=role, content=content[:12000], citations=citations or {}, status=status))
+    db.add(Message(chat_id=chat.id, role=role, content=content, citations=citations or {}, status=status))
     db.commit()
 
 
@@ -99,7 +100,7 @@ def _create_message(
     message = Message(
         chat_id=chat.id,
         role=role,
-        content=content[:12000],
+        content=content,
         citations=citations or {},
         status=status,
     )
@@ -117,7 +118,7 @@ def _update_message(
     status: str | None = None,
     citations: dict | None = None,
 ) -> None:
-    message.content = content[:12000]
+    message.content = content
     if message.chat.research_session:
         message.chat.research_session.updated_at = datetime.datetime.now(datetime.timezone.utc)
     if status:
@@ -127,26 +128,67 @@ def _update_message(
     db.commit()
 
 
-def _build_initial_state(req: ChatRequest, session_id: str, turn_id: str) -> dict:
+def _answer_meta(response_mode, evidence_mode, query, ranked):
+    return {"response_mode": response_mode, "evidence_mode": evidence_mode,
+            "source_query": query, "paper_links": [p["link"] for p in ranked if p.get("link")]}
+
+def _replace_assistant_message(db, user, chat, query, content, citations):
+    msgs = list(db.scalars(select(Message).where(Message.chat_id == chat.id).order_by(Message.created_at)))
+    start = max((i for i, m in enumerate(msgs) if m.role == "user" and (m.content or "").strip() == query.strip()), default=None)
+    old = []
+    if start is not None:
+        for m in msgs[start + 1:]:
+            if m.role == "user":
+                break
+            if m.role == "assistant":
+                old.append(m)
+    if not old:
+        _persist_message(db, chat, "assistant", content, citations)
+        return
+    links = lambda m: set((m.citations or {}).get("paper_links") or [])
+    stale = set().union(*(links(m) for m in old))
+    keep = set().union(*(links(m) for m in msgs if m.role == "assistant" and m not in old)) | set(citations.get("paper_links", []))
+    for m in old[:-1]:
+        db.delete(m)
+    target = old[-1]
+    target.content, target.citations, target.status = content, citations, "complete"
+    chat.updated_at = datetime.datetime.now(datetime.timezone.utc)
+    if stale - keep:
+        rows = db.scalars(select(LibraryPaper).where(
+            LibraryPaper.user_id == user.id, LibraryPaper.chat_id == chat.id,
+            LibraryPaper.link.in_(stale - keep)))
+        for r in rows:
+            if not (r.paper_metadata or {}).get("is_uploaded"):
+                db.delete(r)
+    db.commit()
+
+
+def _history_from_db(db, chat, limit=4):
+    rows = db.scalars(
+        select(Message).where(Message.chat_id == chat.id, Message.status == "complete")
+        .order_by(Message.created_at.desc()).limit(limit)).all()
+    return [{"role": m.role, "content": (m.content or "")[:600]} for m in reversed(rows)]
+
+
+def _build_initial_state(
+    req: ChatRequest,
+    session_id: str,
+    turn_id: str,
+    history: list[dict] | None = None,
+) -> dict:
     return {
         "query": req.query,
         "session_id": session_id,
         "turn_id": turn_id,
         "evidence_mode": req.evidence_mode,
         "response_mode": req.response_mode,
-        "conversation_history": [
-            {**h, "content": str(h.get("content", ""))[:600]}
-            if isinstance(h, dict)
-            else h
-            for h in (req.conversation_history or [])[-4:]
-        ],
-
+        "conversation_history": history if history is not None else [],
         "refined_query": None,
         "search_terms": [],
         "search_queries": [],
         "query_understanding": None,
         "query_plan": None,
-
+        "method_note": None,
         "answer_spec": None,
         "source_plan": None,
         "retrieval_plan": None,
@@ -321,9 +363,8 @@ def _build_stream_response(
         turn_id=turn_id,
         papers=papers,
         citations=final_state.get("citations", []) or [],
-
+        method_note=final_state.get("method_note"),
         disclaimer=get_disclaimer(),
-
         papers_below_threshold=final_state.get("papers_below_threshold", 0),
         graph_contradictions=final_state.get("graph_contradictions", []),
         graph_entities=final_state.get("graph_entities", []),
@@ -403,16 +444,24 @@ async def chat(req: ChatRequest, user: User = Depends(get_current_user), db: DBS
     turn_id = req.turn_id or str(uuid.uuid4())
     chat_record = _get_or_create_chat(db, user, session_id, req.query, req.chat_id)
     schedule_title_generation(chat_record.id, req.query)
+    history = _history_from_db(db, chat_record)
     _persist_message(db, chat_record, "user", req.query, status="complete")
     assistant_message = _create_message(db, chat_record, "assistant")
 
-    initial_state = _build_initial_state(req, session_id, turn_id)
+    initial_state = _build_initial_state(req, session_id, turn_id, history)
 
     t0 = time.time()
 
     final_state = await research_graph.ainvoke(initial_state)
     final_state = await asyncio.to_thread(run_enrichment, final_state)
-
+    cited_ids_raw = final_state.get("cited_paper_ids") or []
+    cited_ids = {str(x) for x in cited_ids_raw if x is not None}
+    
+    ranked = final_state.get("ranked_papers") or []
+    if cited_ids and ranked:
+        filtered_ranked = [p for i, p in enumerate(ranked) if str(i) in cited_ids]
+        if filtered_ranked:
+            final_state["ranked_papers"] = filtered_ranked
     elapsed = round(time.time() - t0, 1)
     print(f"[timing] {elapsed}s | mode={req.response_mode} | query='{req.query}'")
 
@@ -423,8 +472,11 @@ async def chat(req: ChatRequest, user: User = Depends(get_current_user), db: DBS
         turn_id,
         final_state,
     )
-    _persist_message(db, chat_record, "assistant", response.answer, {"references": [r.model_dump() for r in response.references]})
-    save_papers(db, user.id, session_id, final_state.get("ranked_papers") or [], chat_id=chat_record.id)
+    ranked = final_state.get("ranked_papers") or []
+    meta = {"references": [r.model_dump() for r in response.references],
+            **_answer_meta(req.response_mode, req.evidence_mode, req.query, ranked)}
+    _replace_assistant_message(db, user, chat_record, req.query, response.answer, meta)
+    save_papers(db, user.id, req.session_id, ranked, chat_id=chat_record.id)
     return response
 
 
@@ -447,6 +499,7 @@ async def chat_stream(
     turn_id = req.turn_id or str(uuid.uuid4())
     chat_record = _get_or_create_chat(db, user, session_id, req.query, req.chat_id)
     schedule_title_generation(chat_record.id, req.query)
+    history = _history_from_db(db, chat_record)
     _persist_message(db, chat_record, "user", req.query, status="complete")
     assistant_message = _create_message(db, chat_record, "assistant")
     chat_id = str(chat_record.id)
@@ -471,7 +524,7 @@ async def chat_stream(
                     ),
                 )
 
-            state: AgentState = _build_initial_state(req, session_id, turn_id)
+            state: AgentState = _build_initial_state(req, session_id, turn_id, history)
 
             loop = asyncio.get_running_loop()
             bridge_register(request_id, loop)
@@ -531,10 +584,12 @@ async def chat_stream(
                         if notice:
                             yield sse_event("notice", message=notice)
 
-                    elif node_name in ("plan_query", "search"):
-                        if req.evidence_mode == "uploaded":
-                            detail = None
-                            items = None
+                    elif node_name in ("plan_query", "build_retrieval_plan", "search"):
+                        if req.evidence_mode != "uploaded":
+                            rp = delta.get("retrieval_plan") or state.get("retrieval_plan") or {}
+                            qs = [i.get("query") for i in rp.get("intents", []) if i.get("query")]
+                            detail = qs[0] if qs else req.query
+                            items = qs[:4] or None
                         else:
                             queries = delta.get("search_queries") or state.get("search_queries")
                             if queries:
@@ -571,19 +626,26 @@ async def chat_stream(
                     sections_streamed = True
                     assistant_content += content
                     _update_message(db, assistant_message, assistant_content)
-
                     async for evt in stream_section_words(
                         content,
                         cancel_check=lambda: cancellation.is_cancelled(request_id),
                         kind="final",
                     ):
                         yield evt
+                        await asyncio.sleep(0.01) 
 
                 elif etype == "graph_done":
                     break
 
             await graph_task
-
+            cited_ids_raw = state.get("cited_paper_ids") or []
+            cited_ids = {str(x) for x in cited_ids_raw if x is not None}
+            
+            ranked = state.get("ranked_papers") or []
+            if cited_ids and ranked:
+                filtered_ranked = [p for i, p in enumerate(ranked) if str(i) in cited_ids]
+                if filtered_ranked:
+                    state["ranked_papers"] = filtered_ranked
             if graph_error:
                 _update_message(db, assistant_message, assistant_content, status="failed")
                 yield sse_event(
@@ -638,15 +700,18 @@ async def chat_stream(
             response.chat_id = chat_id
             yield sse_event("result", payload=response.model_dump())
             assistant_content = response.answer
+            meta = _answer_meta(req.response_mode, req.evidence_mode, req.query, state.get("ranked_papers") or [])
+            citations_payload = {
+                "references": [r.model_dump() for r in response.references],
+                "status_steps": status_steps,
+                **meta
+            }
             _update_message(
                 db,
                 assistant_message,
                 assistant_content,
                 status="complete",
-                citations={
-                    "references": [r.model_dump() for r in response.references],
-                    "status_steps": status_steps,
-                },
+                citations=citations_payload
             )
             finished = True
 
@@ -759,12 +824,19 @@ async def regenerate(req: RegenerateRequest, user: User = Depends(get_current_us
         evidence_mode=req.evidence_mode,
         response_mode=req.response_mode,
     )
-    chat_record = _get_or_create_chat(db, user, req.session_id, req.query, req.chat_id)
+    chat_record = _get_or_create_chat(
+        db, user, req.session_id, req.query, req.chat_id
+    )
+
+    history = _history_from_db(db, chat_record)
+
     if not req.chat_id:
         schedule_title_generation(chat_record.id, req.query)
         _persist_message(db, chat_record, "user", req.query, status="complete")
 
-    initial_state = _build_initial_state(chat_req, req.session_id, turn_id)
+    initial_state = _build_initial_state(
+        chat_req, req.session_id, turn_id, history=history
+    )
 
     final_state = await research_graph.ainvoke(initial_state)
     final_state = await asyncio.to_thread(run_enrichment, final_state)
@@ -777,6 +849,9 @@ async def regenerate(req: RegenerateRequest, user: User = Depends(get_current_us
         final_state,
     )
     response.chat_id = str(chat_record.id)
-    _persist_message(db, chat_record, "assistant", response.answer, {"references": [r.model_dump() for r in response.references]})
-    save_papers(db, user.id, req.session_id, final_state.get("ranked_papers") or [], chat_id=chat_record.id)
+    ranked = final_state.get("ranked_papers") or []
+    meta = {"references": [r.model_dump() for r in response.references],
+            **_answer_meta(req.response_mode, req.evidence_mode, req.query, ranked)}
+    _replace_assistant_message(db, user, chat_record, req.query, response.answer, meta)
+    save_papers(db, user.id, req.session_id, ranked, chat_id=chat_record.id)
     return response

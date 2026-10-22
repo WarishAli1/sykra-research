@@ -117,6 +117,8 @@ export type ChatTurn = {
   informationNeeds?: string[];
   complexityScore?: number;
   disclaimer?: string | null;
+  paperLinks?: string[];
+  methodNote?: string | null;
 };
 
 export type ChatRequest = {
@@ -154,6 +156,7 @@ export type ChatResponse = {
   complexity_score?: number;
   report_notice?: string | null;
   status_steps?: StepEvent[];
+  method_note?: string | null;
 };
 
 export type FollowupRequest = {
