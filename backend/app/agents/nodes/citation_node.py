@@ -12,17 +12,18 @@ from app.services.citation_formatter import format_apa
 
 def _method_note(state, n_cited):
     mode = state.get("response_mode", "normal")
-    n_rank = len(state.get("ranked_papers") or [])
-    if mode == "normal":
-        return (f"Direct mode: quick answer from {n_rank} retrieved sources, {n_cited} cited. "
-                "Not a systematic review; claims were not independently audited.")
-    n_q = len((state.get("retrieval_plan") or {}).get("intents") or [])
-    n_found = len(state.get("raw_search_results") or [])
     ver = state.get("verification_status", "not_run")
-    return (f"Researched mode: {n_q} search intents, {n_found} candidates retrieved, {n_rank} ranked, "
-            f"{n_cited} cited. Citations were automatically checked against source abstracts "
-            f"(claim audit: {ver}). This is targeted retrieval and evidence synthesis, not a systematic "
-            "review (no registered protocol, exhaustive search or formal risk-of-bias assessment).")
+
+    if mode == "normal":
+        return (
+            f"Direct mode: {n_cited} cited sources. "
+            "Not a systematic review."
+        )
+
+    return (
+        f"Researched mode: {n_cited} cited sources were checked against their abstracts "
+        f"(claim audit: {ver}). This is not a systematic review."
+    )
 
 
 def citation_node(state: AgentState) -> AgentState:
@@ -39,6 +40,7 @@ def citation_node(state: AgentState) -> AgentState:
             texts_by_id,
             None,
             numeric_check=getattr(settings, "GROUNDING_NUMERIC_CHECK_ENABLED", True),
+            extra_text=state.get("query", ""),
         )
         if drops:
             print(f"[ground:final] dropped/adjusted {len(drops)} claim(s) after revision")

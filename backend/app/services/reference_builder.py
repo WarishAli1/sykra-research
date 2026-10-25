@@ -65,6 +65,15 @@ _MARKER_WITH_LEAD_RE = re.compile(
     re.IGNORECASE,
 )
 
+_MULTI_CITE_RE = re.compile(
+    r"[\[【]\s*((?:paper[\s_]?id\s*[=＝]\s*\d+\s*[,;，]?\s*)+)[\]】]", re.I)
+
+
+def split_multi_cites(text: str) -> str:
+    """[paper_id=0, paper_id=5] -> [paper_id=0][paper_id=5]"""
+    return _MULTI_CITE_RE.sub(
+        lambda m: "".join(f"[paper_id={n}]" for n in re.findall(r"\d+", m.group(1))),
+        text or "")
 
 class CitationNumberer:
     """
@@ -82,7 +91,8 @@ class CitationNumberer:
     def rewrite(self, text: str) -> str:
         if not text:
             return ""
-
+        text = split_multi_cites(text)
+        
         def _sub(m):
             ref_id = self.id_map.get(m.group(1))
             if ref_id is None:

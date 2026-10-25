@@ -766,6 +766,12 @@ def rank_node(state: AgentState) -> AgentState:
     papers = state.get("raw_search_results", [])
     is_uploaded_only = state.get("evidence_mode") == "uploaded"
 
+    if state.get("is_followup") and not is_uploaded_only:
+        carried = [dict(p) for p in (state.get("previous_papers") or [])]
+        if carried:
+            print(f"[rank] follow-up: adding {len(carried)} paper(s) from the previous turn")
+            papers = list(papers) + carried
+
     if not papers:
         return {
             "ranked_papers": [],
@@ -830,6 +836,8 @@ def rank_node(state: AgentState) -> AgentState:
             )
         else:
             p["final_score"] = round(_weighted_score(p, orig_vec, other_vecs, original_query, needs), 3)
+        if p.get("_from_previous_turn"):
+            p["final_score"] = round(p["final_score"] + 0.08, 3)
         all_papers.append(p)
 
     all_papers.sort(key=lambda p: p.get("final_score", 0.0), reverse=True)

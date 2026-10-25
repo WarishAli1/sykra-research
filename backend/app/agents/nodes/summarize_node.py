@@ -19,8 +19,9 @@ from app.services.reference_builder import (
     rewrite_inline_citations,
     format_reference_block,
     extract_paper_ids,
+    split_multi_cites,
 )
-
+from app.agents.conversation_context import conversation_block, format_override
 from app.agents.report_modules import default_report_plan, MODULE_LIBRARY, _is_technical_derivation
 from app.utils.text_sanitizer import sanitize_for_web
 from app.services.sse import bridge_push
@@ -32,6 +33,7 @@ from app.services.citation_grounding import (
     MARKER_RE,
     extract_quantities,
     rewrite_sentences,
+    user_numeric_tokens,
 )
 
 
@@ -51,6 +53,11 @@ Cite as [paper_id=N], one id per bracket, only ids listed under ALLOWED SOURCES,
 excerpt states. Never write a number not in a cited excerpt. If sources don't cover something, say so.
 Never say "retrieved sources", "ledger" or "the user". No References section."""
 
+
+_EMPTY_ANSWER_FALLBACK = (
+    "I could not find enough directly supporting evidence in the available sources "
+    "to answer this reliably. Please provide more context or retry."
+)
 
 def _dynamic_paper_cap(papers, depth, hard_max=15):
     strong = sum(1 for p in papers if float(p.get("_relevance_orig") or p.get("final_score") or 0) >= 0.45)
@@ -72,6 +79,8 @@ def _slim_prompt(m, block, ids, state, plan, guardrails, titles):
               if m["module_id"] == "derivation" else "")
     return f"""{_mode_positioning(state.get('response_mode','normal'))}
 USER QUERY: {state.get('query','')}
+{conversation_block(state)}
+{format_override(state)}
 {_evidence_mode_instruction(state.get('evidence_mode','literature'))}
 {_answer_spec_context(state, {})}
 DOMAIN GUARDRAILS: {'; '.join(guardrails) or 'none'}
@@ -122,11 +131,13 @@ def _generate_sections_per_module(modules, papers, summaries, state, evidence_ma
                      HumanMessage(content=prompt)],
                     max_tokens=max_out, config={"timeout": timeout})
                 content = _clean_content(raw.content)
+                content = _strip_leading_title(content, m["title"])
                 if len(content.split()) >= 25: break
             except Exception as e:
                 print(f"[summarize] module {mid} failed: {type(e).__name__}: {e}")
         if len(content.split()) < 25:
             content = _deterministic_section_fallback(m, papers, summaries, {}, state)
+            content = _strip_leading_title(content, m["title"])
 
         content = _dedupe_paragraphs(_rewrite_author_year_markers(content, papers), dedupe_seen)
         sections.append({"module_id": mid, "title": m["title"], "content": content,
@@ -192,10 +203,7 @@ a compression method, an unrelated domain application) unless the user's questio
 is actually about that topic.
 
 INTEGRITY RULE:
-Never write "a review of the literature was conducted," "the evidence was evaluated,"
-"a systematic search was performed," or similar, unless describing something that
-actually happened in this pipeline. If you are explaining a well-established concept
-using one primary source, say so plainly — do not dress it up as a research review.
+Do not state that a review, search, evaluation, or synthesis was conducted unless the user explicitly asks about methodology and you are describing the cited evidence. If you are explaining a well-established concept using one primary source, say so plainly.
 """
 
 def _estimate_tokens(text: str) -> int:
@@ -219,22 +227,13 @@ def _number_token_set(text: str) -> set[str]:
 
 
 def _mode_positioning(response_mode: str) -> str:
-    if response_mode == "normal":
-        return (
-            "MODE POSITIONING: Normal mode provides a fast, source-supported answer. "
-            "It supports academic writing by giving a clear, direct answer using relevant sources. "
-            "Do not describe Normal mode as a systematic review, formal research execution, "
-            "or source-verified research process. If the method is mentioned, describe it as "
-            "a quick answer based on targeted retrieved sources."
-        )
-
     return (
-        "MODE POSITIONING: Researched mode is research execution and evidence synthesis. "
-        "It supports academic writing by performing targeted retrieval, source evaluation, "
-        "evidence synthesis, and citation checking. Describe the process accurately as "
-        "targeted research and evidence synthesis. Do NOT claim systematic-review rigor, "
-        "PRISMA, registered protocol, exhaustive search, formal risk-of-bias assessment, "
-        "or any review methodology that was not actually performed."
+        "INTERNAL STYLE RULE: Answer the question directly. "
+        "Do not describe the assistant's internal search, retrieval, verification, "
+        "revision, citation-checking, or report-generation process. "
+        "When methodology is relevant, describe only the cited evidence's methodology, "
+        "not the assistant's pipeline. "
+        "Never claim systematic-review, PRISMA, protocol, or exhaustive-search rigor."
     )
 
 
@@ -274,8 +273,13 @@ def _add_missing_numeric_citations(
     if not source_tokens:
         return sections
 
+    user_numbers = state.get("_user_numeric_tokens") or set()
+
     def _cite_sentence(sent: str) -> str:
         if MARKER_RE.search(sent):
+            return sent
+
+        if user_numbers and (_number_token_set(sent) & user_numbers):
             return sent
 
         quants = extract_quantities(sent)
@@ -657,7 +661,7 @@ def _normalize_citation_artifacts(text: str) -> str:
     """[3*source] / [3, source] / [paper_id=3*source] -> [paper_id=3]."""
     if not text:
         return ""
-    return _CITE_SOURCE_ARTIFACT_RE.sub(r"[paper_id=\1]", text)
+    return _CITE_SOURCE_ARTIFACT_RE.sub(r"[paper_id=\1]", split_multi_cites(text))
 
 def _rewrite_author_year_markers(text: str, papers: list[dict]) -> str:
     """[Krizhevsky et al. 2012] -> [paper_id=N] via first-author-last-name + year."""
@@ -728,7 +732,8 @@ Put [paper_id=N] only on a claim that paper's excerpt actually states. Never cit
 If a claim relies on a shown paper, include [paper_id=N] in that same sentence.
 Using a source without citing it is a failure.
 Never write a number, range, ratio, percentage, duration or sample size unless it appears word for word in a cited excerpt. If the excerpt gives no figure, describe the effect in words and do not invent one.
-If the excerpts do not cover a sub-topic the question needs, add it under a final sub-heading "### Established background (not from retrieved sources)" as short, textbook-level facts with NO citation markers and NO numbers. Never write "cannot be confirmed" for standard textbook facts.
+If the excerpts do not cover a sub-topic, you may add textbook-level background as plain prose with NO citation marker, NO numbers, NO heading, and NO label. Never say "not from retrieved sources".
+Numbers that appear in the USER QUERY are the user's own observations. Report them as the user's data. Never cite a paper for them, never say they were retrieved, and compare them with literature only using figures stated in a cited excerpt. Never invent a "typical range".
 Reviews and overviews support only what their excerpt says; do not cite them for mechanisms, side effects or subgroups the excerpt does not mention.
 """.strip()
 
@@ -761,8 +766,25 @@ def _ground_sections(sections: list[dict], papers: list[dict], state: AgentState
     for sec in sections:
         content = sec.get("content") or ""
         head, sep, tail = content.partition(marker)
-        body, d = ground_text(head, texts_by_id, visible, numeric_on)
-        body = body + (sep + tail if sep else "")
+        body, d = ground_text(
+            head,
+            texts_by_id,
+            visible,
+            numeric_on,
+            extra_text=state.get("query", ""),
+        )
+
+        if sep:
+            tail_clean = (tail or "").strip()
+
+            if numeric_on and tail_clean and extract_quantities(tail_clean):
+                print(
+                    "[ground] warning: ungrounded background tail contains numeric quantities. "
+                    "Marker removed; tail preserved pending grounding policy."
+                )
+
+            if tail_clean:
+                body = body + "\n\n" + tail_clean
         bodies.append(body)
         drops.extend(d)
         
@@ -786,9 +808,14 @@ def _ground_sections(sections: list[dict], papers: list[dict], state: AgentState
         drops.extend(d)
     for sec, body in zip(sections, bodies):
         words = len(re.sub(r"\[paper_id=\d+\]", "", body).split())
-        if (sec.get("content") or "").strip() and words < 12:
+        abstained = False
+
+        if not body.strip() or ((sec.get("content") or "").strip() and words < 12):
             body = ABSTAIN_TEXT
+            abstained = True
+
         sec["content"] = body
+        sec["abstained"] = abstained
         sec["cited_paper_ids"] = extract_paper_ids(body)
     print(f"[ground] dropped/adjusted {len(drops)} claim(s)")
     for d in drops:
@@ -846,22 +873,12 @@ def _sanitize_preserving_math(text: str) -> str:
     return sanitized
 
 
-def _strip_headers(text: str) -> str:
-    if not text:
-        return text
-
-    lines = text.split("\n")
-    cleaned = []
-
-    for line in lines:
-        stripped = line.strip()
-
-        if re.match(r"^#{1,4}\s+\S", stripped) and len(stripped) < 60:
-            continue
-
-        cleaned.append(line)
-
-    return "\n".join(cleaned)
+def _strip_leading_title(text: str, title: str) -> str:
+    norm = lambda s: re.sub(r"[#*_:\s]+", " ", s).strip().lower()
+    t, lines = norm(title), (text or "").split("\n")
+    while lines and norm(lines[0]) in ("", t):
+        lines.pop(0)
+    return "\n".join(lines).strip()
 
 
 def _has_module(plan: dict, module_id: str) -> bool:
@@ -1999,7 +2016,7 @@ def _stream_invoke_section_batch(
         mid = m["module_id"]
 
         cleaned = _clean_content(raw_content)
-
+        cleaned = _strip_leading_title(cleaned, m["title"])
         cleaned = _dedupe_paragraphs(cleaned, dedupe_seen)
         cleaned = _rewrite_author_year_markers(cleaned, state.get("ranked_papers", []))
         cited_ids = extract_paper_ids(cleaned)
@@ -2098,8 +2115,8 @@ def _stream_invoke_section_batch(
 
         elif buffer.strip() and batch_modules:
             m0 = batch_modules[0]
-
             cleaned = _clean_content(buffer)
+            cleaned = _strip_leading_title(cleaned, m0["title"])
             cleaned = _dedupe_paragraphs(cleaned, dedupe_seen)
 
             cited_ids = extract_paper_ids(cleaned)
@@ -2252,6 +2269,7 @@ def _generate_sections_batch_streaming(
 
         for mid, sec in retry.items():
             cleaned = _clean_content(sec.get("content", ""))
+            cleaned = _strip_leading_title(cleaned, sec.get("title", ""))
             cleaned = _dedupe_paragraphs(cleaned, dedupe_seen)
 
             cited_ids = extract_paper_ids(cleaned)
@@ -2280,6 +2298,7 @@ def _generate_sections_batch_streaming(
                 _cite_labels(state.get("ranked_papers", [])),
                 state,
             )
+            content = _strip_leading_title(content, m["title"])
 
             placeholder = {
                 "module_id": mid,
@@ -2643,6 +2662,11 @@ Keep the answer accurate, concise, and high-quality.
             f"**Evidence:** [paper_id=0] {first.get('title', 'Untitled')}: {abstract}\n\n"
             f"**Limitations:** Only limited evidence could be retrieved quickly."
         )
+    content = re.sub(
+        r"(?im)^\s*\*\*Limitations:\*\*\s*",
+        "",
+        content,
+    ).strip()
 
     cited_ids = extract_paper_ids(content)
 
@@ -2897,33 +2921,35 @@ def _merge_sections(sections: list[dict], plan: dict) -> str:
     )
 
     parts = []
+    abstained_parts = []
 
     for s in sections:
-        content = _clean_content(s.get("content", ""))
-
-        if not content:
-            continue
-
-        if (
-            "do not contain enough direct evidence" in content 
-            or "do not contain enough relevant research" in content
-            or "treat this as a starting point" in content
-        ):
-            continue
-
         title = s.get("title") or MODULE_LIBRARY.get(
             s.get("module_id"),
             {},
         ).get("title", "Section")
 
-        content = _strip_headers(content)
+        content = _clean_content(s.get("content", ""))
+        if not content:
+            continue
+
+        if s.get("abstained") or content.strip() == ABSTAIN_TEXT:
+            abstained_parts.append((title, content))
+            continue
+
+        content = _strip_leading_title(content, title)
+        if not content:
+            continue
 
         parts.append((title, content))
 
-    if len(parts) == 1:
-        return parts[0][1].strip()
+    if parts:
+        if len(parts) == 1:
+            return parts[0][1].strip()
 
-    return "\n".join(f"## {t}\n\n{c}\n" for t, c in parts).strip()
+        return "\n".join(f"## {t}\n\n{c}\n" for t, c in parts).strip()
+
+    return _EMPTY_ANSWER_FALLBACK
 
 
 def _word_count(text: str) -> int:
@@ -3222,6 +3248,10 @@ def _generate_premium_normal_sections(
 USER QUERY:
 {query}
 
+{conversation_block(state)}
+
+{format_override(state)}
+
 {_evidence_mode_instruction(state.get('evidence_mode', 'literature'))}
 
 AVAILABLE SOURCES:
@@ -3242,11 +3272,11 @@ You support academic writing by giving a direct, clear, source-supported answer.
 
 {length_hint}
 
-Structure (use these exact bold labels, no markdown headings):
+Structure (use these exact bold labels, no markdown headings; if a PRESENTATION REQUEST appears above, follow that request instead of this structure):
 **Short answer:** 2-3 plain sentences that fully answer the question.
 (If this is a comparison: put the verdict, the table and the "Choose ... when" bullets here.)
 **What the research shows:** 3-5 bullets, each one claim with its citation [paper_id=N].
-**What's uncertain:** 1-3 bullets on gaps or weak evidence.
+**What's uncertain:** include ONLY if a real gap affects the answer; otherwise omit this label.
 
 Rules:
 Do not output <think>, thinking, analysis, planning, or internal reasoning. Return only final user-facing content.
@@ -3484,6 +3514,7 @@ def _generate_uploaded_sections(
         document_map = state.get("document_map", "No document structure or table of contents was detected.")
         prompt = (
             f"USER QUESTION:\n{query}\n\n"
+            f"{conversation_block(state)}\n\n"
             f"{document_map}\n\n"
             f"DOCUMENT PASSAGES (from the user's uploaded document, most relevant first):\n"
             f"{passage_block}\n\n"
@@ -3582,6 +3613,7 @@ def _generate_uploaded_sections(
     
     prompt = (
         f"USER QUESTION:\n{query}\n\n"
+        f"{conversation_block(state)}\n\n"
         f"{document_map}\n\n"
         f"RELEVANT PASSAGES (from the user's uploaded document):\n"
         f"{passage_block}\n\n"
@@ -3657,6 +3689,11 @@ def _generate_uploaded_sections(
     for m in batch_modules:
         sec = sections[m["module_id"]]
         sec["content"] = _clean_content(sec.get("content", ""))
+        sec["content"] = re.sub(
+            r"(?im)^\s*\*\*Limitations:\*\*\s*",
+            "",
+            sec["content"],
+        ).strip()
         ordered.append(sec)
 
         if emitter is not None:
@@ -3673,8 +3710,9 @@ def _generate_uploaded_sections(
 
 def summarize_node(state: AgentState) -> AgentState:
     papers = state.get("ranked_papers", [])
-
     plan = state.get("report_plan") or default_report_plan(state)
+
+    state["_user_numeric_tokens"] = user_numeric_tokens(state.get("query", ""))
 
     depth = plan.get("depth", "low")
 
@@ -3823,6 +3861,9 @@ def summarize_node(state: AgentState) -> AgentState:
 
     for i, marker in enumerate(cite_markers):
         answer_text = answer_text.replace(f"@@PAPER_CITE_{i}@@", marker)
+
+    if not answer_text.strip():
+        answer_text = _EMPTY_ANSWER_FALLBACK
 
     from app.agents.report_modules import get_disclaimer
 

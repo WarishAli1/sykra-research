@@ -8,6 +8,8 @@ from app.services.citation_grounding import (
     MARKER_RE,
     extract_quantities,
     rewrite_sentences,
+    number_tokens,
+    user_numeric_tokens,
 )
 
 _MAX_REVISIONS = 2
@@ -60,37 +62,26 @@ def _normalize_component(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
-_SYSTEMATIC_CLAIM_RE = re.compile(
-    r"\b(?:this|we|our|the)\b.{0,120}?"
-    r"\b(systematic review|systematic literature review|PRISMA|"
-    r"registered protocol|exhaustive search|risk of bias assessment)\b",
-    re.IGNORECASE | re.DOTALL,
-)
 
-
-def _has_systematic_overclaim(state: AgentState) -> bool:
-    query = (state.get("query") or "").lower()
-
-    if any(
-        term in query
-        for term in (
-            "systematic review",
-            "prisma",
-            "systematic literature review",
-        )
-    ):
-        return False
-
-    return bool(_SYSTEMATIC_CLAIM_RE.search(state.get("final_answer") or ""))
-
-
-def _uncited_quantitative_count(text: str) -> int:
+def _uncited_quantitative_count(
+    text: str,
+    user_numbers: set[str] | None = None,
+) -> int:
     count = 0
+    user_numbers = user_numbers or set()
 
     def _count(sent: str) -> str:
         nonlocal count
 
-        if not MARKER_RE.search(sent) and extract_quantities(sent):
+        if MARKER_RE.search(sent):
+            return sent
+
+        if not extract_quantities(sent):
+            return sent
+
+        non_user_tokens = number_tokens(sent) - user_numbers
+
+        if non_user_tokens:
             count += 1
 
         return sent
@@ -276,14 +267,16 @@ def critique_node(state: AgentState) -> AgentState:
         return {"needs_revision": False}
 
     hard_failures = []
-    if _has_systematic_overclaim(state):
-        hard_failures.append(
-            "Answer claims systematic-review-level methodology. "
-            "Rewrite it as targeted retrieval and evidence synthesis unless a formal "
-            "systematic-review protocol was actually followed."
-        )
 
-    uncited_quant_count = _uncited_quantitative_count(state.get("final_answer", ""))
+    user_numbers = (
+        state.get("_user_numeric_tokens")
+        or user_numeric_tokens(state.get("query", ""))
+    )
+
+    uncited_quant_count = _uncited_quantitative_count(
+        state.get("final_answer", ""),
+        user_numbers,
+    )
     if uncited_quant_count >= 2:
         hard_failures.append(
             "Quantitative claims appear without citations. "

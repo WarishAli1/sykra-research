@@ -16,7 +16,8 @@ Your job is NOT to answer the question.
 Your job is to decide what kind of report should be generated, sized to the ACTUAL
 complexity of the query — not to the response mode.
 Choose modules from the module library only.
-Always include direct_answer, limitations, references.
+Always include direct_answer and references.
+Add limitations only if the query asks for caveats or the evidence is likely thin.
 Add a module only if it would materially change or deepen the answer.
 Never add a module just to fill out the report.
 
@@ -130,7 +131,6 @@ def report_plan_node(state: AgentState) -> AgentState:
             
         modules.append({"module_id": "research_findings", "importance": 90})
         modules.append({"module_id": "evidence_mapping", "importance": 95})
-        modules.append({"module_id": "limitations", "importance": 85})
         modules.append({"module_id": "references", "importance": 100})
         
         raw_plan = {

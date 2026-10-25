@@ -5,7 +5,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from app.agents.state import AgentState
 from app.services.llm_client import get_llm
 from app.config import settings
-from app.services.citation_grounding import ground_text
+from app.services.citation_grounding import ground_text, user_numeric_tokens
 
 
 QUALITY_RULES = """
@@ -21,8 +21,12 @@ Do NOT repeat facts, numbers, or arguments already present elsewhere in the repo
 NEVER invent numbers, dates, costs, or statistics to fill a gap. If a required
 figure is missing from the sources, state that it is UNKNOWN or give the
 formula/inputs needed to derive it.
+Numbers that appear in USER QUERY are user-provided observations. Preserve them
+when they are part of the user's dataset, describe them as user-reported data,
+and do not cite retrieved papers for them.
 Only cite a paper for something its Abstract in AVAILABLE SOURCES actually states.
-Never write a number, range or percentage that is not word for word in a cited Abstract.
+Never write a literature number, range or percentage that is not word for word
+in a cited Abstract.
 """
 
 
@@ -35,8 +39,14 @@ def _sources_block(papers: list[dict], n: int = 6, chars: int = 600) -> str:
     )
 
 
-def _ground(text: str, papers: list[dict], shown: int = 6) -> str:
-    """Re-run the numeric/citation grounding on text the reviser just wrote."""
+
+def _ground(
+    text: str,
+    papers: list[dict],
+    shown: int = 6,
+    extra_text: str = "",
+) -> str:
+    """Re-run numeric/citation grounding on text the reviser just wrote."""
     if not text or not papers:
         return text
     texts_by_id = {
@@ -48,10 +58,13 @@ def _ground(text: str, papers: list[dict], shown: int = 6) -> str:
         texts_by_id,
         None,
         numeric_check=getattr(settings, "GROUNDING_NUMERIC_CHECK_ENABLED", True),
+        extra_text=extra_text,
     )
     for d in drops:
         print(f"[revise:ground] {d['reason']}: {d['sentence']}")
+
     return out
+
 
 
 
@@ -123,6 +136,14 @@ def _looks_like_provider_quota_error(e: Exception) -> bool:
 
 def _revision_context(state: AgentState) -> str:
     lines = []
+
+    user_numbers = sorted(user_numeric_tokens(state.get("query", "")))
+    if user_numbers:
+        lines.append(
+            "- User-provided numbers present in the user query. Preserve these as "
+            "user-reported data and do not cite retrieved papers for them: "
+            + ", ".join(user_numbers)
+        )
 
     math_verification = state.get("math_verification") or {}
     equations = math_verification.get("checked_equations") or []
@@ -243,7 +264,7 @@ Rules:
 Start each section with a ## heading matching its title.
 Keep each section to 150–350 words.
 Cite sources as [paper_id=N], only for what that paper's Abstract states.
-Do NOT invent numbers or citations; a number must appear word for word in a cited Abstract.
+Do NOT invent literature numbers or citations; a literature number must appear word for word in a cited Abstract. Numbers in USER QUERY are user-provided observations and may be restated as user-reported data without citation.
 If the sources do not cover something, say so plainly instead of guessing.
 Return markdown only.
 """
@@ -287,7 +308,7 @@ Return markdown only.
 
             if match:
                 s["content"] = _ground(
-                    _clean_content(match.group(1).strip()), papers
+                    _clean_content(match.group(1).strip()), papers, extra_text=state.get("query", "")
                 )
                 s["cited_paper_ids"] = extract_paper_ids(s["content"])
 
@@ -407,7 +428,7 @@ Return markdown only. No JSON.
             new_sections = response.content.strip()
 
             if new_sections and len(new_sections) > 100:
-                revised = body.rstrip() + "\n\n" + _ground(new_sections, papers) + refs_block
+                revised = body.rstrip() + "\n\n" + _ground(new_sections, papers, extra_text=state.get("query", "")) + refs_block
 
                 print(
                     f"[revise_node] targeted path succeeded ({len(missing_items)} sections)"
@@ -493,7 +514,7 @@ Return the full revised report body only. No JSON, no commentary.
                 )
 
                 return {
-                    "final_answer": _ground(patched, papers) + refs_block,
+                    "final_answer": _ground(patched, papers, extra_text=state.get("query", "")) + refs_block,
                     "needs_revision": False,
                 }
 
@@ -569,7 +590,7 @@ Return the full revised answer body only.
         print("[revise_node] fallback path used")
 
         return {
-            "final_answer": _ground(revised, state.get("ranked_papers", [])) + refs_block,
+            "final_answer": _ground(revised, state.get("ranked_papers", []), extra_text=state.get("query", "")) + refs_block,
             "needs_revision": False,
         }
 

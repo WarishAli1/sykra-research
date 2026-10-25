@@ -10,7 +10,7 @@ from app.agents.schemas import AnswerClaim, CitationAudit, MathVerification
 from app.agents.state import AgentState
 from app.services.llm_client import get_llm
 from app.services.reference_builder import extract_paper_ids
-
+from app.services.citation_grounding import user_numeric_tokens
 
 _CLAIM_PROMPT = """Extract the checkable factual claims from this draft answer.
 
@@ -677,6 +677,7 @@ def _claim_numbers_fabricated(
     claim_text: str,
     papers: list[dict],
     ledger: dict | None,
+    user_numbers: set[str] | None = None,
 ) -> int:
     """
     Count numbers in a quantitative claim that appear NOWHERE in the
@@ -684,10 +685,12 @@ def _claim_numbers_fabricated(
     years). A number the writer produced that no source contains is the
     signature of invented precision.
     """
-    text = re.sub(r"\[paper_id=\d+\]", "", claim_text or "")
+    text = re.sub(r"[paper_id=\d+]", "", claim_text or "")
     claim_nums = _numbers_in_text(text)
     if not claim_nums:
         return 0
+
+    user_numbers = user_numbers or set()
 
     evidence_nums: set[str] = set()
     for v in (ledger or {}).get("extracted_variables") or []:
@@ -706,10 +709,12 @@ def _claim_numbers_fabricated(
 
     fabricated = 0
     for num in claim_nums:
-        if num in evidence_nums or num in years:
+        if num in evidence_nums or num in years or num in user_numbers:
             continue
+
         if _YEAR_RE.match(num):
-            continue 
+            continue
+
         fabricated += 1
     return fabricated
 
@@ -721,6 +726,7 @@ def _build_epistemic_report(
     papers: list[dict],
     ledger: dict | None,
     coverage_gaps: list[str],
+    user_numbers: set[str] | None = None,
 ) -> dict:
     """
     Claim-level uncertainty ledger (manifesto principles 13, 14, 21).
@@ -729,6 +735,7 @@ def _build_epistemic_report(
     credits honest abstention.
     """
     audit_by_claim = {a.get("claim_id"): a for a in audits}
+    user_numbers = user_numbers or set()
     rows: list[dict] = []
     quant_total = 0
     unsupported_quant = 0
@@ -739,6 +746,21 @@ def _build_epistemic_report(
     for claim in claims:
         audit = audit_by_claim.get(claim.get("id")) or {}
         text = str(claim.get("text", "") or "")
+
+        claim_nums = _numbers_in_text(text)
+        user_only_quant = (
+            bool(claim_nums)
+            and bool(user_numbers)
+            and claim_nums.issubset(user_numbers)
+        )
+
+        if user_only_quant:
+            provenance = "user_reported"
+        elif claim.get("cited_paper_ids"):
+            provenance = "cited_literature"
+        else:
+            provenance = "unknown"
+
         is_quant = bool(audit.get("is_quantitative")) or bool(
             _QUANTITATIVE_CLAIM_RE.search(text)
         )
@@ -752,8 +774,14 @@ def _build_epistemic_report(
 
         if is_quant:
             quant_total += 1
-            fabricated_total += _claim_numbers_fabricated(text, papers, ledger)
-            if status == "unsupported":
+            fabricated_total += _claim_numbers_fabricated(
+                text,
+                papers,
+                ledger,
+                user_numbers,
+            )
+
+            if status == "unsupported" and not user_only_quant:
                 unsupported_quant += 1
         if status == "uncertain":
             uncertain.append(text[:160])
@@ -765,6 +793,7 @@ def _build_epistemic_report(
                 "claim": text[:160],
                 "quantitative": is_quant,
                 "status": status,
+                "provenance": provenance,
             }
         )
 
@@ -1022,6 +1051,12 @@ def verify_answer_node(state: AgentState) -> AgentState:
 
         audits.extend(missing)
     ledger = state.get("reasoning_ledger") or {}
+
+    user_numbers = (
+        state.get("_user_numeric_tokens")
+        or user_numeric_tokens(state.get("query", ""))
+    )
+
     epistemic_report = _build_epistemic_report(
         claims,
         audits,
@@ -1029,6 +1064,7 @@ def verify_answer_node(state: AgentState) -> AgentState:
         papers,
         ledger,
         state.get("coverage_gaps") or [],
+        user_numbers,
     )
 
     if claims and not audits:

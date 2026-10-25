@@ -12,6 +12,7 @@ def _meta(p: dict) -> dict:
         "summary": (p.get("summary") or "")[:2000],
         "published": str(published) if published else None,
         "relevance_score": float(score) if score is not None else None,
+        "citation_count": p.get("citation_count", 0),
         "source": p.get("source", "unknown"),
         "is_uploaded": p.get("source") == "user_upload",
         "file_url": p.get("file_url"),

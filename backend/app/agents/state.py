@@ -50,6 +50,10 @@ class AgentState(TypedDict):
     revision_section_ids: list[str]
     _request_id: str
     _streaming_enabled: bool
+    original_query: Optional[str]
+    is_followup: bool
+    previous_papers: list[dict]
+    output_instruction: Optional[str]
     _cancel_check: Optional[any]
     report_plan: Optional[dict]
     information_needs: list[str]

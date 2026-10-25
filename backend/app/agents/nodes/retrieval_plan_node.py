@@ -363,7 +363,16 @@ def retrieval_plan_node(state: AgentState) -> AgentState:
                 3 if i == 0 else 2,
                 ["secondary_research"],
             )
-
+    if not is_uploaded:
+        topic_query = str(
+            understanding.get("main_topic") or state.get("query", "")
+        ).strip()[:140]
+        add_intent(
+            topic_query,
+            "requirement",
+            3,
+            ["secondary_research"] + official_capabilities,
+        )
     for entity in answer_spec.get("canonical_entities", [])[:2]:
         title = str(entity.get("expected_primary_source") or "").strip()
         if title:

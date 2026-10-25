@@ -18,6 +18,8 @@ backend/uploads/
 backend/app/db/graph_cache/
 backend/huggingface_cache/
 
+backend/.venv-ci
+
 package-lock.json
 
 *.log

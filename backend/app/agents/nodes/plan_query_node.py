@@ -7,19 +7,7 @@ from app.agents.state import AgentState
 from app.agents.research_engine import derive_research_needs
 from app.services.llm_client import get_llm
 from app.agents.report_modules import _is_technical_derivation
-
-
-_FOLLOWUP_RE = re.compile(
-    r"\b(it|its|this|that|they|them|those|these|he|she|the above|same|former|latter)\b"
-    r"|^\s*(and|also|what about|how about|but|why|how come)\b", re.I)
-
-def _looks_like_followup(q: str) -> bool:
-    return len(q.split()) <= 14 and bool(_FOLLOWUP_RE.search(q))
-
-def _shares_topic(a: str, b: str) -> bool:
-    ta = set(re.findall(r"[a-z0-9]{4,}", a.lower()))
-    tb = set(re.findall(r"[a-z0-9]{4,}", b.lower()))
-    return not ta or bool(ta & tb)
+from app.agents.conversation_context import classify_turn
 
 
 class QueryAnalysis(BaseModel):
@@ -229,11 +217,29 @@ def _normalize_query_analysis(data, query: str) -> QueryAnalysis:
 
 
 def plan_query_node(state: AgentState) -> AgentState:
-    query = state["query"]
+    original_query = state["query"]
+    query = original_query
     history = state.get("conversation_history", [])
     mode = state.get("response_mode", "normal")
-
     is_normal = mode == "normal"
+    llm_fast = get_llm(temperature=0, task="fast")
+
+    turn = classify_turn(
+        original_query,
+        history,
+        llm_fast,
+        timeout=4 if is_normal else 6,
+    )
+    is_followup = turn["intent"] == "followup"
+    refined_query = turn["standalone_query"] if is_followup else None
+    output_instruction = turn.get("output_instruction") or None
+
+    if is_followup:
+        query = refined_query
+        print(f"[plan_query] follow-up: {original_query!r} -> {query!r}")
+    else:
+        print(f"[plan_query] independent question (history_messages={len(history)})")
+
     is_derivation = _is_technical_derivation(query, None)
 
     is_uploaded = state.get("evidence_mode") == "uploaded"
@@ -259,7 +265,11 @@ def plan_query_node(state: AgentState) -> AgentState:
             "information_needs": [query],
         }
         return {
-            "refined_query": None,
+            "query": query,
+            "original_query": original_query,
+            "is_followup": is_followup,
+            "output_instruction": output_instruction,
+            "refined_query": refined_query,
             "query_understanding": understanding,
             "query_plan": plan,
             "search_queries": [query],
@@ -271,38 +281,6 @@ def plan_query_node(state: AgentState) -> AgentState:
 
     refined_query = None
 
-    if history and _looks_like_followup(query):
-        rewrite_prompt = f"""You are an expert search strategist.
-Rewrite this follow-up question into a standalone search query.
-If the question is already self-contained or on a different topic than the history, return it EXACTLY unchanged.
-Conversation History:
-{history[-4:]}
-
-Current Follow-up Question:
-{query}
-
-Fix any obvious spelling mistakes in the rewritten query.
-Return ONLY the rewritten search query.
-"""
-        try:
-            rewritten = llm_fast.invoke(
-                [
-                    SystemMessage(
-                        content="You rewrite follow-up questions into standalone search queries."
-                    ),
-                    HumanMessage(content=rewrite_prompt),
-                ],
-                config={"timeout": 3 if is_normal else 6},
-            ).content.strip()
-
-            if rewritten and len(rewritten) < 200 and _shares_topic(query, rewritten):
-                refined_query = rewritten
-                query = rewritten
-            else:
-                print("[plan_query] rewrite discarded (topic shift)")
-
-        except Exception as e:
-            print(f"[plan_query] Query rewrite failed: {type(e).__name__}: {e}")
 
     target_count = 4 if (is_normal or is_derivation) else 8
 
@@ -423,6 +401,10 @@ Do not return the original query inside generated query lists.
         unique_queries = unique_queries[:12]
 
     return {
+        "query": query,
+        "original_query": original_query,
+        "is_followup": is_followup,
+        "output_instruction": output_instruction,
         "refined_query": refined_query,
         "query_understanding": understanding,
         "query_plan": plan,

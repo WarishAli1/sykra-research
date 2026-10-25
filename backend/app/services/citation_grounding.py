@@ -52,6 +52,14 @@ def _number_tokens(text: str) -> set[str]:
     return set(_norm_numbers(text or ""))
 
 
+def number_tokens(text: str) -> set[str]:
+    return _number_tokens(text or "")
+
+
+def user_numeric_tokens(query: str) -> set[str]:
+    return _number_tokens(query or "")
+
+    
 def rewrite_sentences(text: str, fn: Callable[[str], Optional[str]]) -> str:
     """Apply fn to every prose sentence (skips headings, tables, code, math).
     fn returns the new sentence, or None to drop it. Untouched lines are kept verbatim."""
@@ -104,6 +112,7 @@ def ground_text(
     texts_by_id: dict[str, str],
     visible_ids: Optional[set[str]] = None,
     numeric_check: bool = True,
+    extra_text: str = "",
 ) -> tuple[str, list[dict]]:
     visible = set(visible_ids) if visible_ids else set(texts_by_id)
     drops: list[dict] = []
@@ -125,7 +134,9 @@ def ground_text(
             quants = extract_quantities(sent)
             if quants:
                 pool = vis if vis else sorted(visible)
-                tokens = _number_tokens(" ".join(texts_by_id.get(i, "") for i in pool))
+                tokens = _number_tokens(
+                    " ".join(texts_by_id.get(i, "") for i in pool) + " " + extra_text
+                )
                 for q in quants:
                     missing = [n for n in q if n not in tokens]
                     if missing:

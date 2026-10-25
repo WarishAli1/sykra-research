@@ -120,7 +120,7 @@ function normalizeMathFences(md: string): string {
   s = s.replace(/【/g, "[").replace(/】/g, "]")
     .replace(/（/g, "(").replace(/）/g, ")")
     .replace(/：/g, ":").replace(/；/g, ";");
-  s = s.replace(/[[【]\s*paper_id\s*[=＝]\s*\d+\s*[]】]/gi, "");
+  s = s.replace(/[\[【]\s*paper[\s_]?id[^\]】]*[\]】]/gi, "");
   s = s.replace(/[\u200b\ufeff]/g, "").replace(/\u00a0/g, " ");
 
   const mathSpans: string[] = [];

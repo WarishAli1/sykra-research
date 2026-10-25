@@ -38,7 +38,10 @@ MODULE_LIBRARY = {
     "methodology": {
         "title": "Methodology / Evidence Base",
         "order": 300,
-        "purpose": "Explain what kind of evidence was considered and how strong it is.",
+        "purpose": (
+            "Describe the study designs, populations and sample sizes of the cited evidence. "
+            "Do NOT describe the retrieval pipeline."
+        ),
         "evidence_policy": "evidence_required",
         "requires_citations": True,
         "always": False,
@@ -403,10 +406,10 @@ def _default_modules(
         return modules
 
 
-    modules = []
-    modules.append({"module_id": "direct_answer", "importance": 100})
-    modules.append({"module_id": "independent_analysis", "importance": 95})
-    modules.append({"module_id": "references", "importance": 100})
+    modules = [
+        {"module_id": "direct_answer", "importance": 100},
+        {"module_id": "references", "importance": 100},
+    ]
 
 
     if wants_architecture:
@@ -423,9 +426,12 @@ def _default_modules(
         return modules
 
 
-    modules.append({"module_id": "executive_summary", "importance": 88})
     modules.append({"module_id": "research_findings", "importance": 90})
     modules.append({"module_id": "background", "importance": 70})
+
+    if depth == "high":
+        modules.append({"module_id": "executive_summary", "importance": 88})
+        modules.append({"module_id": "independent_analysis", "importance": 85})
 
 
     if _has_comparison_signal(query, understanding):
@@ -705,24 +711,10 @@ def normalize_report_plan(raw_plan: dict, state: dict) -> dict:
         or detect_domain_guardrails(query, understanding)
     )
 
-    if response_mode == "normal":
-        guardrails.append(
-            "Position this answer as Direct Mode: research assistance on demand. "
-            "Do not claim systematic research execution, systematic review, PRISMA, "
-            "exhaustive search, or formal source-verification methodology."
-        )
-    else:
-        guardrails.append(
-            "Position this answer as Researched Mode: research execution and evidence synthesis. "
-            "Describe the process accurately as targeted retrieval, source evaluation, "
-            "evidence synthesis, and citation checking."
-        )
-
     guardrails.append(
-        "Methodological honesty: do not claim systematic-review rigor, PRISMA, "
-        "registered protocol, exhaustive search, formal risk-of-bias assessment, "
-        "or any review methodology that was not actually performed."
+        "Never claim systematic-review rigor; do not narrate the retrieval process."
     )
+
     latency_notice = raw_plan.get("latency_notice")
     if not latency_notice:
         if depth == "high":

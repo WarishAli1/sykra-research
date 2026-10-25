@@ -15,6 +15,7 @@ from app.models.schemas import (
     FollowupRequest,
     FollowupResponse,
 )
+from app.services.previous_papers import previous_papers_from_db
 from app.db.models import LibraryPaper
 from app.agents.graph import research_graph, run_enrichment
 from app.agents.report_modules import get_disclaimer
@@ -38,6 +39,7 @@ from app.services.reference_builder import (
     paper_id_to_ref_id_map,
     rewrite_inline_citations,
 )
+from app.services.citation_grounding import ABSTAIN_TEXT
 from app.services.chat_titles import schedule_title_generation
 from app.services.library_store import save_papers
 from app.auth import get_current_user
@@ -52,6 +54,10 @@ from slowapi.util import get_remote_address
 router = APIRouter()
 limiter = Limiter(key_func=get_remote_address)
 
+_EMPTY_ANSWER_FALLBACK = (
+    "I could not find enough directly supporting evidence in the available sources "
+    "to answer this reliably. Please provide more context or retry."
+)
 
 def _get_or_create_chat(db: DBSession, user: User, session_id: str, query: str, requested_chat_id: str | None = None) -> Chat:
     try:
@@ -167,14 +173,17 @@ def _history_from_db(db, chat, limit=4):
     rows = db.scalars(
         select(Message).where(Message.chat_id == chat.id, Message.status == "complete")
         .order_by(Message.created_at.desc()).limit(limit)).all()
-    return [{"role": m.role, "content": (m.content or "")[:600]} for m in reversed(rows)]
-
+    return [
+        {"role": m.role, "content": (m.content or "")[: 1200 if m.role == "assistant" else 600]}
+        for m in reversed(rows)
+    ]
 
 def _build_initial_state(
     req: ChatRequest,
     session_id: str,
     turn_id: str,
     history: list[dict] | None = None,
+    previous_papers: list[dict] | None = None,
 ) -> dict:
     return {
         "query": req.query,
@@ -183,6 +192,10 @@ def _build_initial_state(
         "evidence_mode": req.evidence_mode,
         "response_mode": req.response_mode,
         "conversation_history": history if history is not None else [],
+        "original_query": None,
+        "is_followup": False,
+        "output_instruction": None,
+        "previous_papers": previous_papers or [],
         "refined_query": None,
         "search_terms": [],
         "search_queries": [],
@@ -193,7 +206,6 @@ def _build_initial_state(
         "source_plan": None,
         "retrieval_plan": None,
         "evidence_contract": None,
-
         "evidence_matrix": {},
         "citation_audit": [],
         "math_verification": None,
@@ -341,12 +353,31 @@ def _build_stream_response(
         "preview_answer", ""
     )
 
-    if final_answer:
-        answer = sanitize_for_web_preserving_math(
-            rewrite_inline_citations(final_answer, id_map)
-        )
-    else:
-        answer = ""
+    if not (final_answer or "").strip():
+        parts = []
+
+        for s in final_state.get("section_outputs", []) or []:
+            content = (s.get("content") or "").strip()
+            if not content:
+                continue
+
+            if s.get("abstained") or content.strip() == ABSTAIN_TEXT:
+                continue
+
+            title = s.get("title") or ""
+            if title:
+                parts.append(f"## {title}\n\n{content}\n")
+            else:
+                parts.append(content)
+
+        final_answer = "\n".join(parts).strip()
+
+    if not (final_answer or "").strip():
+        final_answer = _EMPTY_ANSWER_FALLBACK
+
+    answer = sanitize_for_web_preserving_math(
+        rewrite_inline_citations(final_answer, id_map)
+    )
 
     sections = []
     for s in final_state.get("section_outputs", []) or []:
@@ -445,23 +476,33 @@ async def chat(req: ChatRequest, user: User = Depends(get_current_user), db: DBS
     chat_record = _get_or_create_chat(db, user, session_id, req.query, req.chat_id)
     schedule_title_generation(chat_record.id, req.query)
     history = _history_from_db(db, chat_record)
+    previous = previous_papers_from_db(db, user.id, chat_record)
+    print(f"[chat] chat_id={chat_record.id} history={len(history)} previous_papers={len(previous)}")
     _persist_message(db, chat_record, "user", req.query, status="complete")
     assistant_message = _create_message(db, chat_record, "assistant")
 
-    initial_state = _build_initial_state(req, session_id, turn_id, history)
+    initial_state = _build_initial_state(req, session_id, turn_id, history, previous)
 
     t0 = time.time()
 
     final_state = await research_graph.ainvoke(initial_state)
     final_state = await asyncio.to_thread(run_enrichment, final_state)
+    original_ranked = final_state.get("ranked_papers") or []
+
     cited_ids_raw = final_state.get("cited_paper_ids") or []
     cited_ids = {str(x) for x in cited_ids_raw if x is not None}
-    
-    ranked = final_state.get("ranked_papers") or []
-    if cited_ids and ranked:
-        filtered_ranked = [p for i, p in enumerate(ranked) if str(i) in cited_ids]
-        if filtered_ranked:
-            final_state["ranked_papers"] = filtered_ranked
+
+    papers_for_save = original_ranked
+
+    if cited_ids and original_ranked:
+        filtered_for_save = [
+            p
+            for i, p in enumerate(original_ranked)
+            if str(i) in cited_ids
+        ]
+
+        if filtered_for_save:
+            papers_for_save = filtered_for_save
     elapsed = round(time.time() - t0, 1)
     print(f"[timing] {elapsed}s | mode={req.response_mode} | query='{req.query}'")
 
@@ -476,7 +517,7 @@ async def chat(req: ChatRequest, user: User = Depends(get_current_user), db: DBS
     meta = {"references": [r.model_dump() for r in response.references],
             **_answer_meta(req.response_mode, req.evidence_mode, req.query, ranked)}
     _replace_assistant_message(db, user, chat_record, req.query, response.answer, meta)
-    save_papers(db, user.id, req.session_id, ranked, chat_id=chat_record.id)
+    save_papers(db, user.id, req.session_id, papers_for_save, chat_id=chat_record.id)
     return response
 
 
@@ -500,6 +541,8 @@ async def chat_stream(
     chat_record = _get_or_create_chat(db, user, session_id, req.query, req.chat_id)
     schedule_title_generation(chat_record.id, req.query)
     history = _history_from_db(db, chat_record)
+    previous = previous_papers_from_db(db, user.id, chat_record)
+    print(f"[chat] chat_id={chat_record.id} history={len(history)} previous_papers={len(previous)}")
     _persist_message(db, chat_record, "user", req.query, status="complete")
     assistant_message = _create_message(db, chat_record, "assistant")
     chat_id = str(chat_record.id)
@@ -524,7 +567,7 @@ async def chat_stream(
                     ),
                 )
 
-            state: AgentState = _build_initial_state(req, session_id, turn_id, history)
+            state: AgentState = _build_initial_state(req, session_id, turn_id, history, previous)
 
             loop = asyncio.get_running_loop()
             bridge_register(request_id, loop)
@@ -638,14 +681,22 @@ async def chat_stream(
                     break
 
             await graph_task
+            original_ranked = state.get("ranked_papers") or []
+
             cited_ids_raw = state.get("cited_paper_ids") or []
             cited_ids = {str(x) for x in cited_ids_raw if x is not None}
-            
-            ranked = state.get("ranked_papers") or []
-            if cited_ids and ranked:
-                filtered_ranked = [p for i, p in enumerate(ranked) if str(i) in cited_ids]
-                if filtered_ranked:
-                    state["ranked_papers"] = filtered_ranked
+
+            papers_for_save = original_ranked
+
+            if cited_ids and original_ranked:
+                filtered_for_save = [
+                    p
+                    for i, p in enumerate(original_ranked)
+                    if str(i) in cited_ids
+                ]
+
+                if filtered_for_save:
+                    papers_for_save = filtered_for_save
             if graph_error:
                 _update_message(db, assistant_message, assistant_content, status="failed")
                 yield sse_event(
@@ -692,14 +743,19 @@ async def chat_stream(
                     return
                 assistant_content = final_answer
             try:
-                save_papers(db, user_id, session_id, state.get("ranked_papers") or [], chat_id=chat_id)
+                save_papers(db, user_id, session_id, papers_for_save, chat_id=chat_id)
             except Exception as e:
                 print(f"[chat_stream] save_papers failed: {type(e).__name__}: {e}")
 
             response = _build_stream_response(req, session_id, turn_id, state)
             response.chat_id = chat_id
+
+            if sections_streamed and not (response.answer or "").strip() and assistant_content.strip():
+                response.answer = assistant_content
+
             yield sse_event("result", payload=response.model_dump())
-            assistant_content = response.answer
+
+            assistant_content = response.answer or assistant_content
             meta = _answer_meta(req.response_mode, req.evidence_mode, req.query, state.get("ranked_papers") or [])
             citations_payload = {
                 "references": [r.model_dump() for r in response.references],
@@ -829,13 +885,22 @@ async def regenerate(req: RegenerateRequest, user: User = Depends(get_current_us
     )
 
     history = _history_from_db(db, chat_record)
+    if req.chat_id:
+        cut = max(
+            (i for i, m in enumerate(history)
+             if m["role"] == "user" and m["content"].strip() == req.query.strip()[:600]),
+            default=None,
+        )
+        if cut is not None:
+            history = history[:cut]
 
     if not req.chat_id:
         schedule_title_generation(chat_record.id, req.query)
         _persist_message(db, chat_record, "user", req.query, status="complete")
 
+    previous = previous_papers_from_db(db, user.id, chat_record)
     initial_state = _build_initial_state(
-        chat_req, req.session_id, turn_id, history=history
+        chat_req, req.session_id, turn_id, history=history, previous_papers=previous
     )
 
     final_state = await research_graph.ainvoke(initial_state)
