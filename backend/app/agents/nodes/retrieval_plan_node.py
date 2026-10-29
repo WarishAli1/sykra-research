@@ -22,6 +22,14 @@ def _dedupe(items: list[str]) -> list[str]:
     return out
 
 
+_NUM_RE = re.compile(r"\b\d[\d.,]*\s*%?")
+
+
+def _scrub_numbers(q: str) -> str:
+    """Drop the user's own figures (328, 37%) from literature search queries."""
+    return " ".join(_NUM_RE.sub(" ", q or "").split())
+
+
 _GENERIC_PROBE_SUFFIXES = [
     "environmental impact",
     "advantages disadvantages",
@@ -277,6 +285,7 @@ def retrieval_plan_node(state: AgentState) -> AgentState:
     uploaded retriever can issue several searches instead of one raw query.
     """
     mode = state.get("response_mode", "normal")
+    report_mode = bool(state.get("report_mode_enabled"))
     answer_spec = state.get("answer_spec") or {}
     understanding = state.get("query_understanding") or {}
 
@@ -331,7 +340,23 @@ def retrieval_plan_node(state: AgentState) -> AgentState:
                 source_capabilities=capabilities,
             ).model_dump()
         )
+    for contract in (state.get("report_section_contracts") or [])[:4]:
+        if not contract.get("evidence_required"):
+            continue
 
+        if contract.get("data_scope") == "none":
+            continue
+
+        contract_query = (
+            f"{contract.get('title', '')} {contract.get('purpose', '')}"
+        ).strip()
+
+        add_intent(
+            contract_query,
+            "requirement",
+            2,
+            ["secondary_research"],
+        )
     is_uploaded = state.get("evidence_mode") == "uploaded"
 
     if is_uploaded:
@@ -367,13 +392,27 @@ def retrieval_plan_node(state: AgentState) -> AgentState:
         topic_query = str(
             understanding.get("main_topic") or state.get("query", "")
         ).strip()[:140]
+        if report_mode:
+            topic_query = _scrub_numbers(topic_query)
+
         add_intent(
             topic_query,
             "requirement",
             3,
             ["secondary_research"] + official_capabilities,
         )
-    for entity in answer_spec.get("canonical_entities", [])[:2]:
+
+        if report_mode:
+            facets = (understanding.get("objectives") or [])[:2] + \
+                     (understanding.get("methods_techniques") or [])[:2]
+            for facet in facets:
+                add_intent(
+                    _scrub_numbers(f"{topic_query} {facet}")[:140],
+                    "requirement",
+                    2,
+                    ["secondary_research"],
+                )
+    for entity in ([] if report_mode else answer_spec.get("canonical_entities", [])[:2]):
         title = str(entity.get("expected_primary_source") or "").strip()
         if title:
             add_intent(
@@ -383,7 +422,7 @@ def retrieval_plan_node(state: AgentState) -> AgentState:
                 ["primary_research"],
             )
 
-    for exact_query in answer_spec.get("exact_search_queries", [])[:3]:
+    for exact_query in ([] if report_mode else answer_spec.get("exact_search_queries", [])[:3]):
         exact_query = str(exact_query).strip()
         if not exact_query:
             continue
@@ -409,7 +448,7 @@ def retrieval_plan_node(state: AgentState) -> AgentState:
         reverse=True,
     )
 
-    for requirement in requirements[:8]:
+    for requirement in requirements[: (3 if report_mode else 8)]:
         text = str(requirement.get("text") or "").strip()
         if not text:
             continue
@@ -427,7 +466,7 @@ def retrieval_plan_node(state: AgentState) -> AgentState:
             ),
         )
 
-    for focus_query in answer_spec.get("retrieval_focus", [])[:2]:
+    for focus_query in ([] if report_mode else answer_spec.get("retrieval_focus", [])[:2]):
         focus_query = str(focus_query).strip()
         if not focus_query:
             continue
@@ -485,6 +524,7 @@ def retrieval_plan_node(state: AgentState) -> AgentState:
 
     use_foundational_search = (
         mode != "normal"
+        and not report_mode
         and (
             answer_spec.get("primary_source_required")
             or "primary_research" in all_capabilities
@@ -493,6 +533,7 @@ def retrieval_plan_node(state: AgentState) -> AgentState:
 
     use_citation_backtracking = (
         mode != "normal"
+        and not report_mode
         and bool(all_capabilities)
         and (
             "primary_research" in all_capabilities

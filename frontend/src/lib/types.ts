@@ -111,7 +111,6 @@ export type ChatTurn = {
   chartUrl?: string | null;
   previewText?: string;
   artifacts?: TurnArtifacts;
-  reportNotice?: string | null;
   reportPlan?: ReportPlan | null;
   sections?: ReportSection[];
   informationNeeds?: string[];
@@ -119,6 +118,7 @@ export type ChatTurn = {
   disclaimer?: string | null;
   paperLinks?: string[];
   methodNote?: string | null;
+  sourceReport?: ReportOpts;
 };
 
 export type ChatRequest = {
@@ -130,6 +130,12 @@ export type ChatRequest = {
   response_mode: ResponseMode;
   request_id?: string;
   conversation_history?: { role: string; content: string }[];
+  report_mode?: boolean;
+  report_type?: ReportType;
+  report_audience?: string;
+  report_title?: string;
+  confirmed_source_records?: ReportRecord[];
+  report_execution_path?: ReportExecutionPath;
 };
 
 export type ChatResponse = {
@@ -154,9 +160,10 @@ export type ChatResponse = {
   sections?: ReportSection[];
   information_needs?: string[];
   complexity_score?: number;
-  report_notice?: string | null;
   status_steps?: StepEvent[];
   method_note?: string | null;
+  report_brief?: ReportBrief | null;
+  section_contracts?: SectionContract[];
 };
 
 export type FollowupRequest = {
@@ -182,13 +189,18 @@ export type RegenerateRequest = {
   response_mode: ResponseMode;
   request_id?: string;
   is_followup?: boolean;
+  report_mode?: boolean;
+  report_type?: ReportType;
+  report_audience?: string;
+  report_title?: string;
+  confirmed_source_records?: ReportRecord[];
+  report_execution_path?: ReportExecutionPath;
 };
 
 export type StreamEvent =
   | { type: "progress"; label: string; stage?: string; detail?: string; items?: string[] }
   | { type: "token"; text: string; kind?: "preview" | "final" }
   | { type: "result"; payload: ChatResponse }
-  | { type: "notice"; message: string }
   | { type: "artifact"; artifact_type: "chart"; url: string; raw_spec?: string | null }
   | { type: "artifact"; artifact_type: "comparison_table"; markdown: string; caption?: string | null }
   | { type: "artifact"; artifact_type: "graph_entities"; entities: Array<Record<string, unknown>> }
@@ -427,4 +439,114 @@ export type StudioDraftResponse = {
 export type StudioConversationContext = {
   excerpt: string;
   papers: string[];
+};
+
+export type ReportType =
+  | "scientific_research" | "field_survey" | "business_operational"
+  | "financial_ledger" | "technical_project" | "general";
+
+export type ReportRole = "count" | "percentage" | "amount" | "rate" | "measurement" | "other";
+
+export type ReportRecord = {
+  id: string;
+  field_name: string;
+  value_raw: string;
+  unit?: string | null;
+  role: ReportRole;
+  unit_of_analysis?: string | null;
+  ledger_side?: "debit" | "credit" | null;
+  numerator_ref?: string | null;
+  denominator_ref?: string | null;
+  original_text: string;
+};
+
+export type ReportPrepareRequest = { query: string; session_id?: string; evidence_mode?: EvidenceMode };
+
+export type ReportPrepareResponse = {
+  suggested_type: ReportType;
+  suggested_execution_path?: ReportExecutionPath;
+  working_title?: string | null;
+  records: ReportRecord[];
+  dropped_count: number;
+  truncated: boolean;
+  extraction_failed?: boolean;
+};
+
+export type ReportOpts = {
+  reportType?: ReportType;
+  records: ReportRecord[];
+  executionPath?: ReportExecutionPath;
+  reportTitle?: string | null;
+};
+
+export type ReportExecutionPath = "simple" | "standard" | "deep";
+
+
+export type ReportBrief = {
+  purpose: string;
+  audience: string;
+  deliverable?: string | null;
+  report_type: ReportType;
+  execution_path: ReportExecutionPath;
+  constraints: string[];
+  information_needs: string[];
+  data_scope?: "uploaded_only" | "literature_only" | "blended" | "none";
+  working_title?: string | null;
+};
+
+
+export type SectionContract = {
+  section_id: string;
+  title: string;
+  purpose: string;
+  evidence_required: boolean;
+  data_scope: string;
+  target_words: number;
+  required_citations: boolean;
+  prohibited?: string[];
+  evidence_ids?: string[];
+};
+
+
+export type ReportAnalysis = {
+  goal: string; work_type: string; status: "proposal" | "completed";
+  output_type: string; reasoning?: string;
+};
+
+
+export type ReportStructureSection = {
+  section_id: string; title: string; level: number; purpose: string; reason: string;
+  structure_source: "user_guideline" | "reporting_standard" | "retrieved_papers" | "llm_default";
+  evidence_required: boolean; target_words: number; data_scope: string;
+};
+
+
+export type ReportStructureDraft = {
+  analysis: ReportAnalysis; structure_source: string; standard_used?: string | null;
+  sections: ReportStructureSection[]; notes: string[];
+};
+export type ReportRunSection = { section_id: string; title: string; content: string; confidence?: string };
+
+
+export type ReportRunResult = {
+  turn_id: string; chat_id: string; message_id: string; title: string; answer: string;
+  references: ReferenceEntry[]; sections: ReportRunSection[]; papers: Paper[];
+  method_note?: string | null; disclaimer?: string | null;
+};
+
+
+export type ReportStreamEvent =
+  | { type: "progress"; label: string; stage?: string; detail?: string; items?: string[] }
+  | { type: "report_section"; section_id: string; title?: string; markdown: string; final: boolean }
+  | { type: "result"; payload: ReportRunResult | { answer: string; changed: string[] } }
+  | { type: "filename"; filename: string }
+  | { type: "done" } | { type: "cancelled" } | { type: "error"; message: string };
+
+
+export type ReportArtifact = {
+  title: string; query: string; structure: ReportStructureSection[];
+  sections: ReportRunSection[]; references: ReferenceEntry[];
+  sources: { id: number; title: string; excerpt: string }[];
+  records: ReportRecord[]; evidence_mode: EvidenceMode; report_type?: string | null;
+  paper_links: string[]; analysis?: ReportAnalysis | null;
 };

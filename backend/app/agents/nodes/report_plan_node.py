@@ -207,7 +207,18 @@ def report_plan_node(state: AgentState) -> AgentState:
             "report_notice": None,
             "target_paper_k": _adaptive_target_paper_k(plan, state),
         }
-
+    if state.get("report_mode_enabled"):
+        plan = normalize_report_plan(default_report_plan(state), state)
+        return {
+            "report_plan": plan,
+            "information_needs": plan.get("information_needs", []),
+            "complexity_score": plan.get("complexity_score", 50),
+            "report_depth": plan.get("depth", "medium"),
+            "target_word_count": plan.get("target_words", settings.REPORT_TARGET_WORDS_MEDIUM),
+            "module_plan": plan.get("modules", []),
+            "report_notice": None,
+            "target_paper_k": _adaptive_target_paper_k(plan, state),
+        }
     llm = get_llm(temperature=0, task="structured")
 
     try:

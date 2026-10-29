@@ -20,7 +20,14 @@ from app.agents.nodes.revise_node import revise_node
 from app.agents.nodes.compare_node import compare_node
 from app.agents.nodes.citation_node import citation_node
 from app.agents.nodes.ledger_node import ledger_node
-
+from app.agents.nodes.report_structure_node import ensure_report_structure
+from app.agents.nodes.report_validate_node import report_validate_node, route_after_report_validate
+from app.agents.nodes.report_finalize_node import report_finalize_node
+from app.agents.nodes.report_source_node import (
+    report_source_node, report_evidence_gate_node,
+    route_after_report_evidence_gate, report_gap_search_node,
+)
+from app.agents.nodes.report_writer_node import report_writer_node, report_revise_node
 
 ENABLE_RESEARCH_CRITIQUE = True
 
@@ -59,6 +66,20 @@ def answer_ready_node(state):
     return {
         "preview_streamed": state.get("preview_streamed", False),
     }
+
+
+def plan_report_dispatch(state):
+    """Chat answers always plan modules; report runs arrive with a user-approved
+    structure already in state (Report Studio)."""
+    base = report_plan_node(state)
+    if not state.get("report_mode_enabled"):
+        return base
+    merged = {**state, **base}
+    return {**base, **ensure_report_structure(merged)}
+
+
+def route_after_rank(state: AgentState) -> str:
+    return "report_source" if state.get("report_mode_enabled") else "build_ledger"
 
 
 def _needs_verification(state: AgentState) -> bool:
@@ -148,7 +169,7 @@ def build_graph():
         "build_retrieval_plan",
         timed("retrieval_plan")(retrieval_plan_node),
     )
-    graph.add_node("plan_report", timed("plan_report")(report_plan_node))
+    graph.add_node("plan_report", timed("plan_report")(plan_report_dispatch))
     graph.add_node("search", timed("search")(search_node))
     graph.add_node(
         "retrieve_uploaded",
@@ -164,7 +185,19 @@ def build_graph():
     graph.add_node("cite", timed("cite")(citation_node))
     graph.add_node("answer_ready", answer_ready_node)
     graph.add_node("build_ledger", timed("ledger")(ledger_node))
-
+    graph.add_node("report_source", timed("report_source")(report_source_node))
+    graph.add_node(
+        "report_evidence_gate",
+        timed("report_evidence_gate")(report_evidence_gate_node),
+    )
+    graph.add_node(
+        "report_gap_search",
+        timed("report_gap_search")(report_gap_search_node),
+    )
+    graph.add_node("report_writer", timed("report_writer")(report_writer_node))
+    graph.add_node("report_validate", timed("report_validate")(report_validate_node))
+    graph.add_node("report_revise", timed("report_revise")(report_revise_node))
+    graph.add_node("report_finalize", timed("report_finalize")(report_finalize_node))
     graph.add_edge("plan_query", "answer_spec_node")
     graph.add_edge("answer_spec_node", "build_retrieval_plan")
     graph.add_edge("build_retrieval_plan", "plan_report")
@@ -172,9 +205,30 @@ def build_graph():
     graph.add_edge(["plan_report", "search"], "retrieve_uploaded")
     graph.add_edge("retrieve_uploaded", "validate")
     graph.add_edge("validate", "rank")
-    graph.add_edge("rank", "build_ledger")
+    graph.add_conditional_edges(
+        "rank", route_after_rank,
+        {"report_source": "report_source", "build_ledger": "build_ledger"},
+    )
     graph.add_edge("build_ledger", "summarize")
-
+    graph.add_edge("report_source", "report_evidence_gate")
+    graph.add_conditional_edges(
+        "report_evidence_gate",
+        route_after_report_evidence_gate,
+        {
+            "retrieve_uploaded": "retrieve_uploaded",
+            "report_gap_search": "report_gap_search",
+            "report_writer": "report_writer",
+        },
+    )
+    graph.add_edge("report_gap_search", "validate")
+    graph.add_edge("report_writer", "report_validate")
+    graph.add_conditional_edges(
+        "report_validate",
+        route_after_report_validate,
+        {"revise": "report_revise", "finalize": "report_finalize"},
+    )
+    graph.add_edge("report_revise", "report_validate")
+    graph.add_edge("report_finalize", "cite")
     graph.add_conditional_edges(
         "summarize",
         route_after_summarize,
@@ -219,7 +273,7 @@ def run_enrichment(state: dict) -> dict:
     Run non-critical enrichment after the answer has been streamed.
     Skip completely for normal mode to protect latency.
     """
-    if state.get("response_mode") == "normal":
+    if state.get("response_mode") == "normal" or state.get("report_mode_enabled"):
         return state
 
     state_copy = dict(state)

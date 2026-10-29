@@ -14,6 +14,7 @@ import {
   Trash2,
   Pencil,
   Pin,
+  FileText,
 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
@@ -22,7 +23,9 @@ import { ChatPanel } from "./ChatPanel";
 import { GraphView } from "./GraphView";
 import { api, ApiError } from "@/lib/api";
 import { StudioView } from "./studio/StudioView";
-import type { ChatTurn, Paper, EvidenceMode, StatusStep } from "@/lib/types";
+import { ReportView } from "./report/ReportView";
+
+import type { ChatTurn, Paper, EvidenceMode, StatusStep, ReportType, ReportRecord } from "@/lib/types";
 import dynamic from "next/dynamic";
 
 const PdfViewer = dynamic(() => import("./PdfViewer").then((m) => m.PdfViewer), {
@@ -173,7 +176,7 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
   const [draggingPdf, setDraggingPdf] = useState(false);
 
   const [showStudio, setShowStudio] = useState(false);
-
+  const [showReport, setShowReport] = useState(false);
   const [hasUpload, setHasUpload] = useState(false);
   const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>("literature");
   const refreshLibrary = useCallback(() => {
@@ -214,6 +217,14 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
           responseMode: isA ? ((c.response_mode as ChatTurn["responseMode"]) ?? (/^## /m.test(message.content) ? "researched" : "normal")) : undefined,
           sourceEvidenceMode: c.evidence_mode as ChatTurn["sourceEvidenceMode"],
           sourceQuery: c.source_query as string | undefined,
+          sourceReport: c.report_mode
+            ? {
+                reportType: ((c.report_type as ReportType | undefined) ?? "general"),
+                records: Array.isArray(c.confirmed_source_records)
+                  ? (c.confirmed_source_records as ReportRecord[])
+                  : [],
+              }
+            : undefined,
           paperLinks: Array.isArray(c.paper_links) ? c.paper_links as string[] : undefined,
         };
       }));
@@ -306,11 +317,13 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
     setShowGraphView(true);
     setRailOpen(true);
     setShowStudio(false);
+    setShowReport(false);
     setTab("explore");
   };
   const handleBackToChat = () => {
     setShowGraphView(false);
     setShowStudio(false);
+    setShowReport(false);
   };
 
   const handleOpenPdf = (url: string) => setPdfViewerUrl(url);
@@ -340,6 +353,10 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
   }, []);
 
   const handleNewChat = async () => {
+    // Always leave Graph / Studio / Report first, even if we return early below.
+    setShowGraphView(false);
+    setShowStudio(false);
+    setShowReport(false);
     setTurns([]);
     setUploadedFilename(null);
     setUploadState({ status: "idle", filename: "", progress: "", stage: "", fileUrl: "" });
@@ -347,8 +364,6 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
     setEvidenceMode("literature");
     if (sessionId && !initialChatId) return;
     if (sessionId) router.push(`/app/s/${sessionId}`);
-    setShowGraphView(false);
-    setShowStudio(false);
   };
   const handleRenameChat = async (chat: ChatSummary) => {
     setDialog({ kind: "rename-chat", item: chat });
@@ -522,50 +537,61 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
               <Link href="/app/dashboard" className="mb-4 flex items-center gap-2 px-2 text-caption text-ink-soft hover:text-ink"><ArrowLeft className="h-3.5 w-3.5" /> Dashboard</Link>
               <div className="flex items-center justify-between px-2"><div className="min-w-0"><p className="text-label text-ink-soft/70">SESSION</p><p className="truncate text-sm font-medium text-ink">{sessionName}</p></div><SessionMenu onRename={() => { const item = sessions.find((session) => session.id === initialSessionId); if (item) handleRenameSession(item); }} onDelete={() => { const item = sessions.find((session) => session.id === initialSessionId); if (item) handleDeleteSession(item); }} /></div>
               <div className="mt-4 space-y-1">
-              <button
-                onClick={() => {
-                  setShowGraphView(false);
-                  setShowStudio(false);
-                  setTab("library");
-                  setRailOpen(true);
-                }}
-                className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-caption transition-colors ${
-                  !showGraphView && tab === "library" && railOpen
-                    ? "bg-gold-tint text-ink font-medium"
-                    : "text-ink-soft hover:bg-paper hover:text-ink"
-                }`}
-              >
-                <Library className="h-3.5 w-3.5 shrink-0" />
-                Library
-                {papers.length > 0 && (
-                  <span className="ml-auto rounded-full bg-paper px-1.5 py-0 text-micro text-ink-soft">
-                    {papers.length}
-                  </span>
-                )}
-              </button>
-              <button
-                onClick={handleOpenGraph}
-                className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-caption transition-colors ${
-                  showGraphView
-                    ? "bg-gold-tint text-ink font-medium"
-                    : "text-ink-soft hover:bg-paper hover:text-ink"
-                }`}
-              >
-                <Network className="h-3.5 w-3.5 shrink-0" />
-                Explore Graph
-              </button>
-
-              <button
-                onClick={() => { setShowStudio(true); setShowGraphView(false); }}
-                className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-caption transition-colors ${
-                  showStudio
-                    ? "bg-indigo-tint text-ink font-medium"
-                    : "text-ink-soft hover:bg-paper hover:text-ink"
-                }`}
-              >
+                <button
+                  onClick={() => {
+                    setShowGraphView(false);
+                    setShowStudio(false);
+                    setShowReport(false);
+                    setTab("library");
+                    setRailOpen(true);
+                  }}
+                  className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-caption transition-colors ${
+                    !showGraphView && !showStudio && !showReport && tab === "library" && railOpen
+                      ? "bg-gold-tint text-ink font-medium"
+                      : "text-ink-soft hover:bg-paper hover:text-ink"
+                  }`}
+                >
+                  <Library className="h-3.5 w-3.5 shrink-0" />
+                  Library
+                  {papers.length > 0 && (
+                    <span className="ml-auto rounded-full bg-paper px-1.5 py-0 text-micro text-ink-soft">
+                      {papers.length}
+                    </span>
+                  )}
+                </button>
+                <button
+                  onClick={handleOpenGraph}
+                  className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-caption transition-colors ${
+                    showGraphView
+                      ? "bg-gold-tint text-ink font-medium"
+                      : "text-ink-soft hover:bg-paper hover:text-ink"
+                  }`}
+                >
+                  <Network className="h-3.5 w-3.5 shrink-0" />
+                  Explore Graph
+                </button>
+                <button
+                  onClick={() => { setShowStudio(true); setShowGraphView(false); setShowReport(false); }}
+                  className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-caption transition-colors ${
+                    showStudio
+                      ? "bg-indigo-tint text-ink font-medium"
+                      : "text-ink-soft hover:bg-paper hover:text-ink"
+                  }`}
+                >
                   <Shapes className="h-3.5 w-3.5 shrink-0" />
-                Studio
-              </button>
+                  Studio
+                </button>
+                <button
+                  onClick={() => { setShowReport(true); setShowStudio(false); setShowGraphView(false); }}
+                  className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-caption transition-colors ${
+                    showReport
+                      ? "bg-indigo-tint text-ink font-medium"
+                      : "text-ink-soft hover:bg-paper hover:text-ink"
+                  }`}
+                >
+                  <FileText className="h-3.5 w-3.5 shrink-0" />
+                  Report
+                </button>
               </div>
               <div className="mt-4 border-t border-line pt-4">
                 <button onClick={handleNewChat} className="flex w-full items-center gap-2 rounded-lg bg-gold-tint border border-gold/40 px-3 py-2 text-caption font-medium text-ink hover:bg-gold-tint/70"><Plus className="h-3.5 w-3.5" />New Chat</button>
@@ -623,18 +649,20 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
             <button
               onClick={() => {
                 setShowGraphView(false);
+                setShowStudio(false);
+                setShowReport(false);
                 setTab("library");
                 setRailOpen(true);
               }}
               aria-label="Open library"
               title="Library"
               className={`relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
-                !showGraphView && tab === "library" && railOpen
+                !showGraphView && !showStudio && !showReport && tab === "library" && railOpen
                   ? "bg-gold-tint text-ink"
                   : "text-ink-soft hover:bg-paper hover:text-ink"
               }`}
             >
-              {!showGraphView && tab === "library" && railOpen && (
+              {!showGraphView && !showStudio && !showReport && tab === "library" && railOpen && (
                 <span
                   className="absolute -left-1.5 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-accent"
                   aria-hidden="true"
@@ -681,8 +709,10 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                 aria-hidden="true"
               />
             </button>
+
+            {/* Studio */}
             <button
-              onClick={() => { setShowStudio(true); setShowGraphView(false); }}
+              onClick={() => { setShowStudio(true); setShowGraphView(false); setShowReport(false); }}
               aria-label="Open Studio"
               title="Studio"
               className={`relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
@@ -703,18 +733,43 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                 aria-hidden="true"
               />
             </button>
+
+            {/* Report */}
+            <button
+              onClick={() => { setShowReport(true); setShowStudio(false); setShowGraphView(false); }}
+              aria-label="Open Report"
+              title="Report"
+              className={`relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
+                showReport
+                  ? "bg-indigo-tint text-ink"
+                  : "text-ink-soft hover:bg-paper hover:text-ink"
+              }`}
+            >
+              {showReport && (
+                <span
+                  className="absolute -left-1.5 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-indigo"
+                  aria-hidden="true"
+                />
+              )}
+              <FileText className="h-4 w-4" />
+              <span
+                className="absolute bottom-1.5 h-[2px] w-3.5 rounded-full bg-line/80"
+                aria-hidden="true"
+              />
+            </button>
           </div>
         )}
       </div>
 
       <div ref={containerRef} className="flex flex-1 min-h-0 min-w-0">
         <main className="flex-1 min-w-0">
-          {dashboard ? <SessionDashboard sessions={sessions} chats={recentChats} userName={currentUser?.name} onOpen={(id) => router.push(`/app/s/${id}`)} onRename={handleRenameSession} onDelete={handleDeleteSession} onCreateSession={handleCreateSession} /> : showStudio ? (
+          {dashboard ? <SessionDashboard sessions={sessions} chats={recentChats} userName={currentUser?.name} onOpen={(id) => router.push(`/app/s/${id}`)} onRename={handleRenameSession} onDelete={handleDeleteSession} onCreateSession={handleCreateSession} /> : showReport ? (
+            <ReportView sessionId={sessionId} />
+          ) : showStudio ? (
             <StudioView
               sessionId={sessionId}
               getConversationContext={getConversationContext}
             />
-
           ) : showGraphView ? (
             <div className="h-full flex flex-col">
               <div className="flex items-center justify-between border-b border-line px-4 py-3">
@@ -765,7 +820,7 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
           )}
         </main>
 
-        {!dashboard && !pdfViewerUrl && !showStudio && (
+        {!dashboard && !pdfViewerUrl && !showStudio && !showReport && (
           <div
             className="relative shrink-0 h-full border-l border-line overflow-hidden transition-[width] duration-200 ease-out"
             style={{ width: railOpen ? RAIL_WIDTH : STRIP_WIDTH }}

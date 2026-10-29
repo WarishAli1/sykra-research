@@ -83,6 +83,22 @@ class Settings(BaseSettings):
     REPORT_REVISE_TIMEOUT: int = 12
     REPORT_VERIFY_TIMEOUT: int = 8
 
+    REPORT_MODE_ENABLED: bool = False
+    REPORT_MAX_REVISIONS: int = 2
+    REPORT_EXTRACT_CHUNK_CHARS: int = 6000
+    REPORT_EXTRACT_MAX_CHARS: int = 30000
+    REPORT_EVIDENCE_PAPERS: int = 3
+    REPORT_MAX_RECORDS: int = 200         
+    REPORT_EDITORIAL_ENABLED: bool = True
+    REPORT_MAX_REVISIONS: int = 2
+    REPORT_EVIDENCE_GAP_ENABLED: bool = True
+    REPORT_EVIDENCE_GAP_MAX_ATTEMPTS: int = 1
+    REPORT_DYNAMIC_PLAN_ENABLED: bool = True
+
+    REPORT_CLAIM_LEDGER_ENABLED: bool = True
+    REPORT_MAX_CLAIMS: int = 80
+    REPORT_CLAIM_VERIFY_ENABLED: bool = True
+    REPORT_CLAIM_VERIFY_LLM_ENABLED: bool = True
     GRAPH_ENABLED: bool = True
     GRAPH_CACHE_DIR: str = str(_BACKEND_DIR / "app" / "db" / "graph_cache")
     GRAPH_NEO4J_MIRROR: bool = True

@@ -2,6 +2,24 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Literal, Optional
 
 
+_REPORT_TYPES = Literal["scientific_research", "field_survey", "business_operational",
+                        "financial_ledger", "technical_project", "general"]
+_REPORT_AUDIENCES = Literal["academic", "executive", "technical_team", "regulatory", "general"]
+
+
+class ConfirmedRecord(BaseModel):
+    id: str
+    field_name: str
+    value_raw: str
+    unit: Optional[str] = None
+    role: Literal["count", "percentage", "amount", "rate", "measurement", "other"]
+    unit_of_analysis: Optional[str] = None
+    ledger_side: Optional[Literal["debit", "credit"]] = None
+    numerator_ref: Optional[str] = None
+    denominator_ref: Optional[str] = None
+    original_text: str = ""
+
+    
 class ChatRequest(BaseModel):
     query: str = Field(..., min_length=3)
     session_id: Optional[str] = None
@@ -11,6 +29,11 @@ class ChatRequest(BaseModel):
     response_mode: Literal["normal", "researched", "graph_research"] = "normal"
     request_id: Optional[str] = None
     conversation_history: list[dict] = Field(default_factory=list)
+    report_mode: bool = False
+    report_type: Optional[_REPORT_TYPES] = None
+    report_audience: Optional[_REPORT_AUDIENCES] = None
+    report_title: Optional[str] = Field(None, max_length=200)
+    confirmed_source_records: Optional[list[ConfirmedRecord]] = Field(None, max_length=200)
 
 
 class PaperResult(BaseModel):
@@ -92,7 +115,6 @@ class ChatResponse(BaseModel):
     sections: list[dict] = Field(default_factory=list)
     information_needs: list[str] = Field(default_factory=list)
     complexity_score: int = 0
-    report_notice: Optional[str] = None
 
 
 class FollowupRequest(BaseModel):
@@ -120,6 +142,11 @@ class RegenerateRequest(BaseModel):
     is_followup: bool = False
     upload_mode: Literal["none", "blend", "grounded_only"] = "none"
     include_uploaded: bool = False
+    report_mode: bool = False
+    report_type: Optional[_REPORT_TYPES] = None
+    report_audience: Optional[_REPORT_AUDIENCES] = None
+    report_title: Optional[str] = Field(None, max_length=200)
+    confirmed_source_records: Optional[list[ConfirmedRecord]] = Field(None, max_length=200)
 
 
 class UploadResponse(BaseModel):
@@ -143,6 +170,12 @@ class PdfExportRequest(BaseModel):
 class FilenameResponse(BaseModel):
     turn_id: str
     filename: Optional[str] = None
+
+
+class ReportPrepareRequest(BaseModel):
+    query: str = Field(min_length=3, max_length=12000)
+    session_id: Optional[str] = None
+    evidence_mode: Literal["literature", "uploaded", "blended"] = "literature"
 
 
 ChatResponse.model_rebuild()

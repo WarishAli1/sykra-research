@@ -25,6 +25,7 @@ from app.services.paper_search import (
 from app.services.web_search import search_web_async
 
 from app.services.embeddings import embed_texts, similarity
+from app.services.domain_router import route_providers
 from app.services.embedding_cache import batch_get_or_compute
 
 from app.services import request_dedup
@@ -57,9 +58,6 @@ _BUDGETS = {
     "fast":     {"openalex": 2,  "arxiv": 1,  "web": 1,  "europepmc": 0, "total": 3,   "oa_n": 5,   "ax_n": 4, "ep_n": 0},
     "research": {"openalex": 10, "arxiv": 3,  "web": 2,  "europepmc": 8, "total": 23,  "oa_n": 12,  "ax_n": 6, "ep_n": 12},
 }
-
-_BIO_RE = re.compile(r"\b(disease|infect|bacteri|virus|viral|clinical|patient|animal|veterinar|livestock|pathogen|toxin|therapy|drug|cancer|syndrome|clostridi|vaccin|medical|health|pharma|tumor|oncolog)\b", re.I)
-
 
 class SearchMetrics:
     def __init__(self):
@@ -305,19 +303,19 @@ async def _fetch_intent(
         if "web" in providers:
             _queue("web", lambda: search_web_async(web_query, web_intent, max_results=3))
     else:
-        is_bio = bool(_BIO_RE.search(query))
+        route = await asyncio.to_thread(route_providers, query)
 
         if "openalex" in providers:
             _queue("openalex", lambda: search_openalex_async(
                 query, maxes["oa_n"], oa_primary,
                 min_year=oa_min_year, max_year=oa_max_year))
 
-        if "arxiv" in providers and not is_bio:
+        if "arxiv" in providers and route["arxiv"]:
             _queue("arxiv", lambda: search_arxiv_async(query, maxes["ax_n"]))
 
-        if ("europepmc" in providers or is_bio) and _provider_is_available("europepmc"):
+        if route["europepmc"] and _provider_is_available("europepmc"):
             _queue("europepmc", lambda: search_europepmc_async(query, maxes["ep_n"]))
-            
+
         if "web" in providers:
             _queue("web", lambda: search_web_async(web_query, web_intent, max_results=3))
             
@@ -579,6 +577,15 @@ async def _embed_candidates(
         paper["abstract_vec"] = vec
 
 
+def _embed_basis(state: AgentState) -> str:
+    """In report mode, rank papers against the topic, not the user's whole narrative."""
+    if state.get("report_mode_enabled"):
+        topic = str((state.get("query_understanding") or {}).get("main_topic") or "").strip()
+        if topic:
+            return topic
+    return state["query"]
+
+
 async def _materialize_cached_search(
     state: AgentState,
     cached: dict,
@@ -591,7 +598,7 @@ async def _materialize_cached_search(
         query_embedding = (
             await asyncio.to_thread(
                 embed_texts,
-                [state["query"]],
+                [_embed_basis(state)],
             )
         )[0]
 
@@ -746,7 +753,7 @@ async def _search_core_async(
     query_embedding = (
         await asyncio.to_thread(
             embed_texts,
-            [state["query"]],
+            [_embed_basis(state)],
         )
     )[0]
 
@@ -961,6 +968,9 @@ async def search_node(state: AgentState) -> AgentState:
     query = state.get("query", "")
 
     scope = f"search:{mode}:{evidence_mode}"
+    attempts = int(state.get("report_evidence_attempts", 0) or 0)
+    if attempts:
+        scope += f":gap{attempts}"
 
     if settings.SEMANTIC_CACHE_ENABLED and evidence_mode != "uploaded":
         cached = await asyncio.to_thread(

@@ -97,3 +97,37 @@ class AgentState(TypedDict):
     eligible_papers: list[dict]
     background_papers: list[dict]
     ineligible_papers: list[dict]
+
+    report_mode_enabled: bool
+    report_type: Optional[str]
+    report_audience: Optional[str]
+    report_title: Optional[str]
+    report_language: Optional[str]
+    report_mode_plan: Optional[dict]
+    report_section_plan: list[dict]
+    report_source_records: list[dict]
+    report_derived_values: list[dict]
+    report_discrepancies: list[dict]
+    report_validation_results: Optional[dict]
+    report_warnings: list[dict]
+    report_revision_count: int
+    confirmed_source_records: Optional[list[dict]] 
+    report_claims: list[dict]
+    report_claim_summary: Optional[dict]
+    report_section_confidence: dict[str, str]  
+    report_brief: Optional[dict]
+    report_section_contracts: list[dict]
+    report_execution_path: Optional[str]
+    report_title_user_supplied: bool
+    evidence_ledger: list[dict]
+    evidence_gaps: list[str]
+    report_evidence_attempts: int
+    report_evidence_retry: bool
+    report_evidence_gap_queries: list[str]
+    report_editorial_done: bool
+    report_claim_verify_done: bool
+    report_revision_tickets: list[dict]
+    report_revision_tickets: list[dict]
+    report_structure_approved: bool
+    report_structure_draft: Optional[dict]
+    report_guideline_text: Optional[str]

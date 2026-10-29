@@ -8,9 +8,18 @@ from app.services.reference_builder import (
     paper_id_to_ref_id_map,
 )
 from app.services.citation_formatter import format_apa
+from app.agents.report_text import report_extra_text
+from app.utils.numbers import number_in_text, sign_preserved
 
 
 def _method_note(state, n_cited):
+    if state.get("report_mode_enabled"):
+        res = state.get("report_validation_results") or {}
+        status = "passed" if res.get("passed", True) else "unresolved issues"
+        return (
+            f"Report mode: {n_cited} cited sources. Figures you supplied are reproduced as given; "
+            f"automated validation: {status}. This is a draft, so verify before use."
+        )
     mode = state.get("response_mode", "normal")
     ver = state.get("verification_status", "not_run")
 
@@ -29,6 +38,7 @@ def _method_note(state, n_cited):
 def citation_node(state: AgentState) -> AgentState:
     papers = state.get("ranked_papers", [])
     final_answer = state.get("final_answer", "") or ""
+    report_update = {}
 
     if final_answer and papers:
         texts_by_id = {
@@ -40,12 +50,33 @@ def citation_node(state: AgentState) -> AgentState:
             texts_by_id,
             None,
             numeric_check=getattr(settings, "GROUNDING_NUMERIC_CHECK_ENABLED", True),
-            extra_text=state.get("query", ""),
+            extra_text=(report_extra_text(state) if state.get("report_mode_enabled")
+                        else state.get("query", "")),
         )
         if drops:
             print(f"[ground:final] dropped/adjusted {len(drops)} claim(s) after revision")
             for d in drops:
                 print(f"[ground:final]   - {d['reason']}: {d['sentence']}")
+
+    # Re-check user figures after grounding (runs even if there were no drops or no papers).
+    if state.get("report_mode_enabled") and final_answer:
+        lost = [
+            rec for rec in (state.get("report_source_records") or [])
+            if rec.get("category") == "user_provided"
+            and rec.get("role") in ("count", "percentage", "amount")
+            and (not number_in_text(rec["value"], final_answer)
+                 or not sign_preserved(rec["value"], final_answer))
+        ]
+        if lost:
+            res = dict(state.get("report_validation_results")
+                       or {"passed": True, "errors": [], "warnings": []})
+            res["passed"] = False
+            res["errors"] = list(res.get("errors", [])) + [
+                {"type": "lost_after_grounding", "severity": "error",
+                 "description": f"Value {rec['value']} ({rec.get('field_name')}) was removed by the final citation check."}
+                for rec in lost
+            ]
+            report_update["report_validation_results"] = res
 
     cited = []
     for pid in dict.fromkeys(
@@ -70,4 +101,5 @@ def citation_node(state: AgentState) -> AgentState:
         "citations": citations,
         "final_answer": final_answer,
         "references": references,
+        **report_update,
     }

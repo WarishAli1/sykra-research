@@ -28,6 +28,7 @@ from app.config import settings
 from app.db.database import create_tables
 from app.auth import get_current_user
 from app.api.routes.studio import router as studio_router
+from app.api.routes.report import router as report_router
 from app.services.graph_store import graph_store
 
 try:
@@ -112,7 +113,7 @@ app.include_router(research.router, prefix="/api", dependencies=protected)
 app.include_router(filename_route.router, prefix="/api", dependencies=protected)
 app.include_router(export.router, prefix="/api", dependencies=protected)
 app.include_router(studio_router, prefix="/api/studio", tags=["studio"], dependencies=protected)
-
+app.include_router(report_router, prefix="/api", dependencies=protected)
 app.mount("/exports", StaticFiles(directory="exports"), name="exports")
 
 

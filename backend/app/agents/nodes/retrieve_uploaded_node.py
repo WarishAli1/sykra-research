@@ -727,7 +727,27 @@ def retrieve_uploaded_node(state: AgentState) -> AgentState:
         )
 
     raw = list(state.get("raw_search_results", []))
-    raw.extend(passages)
+
+    existing_upload_keys = {
+        (
+            p.get("link"),
+            (p.get("summary") or "")[:200],
+        )
+        for p in raw
+        if p.get("source") == "user_upload"
+    }
+
+    for passage in passages:
+        key = (
+            passage.get("link"),
+            (passage.get("summary") or "")[:200],
+        )
+
+        if key in existing_upload_keys:
+            continue
+
+        existing_upload_keys.add(key)
+        raw.append(passage)
 
     print(
         f"[retrieve_uploaded] final passages={len(passages)} "
@@ -740,3 +760,19 @@ def retrieve_uploaded_node(state: AgentState) -> AgentState:
         "uploaded_context": passages,
         "document_map": _extract_document_map(chunks),
     }
+
+
+def load_uploaded_full_text(session_id: str, max_chars: int) -> list[str]:
+    """Full stored text of the session's uploaded documents (not top-k), capped at max_chars total."""
+    inventory = _document_inventory(_load_session_chunks(session_id))
+    out, used = [], 0
+    for _link, entry in inventory.items():
+        text = "\n".join(c["text"] for c in entry["chunks"])
+        text = re.sub(r"\[PAGE\s*\d+\]", " ", text)
+        room = max_chars - used
+        if room <= 0:
+            break
+        text = text[:room]
+        out.append(f"{entry['title']}\n{text}")
+        used += len(text)
+    return out

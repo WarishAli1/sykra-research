@@ -1,6 +1,6 @@
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from typing import Any, Literal, Optional, List
-
+from enum import Enum
 
 def _normalize_string_list(v: Any) -> List[str]:
     if v is None:
@@ -878,8 +878,85 @@ class ReasoningLedger(BaseModel):
     key_assumptions: list[str] = Field(default_factory=list)
     ledger_source: str = "llm"
 
-    # ── Phase 2 additions ──
     effect_sizes: list[EffectSize] = Field(default_factory=list)
     disagreements: list[StructuredDisagreement] = Field(default_factory=list)
     robustness_assessment: dict[str, str] = Field(default_factory=dict)
     claim_robustness: list[ClaimLevelRobustness] = Field(default_factory=list)
+
+class ExtractedRecord(BaseModel):
+    id: str = Field(description="short id such as r1, r2")
+    field_name: str
+    value_raw: str = Field(description="the number exactly as written, incl. sign and separators")
+    unit: Optional[str] = None
+    role: Literal["count", "percentage", "amount", "rate", "measurement", "other"]
+    unit_of_analysis: Optional[str] = Field(None, description="what is counted: sample, animal, household, transaction")
+    ledger_side: Optional[Literal["debit", "credit"]] = None
+    numerator_ref: Optional[str] = None
+    denominator_ref: Optional[str] = None
+    original_text: str = Field(description="verbatim span (<=120 chars) from the input containing value_raw")
+
+
+class ExtractionResult(BaseModel):
+    records: list[ExtractedRecord]
+
+
+class ReportExecutionPath(str, Enum):
+    simple = "simple"
+    standard = "standard"
+    deep = "deep"
+
+
+class ReportBrief(BaseModel):
+    purpose: str = ""
+    audience: str = "academic"
+    deliverable: str = "report"
+    report_type: str = "general"
+    execution_path: ReportExecutionPath = ReportExecutionPath.standard
+    constraints: List[str] = Field(default_factory=list)
+    information_needs: List[str] = Field(default_factory=list)
+    data_scope: Literal[
+        "uploaded_only",
+        "literature_only",
+        "blended",
+        "none",
+    ] = "none"
+    working_title: str = ""
+
+
+class EvidenceLedgerItem(BaseModel):
+    id: str
+    category: Literal[
+        "user_provided",
+        "derived",
+        "uploaded_document",
+        "literature",
+        "gap",
+    ]
+    content: str = ""
+    value_raw: Optional[str] = None
+    unit: Optional[str] = None
+    source_type: Optional[str] = None
+    source_ref: Optional[str] = None
+    paper_id: Optional[int] = None
+    verified: bool = False
+    confidence: Literal["high", "medium", "low"] = "medium"
+    provenance: Optional[str] = None
+
+
+class SectionContract(BaseModel):
+    section_id: str
+    title: str
+    purpose: str = ""
+    evidence_required: bool = False
+    data_scope: str = "all"
+    target_words: int = 250
+    required_citations: bool = False
+    prohibited: List[str] = Field(default_factory=list)
+    evidence_ids: List[str] = Field(default_factory=list)
+
+
+class RevisionTicket(BaseModel):
+    attempt: int = 0
+    failed_checks: List[str] = Field(default_factory=list)
+    section_ids: List[str] = Field(default_factory=list)
+    instruction: str = ""

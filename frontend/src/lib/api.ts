@@ -19,6 +19,12 @@ import type {
   GraphPathRequest,
   SuggestMatch,
   Paper,
+  ReportPrepareRequest,
+  ReportPrepareResponse, 
+  ReportStructureDraft,
+  ReportStreamEvent,
+  ReportArtifact,
+  EvidenceMode,
 } from "./types";
 
 export class ApiError extends Error {
@@ -207,6 +213,42 @@ export const api = {
   },
   createChat(sessionId: string): Promise<{ id: string; session_id: string; title: string; created_at: string; updated_at: string }> {
     return request(`/sessions/${encodeURIComponent(sessionId)}/chats`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+  },
+  reportPrepare: (body: ReportPrepareRequest, signal?: AbortSignal) =>
+    request<ReportPrepareResponse>("/report/prepare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    }),
+  reportStructure: (body: { query: string; session_id?: string; evidence_mode?: EvidenceMode; guideline_text?: string | null }, signal?: AbortSignal) =>
+    request<ReportStructureDraft>("/report/structure", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body), signal,
+    }),
+  reportRunStream: (body: Record<string, unknown>, onEvent: (e: ReportStreamEvent) => void, signal?: AbortSignal) =>
+    streamRequest("/report/run/stream", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body), signal,
+    }, onEvent),
+  reportLatest: (sessionId: string) =>
+    request<{ chat_id: string; message_id: string; artifact: ReportArtifact; created_at: string } | null>(
+      `/report/latest/${encodeURIComponent(sessionId)}`, { method: "GET" }),
+  reportRefineStream: (body: { chat_id: string; message_id: string; instruction: string; request_id: string }, onEvent: (e: ReportStreamEvent) => void, signal?: AbortSignal) =>
+    streamRequest("/report/refine/stream", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body), signal,
+    }, onEvent),
+  reportPatchSections: (body: { chat_id: string; message_id: string; title?: string; sections: { section_id: string; content?: string; title?: string }[]; }) =>
+    request<{ ok: boolean; answer: string }>("/report/sections", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  reportGuidelineText: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return request<{ text: string }>("/report/guideline-text", { method: "POST", body: fd });
   },
   getChat(chatId: string): Promise<{ id: string; role: string; content: string; citations: Record<string, unknown>; status: string; created_at: string }[]> {
     return request(`/chats/${encodeURIComponent(chatId)}`, { method: "GET" });

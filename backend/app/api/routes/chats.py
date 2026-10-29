@@ -46,7 +46,7 @@ def list_chats(
     user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
-    query = select(Chat).where(Chat.user_id == user.id, Chat.deleted_at.is_(None))
+    query = select(Chat).where(Chat.user_id == user.id, Chat.deleted_at.is_(None), Chat.kind != "report")
     if session_id is not None:
         query = query.where(Chat.session_id == session_id)
     if before is not None:

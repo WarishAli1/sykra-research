@@ -37,6 +37,7 @@ def _read(session: ResearchSession, db: DBSession) -> SessionRead:
         select(func.count()).select_from(Chat).where(
             Chat.session_id == session.id,
             Chat.deleted_at.is_(None),
+            Chat.kind != "report",
             Chat.messages.any(),
         )
     ) or 0

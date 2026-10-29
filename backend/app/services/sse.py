@@ -23,6 +23,12 @@ NODE_LABELS = {
     "answer_spec_node": "Understanding the question...",
     "build_retrieval_plan": "Planning retrieval...",
     "verify_claims": "Verifying claims and citations...",
+    "report_source": "Reading and verifying your data...",
+    "report_writer": "Drafting report sections...",
+    "report_validate": "Checking figures against your data...",
+    "report_revise": "Correcting flagged sections...",
+    "report_finalize": "Assembling the report...",
+    "report_gap_search": "Searching for missing evidence...",
 }
 
 UPLOADED_NODE_LABELS = {
@@ -194,6 +200,7 @@ async def stream_section_words(
     text: str,
     cancel_check=None,
     kind: str = "final",
+    speed: float = 1.0,
 ):
     """
     Stream a completed section as paced word-chunks.
@@ -207,7 +214,7 @@ async def stream_section_words(
     words_per_frame = 3
     num_frames = math.ceil(total / words_per_frame)
 
-    target_seconds = min(6.0, max(1.5, total / 60.0))
+    target_seconds = min(6.0, max(1.5, total / 60.0)) / max(speed, 0.1)
     delay = target_seconds / num_frames if num_frames else 0.0
     delay = min(0.12, max(0.008, delay))
 

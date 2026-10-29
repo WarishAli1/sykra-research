@@ -53,7 +53,7 @@ const PHASES: PhaseDef[] = [
     title: "Reviewing sources",
     icon: Layers,
     placeholder: "Reviewing sources",
-    stages: { validate: "label", rank: "label" },
+    stages: { validate: "label", rank: "label", report_source: "label", report_gap_search: "label" },
   },
   {
     id: "synthesize",
@@ -65,6 +65,7 @@ const PHASES: PhaseDef[] = [
       preview_answer: "label",
       build_ledger: "label",
       summarize: "silent",
+      report_writer: "label",
     },
   },
   {
@@ -72,7 +73,10 @@ const PHASES: PhaseDef[] = [
     title: "Checking answer quality",
     icon: ShieldCheck,
     placeholder: "Cross-checking the draft against your question",
-    stages: { critique: "label", revise: "label", after_critique: "silent", verify_claims: "label", },
+    stages: {
+      critique: "label", revise: "label", after_critique: "silent", verify_claims: "label",
+      report_validate: "label", report_revise: "label",
+    },
   },
   {
     id: "finalize",
@@ -81,6 +85,7 @@ const PHASES: PhaseDef[] = [
     placeholder: "Adding citations and finishing up",
     stages: {
       cite: "label",
+      report_finalize: "label",
       answer_ready: "silent",
       compare: "silent",
       chart: "silent",
@@ -200,6 +205,21 @@ export function ResearchSteps({
       },
     }));
   }
+
+  const isReportRun = steps.some((s) => s.stage === "report_source" || s.stage === "report_writer");
+  if (isReportRun) {
+    const reportMeta: Partial<Record<PhaseId, { title: string; placeholder: string }>> = {
+      review: { title: "Reviewing sources and your data", placeholder: "Reading and verifying your data" },
+      synthesize: { title: "Drafting the report", placeholder: "Drafting report sections" },
+      refine: { title: "Checking figures", placeholder: "Checking every figure against your data" },
+      finalize: { title: "Assembling the report", placeholder: "Adding citations and finishing up" },
+    };
+    phases = phases.map((st) => {
+      const m = reportMeta[st.def.id];
+      return m ? { ...st, def: { ...st.def, ...m } } : st;
+    });
+  }
+  
   const lastIndex = phases.length - 1;
 
   const rootCls = embedded

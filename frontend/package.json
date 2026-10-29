@@ -4,15 +4,23 @@
   "private": true,
   "scripts": {
     "dev": "next dev --webpack",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
+    "@tiptap/extension-table": "^3.32.0",
+    "@tiptap/extension-table-cell": "^3.32.0",
+    "@tiptap/extension-table-header": "^3.32.0",
+    "@tiptap/extension-table-row": "^3.32.0",
+    "@tiptap/react": "^3.32.0",
+    "@tiptap/starter-kit": "^3.32.0",
     "d3-force": "^3.0.0",
     "framer-motion": "^12.43.0",
+    "html-to-docx": "^1.8.0",
     "katex": "^0.18.1",
     "lucide-react": "^1.25.0",
+    "marked": "^18.1.2",
     "next": "16.4.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -21,7 +29,8 @@
     "react-pdf": "^10.4.1",
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0"
+    "remark-math": "^6.0.0",
+    "tiptap-markdown": "^0.9.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
@@ -36,10 +45,9 @@
     "typescript": "^5"
   },
   "overrides": {
-    "katex": "$katex",
-    "next": {
-      "sharp": "^0.35.3"
-    },
-    "pdfjs-dist": "4.8.69"
-  }
+  "katex": "$katex",
+  "next": { "sharp": "^0.35.3" },
+  "pdfjs-dist": "4.8.69",
+  "html-to-docx": { "image-size": "^2.0.3" }
+}
 }

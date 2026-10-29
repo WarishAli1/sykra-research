@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import logging
 import time
 import uuid
 import json
@@ -14,6 +15,7 @@ from app.models.schemas import (
     RegenerateRequest,
     FollowupRequest,
     FollowupResponse,
+    ReportPrepareRequest,
 )
 from app.services.previous_papers import previous_papers_from_db
 from app.db.models import LibraryPaper
@@ -42,6 +44,8 @@ from app.services.reference_builder import (
 from app.services.citation_grounding import ABSTAIN_TEXT
 from app.services.chat_titles import schedule_title_generation
 from app.services.library_store import save_papers
+from app.config import settings
+from app.agents.report_text import is_auto_title
 from app.auth import get_current_user
 from app.db.database import get_db
 from app.db.models import Chat, Message, ResearchSession, User
@@ -50,7 +54,7 @@ from sqlalchemy.orm import Session as DBSession
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-
+logger = logging.getLogger(__name__)
 router = APIRouter()
 limiter = Limiter(key_func=get_remote_address)
 
@@ -134,9 +138,32 @@ def _update_message(
     db.commit()
 
 
-def _answer_meta(response_mode, evidence_mode, query, ranked):
+def _answer_meta(response_mode, evidence_mode, query, ranked, extra=None):
     return {"response_mode": response_mode, "evidence_mode": evidence_mode,
-            "source_query": query, "paper_links": [p["link"] for p in ranked if p.get("link")]}
+            "source_query": query, "paper_links": [p["link"] for p in ranked if p.get("link")],
+            **(extra or {})}
+
+
+def _report_meta(req) -> dict:
+    """Stored on the message so Regenerate can replay a report exactly."""
+    if not getattr(req, "report_mode", False):
+        return {}
+    return {
+        "report_mode": True,
+        "report_type": req.report_type,
+        "report_audience": req.report_audience,
+        "report_title": req.report_title,
+        "confirmed_source_records": (
+            [r.model_dump() for r in req.confirmed_source_records]
+            if req.confirmed_source_records is not None else None
+        ),
+    }
+
+
+def _require_report_enabled(req) -> None:
+    if getattr(req, "report_mode", False) and not settings.REPORT_MODE_ENABLED:
+        raise HTTPException(status_code=403, detail="Report mode is not available.")
+        
 
 def _replace_assistant_message(db, user, chat, query, content, citations):
     msgs = list(db.scalars(select(Message).where(Message.chat_id == chat.id).order_by(Message.created_at)))
@@ -190,7 +217,7 @@ def _build_initial_state(
         "session_id": session_id,
         "turn_id": turn_id,
         "evidence_mode": req.evidence_mode,
-        "response_mode": req.response_mode,
+        "response_mode": "researched" if getattr(req, "report_mode", False) else req.response_mode,
         "conversation_history": history if history is not None else [],
         "original_query": None,
         "is_followup": False,
@@ -283,7 +310,36 @@ def _build_initial_state(
         "evidence_sufficiency": None,
         "research_subquestions": [],
         "evidence_coverage_matrix": [],
-
+        "report_mode_enabled": bool(getattr(req, "report_mode", False)),
+        "report_type": getattr(req, "report_type", None),
+        "report_audience": getattr(req, "report_audience", None),
+        "report_title": getattr(req, "report_title", None),
+        "report_language": None,
+        "confirmed_source_records": (
+            [r.model_dump() for r in req.confirmed_source_records]
+            if getattr(req, "confirmed_source_records", None) is not None else None
+        ),
+        "report_mode_plan": None,
+        "report_section_plan": [],
+        "report_source_records": [],
+        "report_derived_values": [],
+        "report_discrepancies": [],
+        "report_validation_results": None,
+        "report_warnings": [],
+        "report_revision_count": 0,
+        "report_brief": None,
+        "report_section_contracts": [],
+        "evidence_ledger": [],
+        "evidence_gaps": [],
+        "report_execution_path": getattr(req, "report_execution_path", None),
+        "report_revision_tickets": [],
+        "report_title_user_supplied": bool(getattr(req, "report_title", None))
+            and not is_auto_title(req.report_title, req.query),
+        "report_evidence_attempts": 0,
+        "report_evidence_retry": False,
+        "report_evidence_gap_queries": [],
+        "report_editorial_done": False,
+        "report_claim_verify_done": False,
         "_request_id": "",
         "_streaming_enabled": False,
         "_cancel_check": None,
@@ -409,7 +465,6 @@ def _build_stream_response(
         sections=sections,
         information_needs=final_state.get("information_needs", []),
         complexity_score=final_state.get("complexity_score", 0),
-        report_notice=final_state.get("report_notice"),
     )
 
 
@@ -471,6 +526,7 @@ def _background_persist_and_filename(
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    _require_report_enabled(req)
     session_id = req.session_id or str(uuid.uuid4())
     turn_id = req.turn_id or str(uuid.uuid4())
     chat_record = _get_or_create_chat(db, user, session_id, req.query, req.chat_id)
@@ -515,7 +571,7 @@ async def chat(req: ChatRequest, user: User = Depends(get_current_user), db: DBS
     )
     ranked = final_state.get("ranked_papers") or []
     meta = {"references": [r.model_dump() for r in response.references],
-            **_answer_meta(req.response_mode, req.evidence_mode, req.query, ranked)}
+            **_answer_meta(req.response_mode, req.evidence_mode, req.query, ranked, _report_meta(req))}
     _replace_assistant_message(db, user, chat_record, req.query, response.answer, meta)
     save_papers(db, user.id, req.session_id, papers_for_save, chat_id=chat_record.id)
     return response
@@ -529,6 +585,7 @@ async def chat_stream(
     user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
+    _require_report_enabled(req)
     if not req.request_id:
         raise HTTPException(
             status_code=400,
@@ -558,15 +615,6 @@ async def chat_stream(
         finished = False
         try:
 
-            if req.response_mode in ("researched", "graph_research"):
-                yield sse_event(
-                    "notice",
-                    message=(
-                        "Deep research mode can take around 25–35 seconds. "
-                        "Progress will appear as it runs."
-                    ),
-                )
-
             state: AgentState = _build_initial_state(req, session_id, turn_id, history, previous)
 
             loop = asyncio.get_running_loop()
@@ -586,21 +634,40 @@ async def chat_stream(
                         stream_mode="updates",
                     ):
                         if cancellation.is_cancelled(request_id):
-                            return
-
+                            return 
                         for node_name, delta in update.items():
+                            if delta is None:
+                                logger.error(
+                                    "[chat_stream] node returned None update: "
+                                    "node=%s update=%r",
+                                    node_name,
+                                    update,
+                                )
+                                continue
+
+                            if not isinstance(delta, dict):
+                                logger.error(
+                                    "[chat_stream] unexpected node update type: "
+                                    "node=%s type=%s value=%r",
+                                    node_name,
+                                    type(delta).__name__,
+                                    delta,
+                                )
+                                continue
+
                             state.update(delta)
                             bridge_push(request_id, ("progress", node_name, delta))
-
                     bridge_push(request_id, ("graph_done", None))
                 except Exception as e:
                     print(f"[chat_stream] graph execution failed: {type(e).__name__}: {e}")
+                    logger.exception("[chat_stream] graph execution failed")
                     graph_error.append(e)
                     bridge_push(request_id, ("graph_done", None))
 
             graph_task = asyncio.create_task(_run_graph())
 
             sections_streamed = False
+            last_sent = time.time()
 
             while True:
                 if cancellation.is_cancelled(request_id):
@@ -612,8 +679,11 @@ async def chat_stream(
                 if event is None:
                     if graph_task.done():
                         break
+                    if time.time() - last_sent > 15:
+                        last_sent = time.time()
+                        yield sse_event("ping")
                     continue
-
+                last_sent = time.time()
                 etype = event[0]
 
                 if etype == "progress":
@@ -622,10 +692,8 @@ async def chat_stream(
                     detail = None
                     items = None
 
-                    if node_name == "report_plan":
-                        notice = delta.get("report_notice") or state.get("report_notice")
-                        if notice:
-                            yield sse_event("notice", message=notice)
+                    if node_name == "report_writer":
+                        detail = (delta or {}).get("detail")
 
                     elif node_name in ("plan_query", "build_retrieval_plan", "search"):
                         if req.evidence_mode != "uploaded":
@@ -673,9 +741,10 @@ async def chat_stream(
                         content,
                         cancel_check=lambda: cancellation.is_cancelled(request_id),
                         kind="final",
+                        speed=4.0 if req.report_mode else 1.0,
                     ):
                         yield evt
-                        await asyncio.sleep(0.01) 
+                        await asyncio.sleep(0.002 if req.report_mode else 0.01)
 
                 elif etype == "graph_done":
                     break
@@ -756,10 +825,13 @@ async def chat_stream(
             yield sse_event("result", payload=response.model_dump())
 
             assistant_content = response.answer or assistant_content
-            meta = _answer_meta(req.response_mode, req.evidence_mode, req.query, state.get("ranked_papers") or [])
+            meta = _answer_meta(req.response_mode, req.evidence_mode, req.query,
+                                state.get("ranked_papers") or [], _report_meta(req))
             citations_payload = {
                 "references": [r.model_dump() for r in response.references],
                 "status_steps": status_steps,
+                "report_validation": response.report_validation_results,
+                "report_warnings": response.report_warnings,
                 **meta
             }
             _update_message(
@@ -842,8 +914,8 @@ def chat_cancel(request_id: str):
 @router.post("/chat/regenerate", response_model=ChatResponse)
 @router.post("/chat/retry", response_model=ChatResponse, include_in_schema=False)
 async def regenerate(req: RegenerateRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    _require_report_enabled(req)
     turn_id = req.turn_id or str(uuid.uuid4())
-
     if req.is_followup:
         followup_req = FollowupRequest(
             session_id=req.session_id,
@@ -879,6 +951,11 @@ async def regenerate(req: RegenerateRequest, user: User = Depends(get_current_us
         turn_id=turn_id,
         evidence_mode=req.evidence_mode,
         response_mode=req.response_mode,
+        report_mode=req.report_mode,
+        report_type=req.report_type,
+        report_audience=req.report_audience,
+        report_title=req.report_title,
+        confirmed_source_records=req.confirmed_source_records,
     )
     chat_record = _get_or_create_chat(
         db, user, req.session_id, req.query, req.chat_id
@@ -916,7 +993,7 @@ async def regenerate(req: RegenerateRequest, user: User = Depends(get_current_us
     response.chat_id = str(chat_record.id)
     ranked = final_state.get("ranked_papers") or []
     meta = {"references": [r.model_dump() for r in response.references],
-            **_answer_meta(req.response_mode, req.evidence_mode, req.query, ranked)}
+            **_answer_meta(req.response_mode, req.evidence_mode, req.query, ranked, _report_meta(chat_req))}
     _replace_assistant_message(db, user, chat_record, req.query, response.answer, meta)
     save_papers(db, user.id, req.session_id, ranked, chat_id=chat_record.id)
     return response

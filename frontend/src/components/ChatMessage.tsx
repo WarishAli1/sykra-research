@@ -22,7 +22,6 @@ import {
   FileDown,
   GraduationCap,
   OctagonX,
-  Clock,
   Zap,
   ChevronDown,
   Table2,
@@ -459,13 +458,6 @@ export function ChatMessage({
 
   return (
     <div className="animate-fade-up px-1">
-      {turn.reportNotice && isStreaming && (
-        <div className="mb-3 flex items-start gap-2 rounded-lg border border-indigo/30 bg-indigo/5 px-3 py-2 text-caption leading-relaxed text-indigo animate-fade-up">
-          <Clock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span>{turn.reportNotice}</span>
-        </div>
-      )}
-
       {hasSteps && (
         <div className="mb-3">
           <ResearchSteps embedded steps={turn.statusSteps!} streaming={isStreaming} />

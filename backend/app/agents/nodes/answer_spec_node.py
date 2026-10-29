@@ -132,16 +132,9 @@ FOUNDATIONAL_PAPERS = {
 def detect_foundational_papers(query: str) -> list[dict]:
     q = (query or "").lower()
     found = []
-
     for topic, spec in FOUNDATIONAL_PAPERS.items():
-        if any(keyword in q for keyword in spec["keywords"]):
-            found.append(
-                {
-                    "topic": topic,
-                    "title": spec["title"],
-                }
-            )
-
+        if any(_re.search(rf"\b{_re.escape(k)}\b", q) for k in spec["keywords"]):
+            found.append({"topic": topic, "title": spec["title"]})
     return found
 
 
@@ -547,9 +540,10 @@ def answer_spec_node(state: AgentState) -> AgentState:
     mode = state.get("response_mode", "normal")
 
     is_normal = mode == "normal"
-
+    report_mode = bool(state.get("report_mode_enabled"))
     allow_llm = (
         not is_normal
+        and not report_mode
         and state.get("evidence_mode") != "uploaded"
         and not is_llm_rate_limited()
         and getattr(settings, "LLM_ANSWER_SPEC_ENABLED", True)
@@ -601,7 +595,7 @@ def answer_spec_node(state: AgentState) -> AgentState:
 
     data = spec.model_dump()
 
-    foundational = detect_foundational_papers(query)
+    foundational = [] if report_mode else detect_foundational_papers(query)
 
     if foundational:
         data["foundational_papers"] = foundational

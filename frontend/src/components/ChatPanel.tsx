@@ -37,7 +37,6 @@ function getGreeting(): { title: string; subtitle: string } {
 }
 const noopSubscribe = () => () => {};
 const PINNED_EVENT = "sykra:pinned-change";
-
 export function ChatPanel({
   onUploadComplete,
   uploadedFilename,
@@ -266,10 +265,6 @@ export function ChatPanel({
         }));
         break;
 
-      case "notice":
-        updateTurn(turnId, { reportNotice: event.message });
-        break;
-
       case "token":
         if (event.kind === "preview") {
           updateTurn(turnId, (prev) => ({
@@ -350,7 +345,6 @@ export function ChatPanel({
               sections: res.sections ?? [],
               informationNeeds: res.information_needs ?? [],
               complexityScore: res.complexity_score ?? 0,
-              reportNotice: res.report_notice ?? undefined,
               disclaimer: res.disclaimer ?? null,
             };
           });
@@ -373,7 +367,7 @@ export function ChatPanel({
     query: string,
     mode: ResponseMode,
     evMode: EvidenceMode,
-    history: { role: "user" | "assistant"; content: string }[]
+    history: { role: "user" | "assistant"; content: string }[],
   ) {
     const controller = new AbortController();
     abortRef.current = controller;
@@ -421,10 +415,7 @@ export function ChatPanel({
     }
   }
 
-  async function handleSend() {
-    const query = input.trim();
-    if (!query || isGenerating) return;
-
+  async function sendTurn(query: string) {
     setError(null);
     setInput("");
     stickRef.current = true;
@@ -453,6 +444,12 @@ export function ChatPanel({
       abortRef.current = null;
       activeRequestIdRef.current = null;
     }
+  }
+
+  async function handleSend() {
+    const query = input.trim();
+    if (!query || isGenerating) return;
+    await sendTurn(query);
   }
 
   function handlePause() {
@@ -653,7 +650,7 @@ export function ChatPanel({
           }}
           disabled={isGenerating}
           rows={1}
-          placeholder="Ask a question, or drop a PDF to ground it"
+          placeholder={"Ask a question, or drop a PDF to ground it"}
           className="min-h-[24px] max-h-28 flex-1 resize-none overflow-y-auto bg-transparent py-1.5 text-[15px] leading-6 text-ink placeholder:text-ink-soft/60 focus:outline-none"
         />
 
@@ -679,15 +676,6 @@ export function ChatPanel({
               disabled: !hasUpload,
             },
             { value: "literature", label: "Literature only", hint: "Answer from external literature." },
-          ]}
-        />
-
-        <Dropdown
-          value={responseMode}
-          onChange={setResponseMode}
-          items={[
-            { value: "normal", label: "Normal", hint: "Quick answers and short academic help." },
-            { value: "researched", label: "Researched", hint: "Deeper reports with literature synthesis and citations." },
           ]}
         />
 
@@ -831,8 +819,8 @@ export function ChatPanel({
         >
           <div className={`mx-auto w-full space-y-10 transition-[max-width] duration-200 ease-out ${wide ? "max-w-[920px]" : "max-w-[760px]"}`}>
             {turns.map((t) => (
+              <div key={t.id} className="space-y-3">
               <ChatMessage
-                key={t.id}
                 turn={t}
                 sessionId={sessionId}
                 onOpenGraph={onOpenGraph}
@@ -895,6 +883,7 @@ export function ChatPanel({
                   }
                 }}
               />
+              </div>
             ))}
 
             {error && (
