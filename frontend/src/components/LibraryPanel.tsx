@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState, useRef, useEffect } from "react";
-import { Search, Library, SlidersHorizontal, Check } from "lucide-react";
+import { Search, LibraryBig, SlidersHorizontal, Check } from "lucide-react";
 import { PaperCard } from "./PaperCard";
 import type { Paper } from "@/lib/types";
 
@@ -72,7 +72,7 @@ export function LibraryPanel({
     <div className="flex h-full flex-col">
       <div className="border-b border-line px-4 py-3">
         <div className="flex items-center gap-2 mb-3">
-          <Library className="h-4 w-4 text-indigo" />
+          <LibraryBig className="h-4 w-4 text-indigo" />
           <span className="font-serif text-[15px] font-semibold text-ink">Library</span>
           <span className="ml-auto text-[11px] text-ink-soft">{papers.length}</span>
         </div>

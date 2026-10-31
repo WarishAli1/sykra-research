@@ -9,7 +9,6 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
-// TODO(before launch): the "private data" and "free tier" FAQ answers still contain placeholder text. Fill in your real policy and pricing.
 const faqs = [
   ["How accurate are the citations?", "Sykra links claims to papers retrieved from your library or the open literature, so you can inspect the source behind every answer. Always review important conclusions before publishing."],
   ["Is my research data private?", "Your workspace is designed for your research. We do not use your private uploads to train public models. Replace this placeholder with your final data retention and security policy."],
@@ -27,8 +26,6 @@ const steps = [
   { num: "04", title: "Sykra Studio", text: "Create graphs, data flow diagrams, flowcharts, research frameworks and system architecture diagrams in a dedicated visual workspace.", icon: PenLine },
 ];
 
-// Desktop layout (xl and up). The container is a fixed 1216px wide there, so these are plain pixel coordinates
-// and the SVG draws 1:1. The path runs diagonally from top-left to bottom-right.
 const STAGE_H = 880;
 const stepPositions = [
   { x: 100, y: 320 },
@@ -139,7 +136,6 @@ const capabilities = [
   { icon: Download, label: "PDF + LaTeX" },
 ];
 
-// TODO(before launch): the testimonials and stats in SocialProof are PLACEHOLDERS. Replace them with real, approved proof (or remove them).
 function SocialProof() {
   return <section><Container className="py-20 sm:py-28"><p className="eyebrow text-center">BUILT FOR RESEARCH</p><ul className="mx-auto mt-10 grid max-w-4xl grid-cols-2 gap-y-6 lg:grid-cols-4 lg:divide-x lg:divide-line">{capabilities.map(({ icon: Icon, label }) => <li key={label} className="flex items-center justify-center gap-2.5 px-4 text-sm font-medium text-ink-muted"><Icon className="h-4 w-4 shrink-0 text-sage" aria-hidden="true" />{label}</li>)}</ul><div className="mt-16 grid gap-4 md:grid-cols-3">{[["Dr. Maya Chen","Postdoctoral researcher","Cut literature review time from 2 weeks to 2 days."],["Jon Bell","PhD candidate, Biology","I can finally show exactly where every claim came from."],["Priya Nair","Research lead","The graph helped our team spot the missing connection." ]].map(([name,role,quote]) => <blockquote key={name} className="rounded-2xl border border-line bg-white p-6 shadow-soft"><div className="mb-5 flex gap-1 text-accent">★★★★★</div><p className="font-serif text-lg leading-7 text-ink">“{quote}”</p><footer className="mt-6 text-xs text-ink-muted"><strong className="block text-sm text-ink">{name}</strong>{role}</footer></blockquote>)}</div><div className="mt-12 grid grid-cols-3 divide-x divide-line rounded-2xl border border-line bg-mint/30 py-6 text-center"><div><strong className="block font-serif text-3xl text-forest">2.4M</strong><span className="text-xs text-ink-muted">papers indexed</span></div><div><strong className="block font-serif text-3xl text-forest">98%</strong><span className="text-xs text-ink-muted">citations verified</span></div><div><strong className="block font-serif text-3xl text-forest">11h</strong><span className="text-xs text-ink-muted">saved per review</span></div></div><p className="mt-3 text-center text-[10px] text-ink-muted">TODO: Replace placeholder logos, testimonials, and stats with approved proof.</p></Container></section>;
 }
@@ -225,7 +221,6 @@ function Solution() {
 
 type StepIcon = (typeof steps)[number]["icon"];
 
-// Scroll progress of an element: 0 when its top is at `anchor` of the viewport height, 1 when its bottom is.
 function useScrollProgress<T extends HTMLElement>(ref: { current: T | null }, anchor = 0.65) {
   const [progress, setProgress] = useState(0);
   useEffect(() => {
@@ -264,7 +259,6 @@ function WavePath() {
   const progress = useScrollProgress(stageRef);
   const [stops, setStops] = useState<number[]>([0.1, 0.36, 0.62, 0.88]);
 
-  // Find where along the path each node sits, so a node lights up exactly when the line reaches it.
   useEffect(() => {
     const measure = () => {
       const path = pathRef.current;
@@ -363,7 +357,6 @@ function FAQ() {
   return <section id="faq" className="scroll-mt-24"><Container className="py-20 sm:py-28"><div className="mx-auto max-w-3xl"><div className="text-center"><p className="eyebrow">Questions, answered</p><h2 className="mt-4 font-serif text-4xl tracking-tight sm:text-5xl">Before you begin.</h2></div><div className="mt-12 divide-y divide-line border-y border-line">{faqs.map(([question,answer],i) => <div key={question}><button className="flex w-full items-center justify-between gap-6 py-5 text-left font-semibold text-ink" onClick={() => setActive(active === i ? null : i)} aria-expanded={active === i}>{question}<ChevronDown className={`h-4 w-4 shrink-0 text-ink-muted transition-transform ${active === i ? "rotate-180" : ""}`} /></button>{active === i && <p className="max-w-2xl pb-5 pr-10 text-sm leading-6 text-ink-muted">{answer}</p>}</div>)}</div></div></Container></section>;
 }
 
-// Footer links with a real destination. Anything not listed renders as plain text instead of jumping to top.
 const footerLinks: Record<string, string> = {
   "Features": "#features",
   "How it works": "#how-it-works",

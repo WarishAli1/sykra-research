@@ -81,6 +81,26 @@ def create_session(payload: SessionCreate, user: User = Depends(get_current_user
     return _read(session, db)
 
 
+@router.post("/{session_id}/chats", status_code=201)
+def create_chat_for_session(session_id: UUID, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    session = _owned(session_id, user, db)
+    
+    chat = Chat(id=uuid4(), session_id=session.id, user_id=user.id, title="New chat")
+    db.add(chat)
+    db.commit()
+    db.refresh(chat)
+    
+    return {
+        "id": str(chat.id),
+        "session_id": str(chat.session_id),
+        "title": chat.title,
+        "created_at": chat.created_at,
+        "updated_at": chat.updated_at,
+        "pinned_at": None,
+        "session_name": session.name
+    }
+
+
 @router.get("/{session_id}", response_model=SessionRead)
 def get_session(session_id: UUID, user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
     return _read(_owned(session_id, user, db), db)

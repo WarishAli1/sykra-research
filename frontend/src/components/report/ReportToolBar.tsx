@@ -1,26 +1,14 @@
 "use client";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { Editor } from "@tiptap/react";
 import {
   AlignCenter, AlignJustify, AlignLeft, AlignRight, Bold, Check, ChevronDown, IndentDecrease,
   IndentIncrease, Italic, List, ListOrdered, MoveVertical, Minus, Plus, RemoveFormatting, Underline,
 } from "lucide-react";
+import {
+  FIELD_DEFAULTS, FONTS, SIZES, SPACINGS, isBoldWeight,
+  type ActiveField, type Align,
+} from "./ReportFormat";
 
-export type Align = "left" | "center" | "right" | "justify";
-export type DocFormat = { font: string; size: number; spacing: number; align: Align };
-
-export const FONTS = [
-  { label: "Times New Roman", css: '"Times New Roman",Times,serif' },
-  { label: "Georgia", css: "Georgia,serif" },
-  { label: "Cambria", css: "Cambria,Georgia,serif" },
-  { label: "Arial", css: "Arial,Helvetica,sans-serif" },
-  { label: "Calibri", css: "Calibri,Carlito,Arial,sans-serif" },
-  { label: "Verdana", css: "Verdana,sans-serif" },
-];
-export const DEFAULT_FORMAT: DocFormat = { font: "Times New Roman", size: 12, spacing: 1.5, align: "justify" };
-
-const SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24];
-const SPACINGS = [1, 1.15, 1.5, 2];
 const ALIGNS = [
   { value: "left", label: "Left", Icon: AlignLeft },
   { value: "center", label: "Center", Icon: AlignCenter },
@@ -28,7 +16,6 @@ const ALIGNS = [
   { value: "justify", label: "Justify", Icon: AlignJustify },
 ] as const;
 
-// Buttons must not steal focus from the section editor, or it would blur and close.
 const keepFocus = (e: React.MouseEvent) => e.preventDefault();
 
 function Btn({ title, active, disabled, onClick, children }: {
@@ -42,24 +29,26 @@ function Btn({ title, active, disabled, onClick, children }: {
   );
 }
 
-function Dropdown({ title, trigger, triggerClass = "", children }: {
-  title: string; trigger: ReactNode; triggerClass?: string; children: (close: () => void) => ReactNode;
+function Dropdown({ title, trigger, triggerClass = "", disabled, children }: {
+  title: string; trigger: ReactNode; triggerClass?: string; disabled?: boolean;
+  children: (close: () => void) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const isOpen = open && !disabled;
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (!open) return;
+    if (!isOpen) return;
     const h = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
-  }, [open]);
+  }, [isOpen]);
   return (
     <div ref={ref} className="relative">
-      <button type="button" title={title} aria-label={title} aria-haspopup="menu" aria-expanded={open}
+      <button type="button" title={title} aria-label={title} aria-haspopup="menu" aria-expanded={isOpen} disabled={disabled}
         onMouseDown={keepFocus} onClick={() => setOpen((o) => !o)} className={`rp-tb-btn ${triggerClass}`}>
         {trigger}<ChevronDown className="rp-chev" />
       </button>
-      {open && <div className="rp-menu" role="menu" onMouseDown={keepFocus}>{children(() => setOpen(false))}</div>}
+      {isOpen && <div className="rp-menu" role="menu" onMouseDown={keepFocus}>{children(() => setOpen(false))}</div>}
     </div>
   );
 }
@@ -74,62 +63,87 @@ function Item({ selected, onClick, children, style }: {
   );
 }
 
-export function ReportToolbar({ editor, fmt, onChange }: {
-  editor: Editor | null; fmt: DocFormat; onChange: (f: DocFormat) => void;
-}) {
-  const set = (patch: Partial<DocFormat>) => onChange({ ...fmt, ...patch });
-  const run = (fn: (c: ReturnType<Editor["chain"]>) => ReturnType<Editor["chain"]>) => editor && fn(editor.chain().focus()).run();
-  const is = (name: string) => !!editor?.isActive(name);
-  const CurrentAlign = ALIGNS.find((a) => a.value === fmt.align)!.Icon;
+const SCOPE = { title: "Title", heading: "Heading", body: "Text" } as const;
+
+export function ReportToolbar({ active }: { active: ActiveField | null }) {
+  const editor = active && !active.editor.isDestroyed ? active.editor : null;
+  const kind = active?.kind ?? "body";
+  const d = FIELD_DEFAULTS[kind];
+  const off = !editor;
+
+  const tf = (editor?.getAttributes("textFormat") ?? {}) as { fontFamily?: string | null; fontSize?: number | null; fontWeight?: string | null };
+  const blk = (editor?.getAttributes("paragraph") ?? {}) as { textAlign?: Align | null; lineHeight?: number | null };
+  const font = tf.fontFamily || d.font;
+  const size = tf.fontSize || d.size;
+  const align = (blk.textAlign || d.align) as Align;
+  const spacing = blk.lineHeight || d.spacing;
+  const bold = kind === "body" ? !!editor?.isActive("bold") : isBoldWeight(tf.fontWeight ?? (d.bold ? "700" : "400"));
+  const CurrentAlign = ALIGNS.find((a) => a.value === align)!.Icon;
+  const isBody = kind === "body";
+
+  const chain = () => editor!.chain().focus();
+  const setSize = (n: number) => chain().setTextFormat({ fontSize: n }).run();
+  const stepSize = (dir: 1 | -1) => {
+    const next = dir > 0 ? SIZES.find((n) => n > size) : [...SIZES].reverse().find((n) => n < size);
+    if (next) setSize(next);
+  };
+  const toggleBold = () => (isBody ? chain().toggleBold().run() : chain().setTextFormat({ fontWeight: bold ? "400" : "700" }).run());
+  const clearAll = () => {
+    if (isBody) chain().unsetAllMarks().clearNodes().setBlockFormat({ textAlign: null, lineHeight: null }).run();
+    else chain().unsetAllMarks().setBlockFormat({ textAlign: null, lineHeight: null }).run();
+  };
 
   return (
     <div className="rp-toolbar" role="toolbar" aria-label="Report formatting">
-      <Dropdown title="Font" triggerClass="rp-tb-font" trigger={<span style={{ fontFamily: FONTS.find((f) => f.label === fmt.font)?.css }}>{fmt.font}</span>}>
+      <span className="rp-tb-scope" title="Formatting applies to the current selection only">{off ? "Select text" : SCOPE[kind]}</span>
+      <span className="rp-tb-sep" />
+
+      <Dropdown title="Font" triggerClass="rp-tb-font" disabled={off} trigger={<span style={{ fontFamily: `'${font}'` }}>{font}</span>}>
         {(close) => FONTS.map((f) => (
-          <Item key={f.label} selected={f.label === fmt.font} style={{ fontFamily: f.css }}
-            onClick={() => { set({ font: f.label }); close(); }}>{f.label}</Item>
+          <Item key={f} selected={f === font} style={{ fontFamily: `'${f}'` }}
+            onClick={() => { chain().setTextFormat({ fontFamily: f }).run(); close(); }}>{f}</Item>
         ))}
       </Dropdown>
 
       <span className="rp-tb-sep" />
 
-      <Btn title="Decrease font size" disabled={fmt.size <= SIZES[0]} onClick={() => set({ size: Math.max(SIZES[0], fmt.size - 1) })}><Minus /></Btn>
-      <Dropdown title="Font size" triggerClass="rp-tb-size" trigger={<span>{fmt.size}</span>}>
+      <Btn title="Decrease font size" disabled={off || size <= SIZES[0]} onClick={() => stepSize(-1)}><Minus /></Btn>
+      <Dropdown title="Font size" triggerClass="rp-tb-size" disabled={off} trigger={<span>{size}</span>}>
         {(close) => SIZES.map((n) => (
-          <Item key={n} selected={n === fmt.size} onClick={() => { set({ size: n }); close(); }}>{n}</Item>
+          <Item key={n} selected={n === size} onClick={() => { setSize(n); close(); }}>{n}</Item>
         ))}
       </Dropdown>
-      <Btn title="Increase font size" disabled={fmt.size >= SIZES[SIZES.length - 1]} onClick={() => set({ size: Math.min(SIZES[SIZES.length - 1], fmt.size + 1) })}><Plus /></Btn>
+      <Btn title="Increase font size" disabled={off || size >= SIZES[SIZES.length - 1]} onClick={() => stepSize(1)}><Plus /></Btn>
 
       <span className="rp-tb-sep" />
 
-      <Btn title="Bold" active={is("bold")} disabled={!editor} onClick={() => run((c) => c.toggleBold())}><Bold /></Btn>
-      <Btn title="Italic" active={is("italic")} disabled={!editor} onClick={() => run((c) => c.toggleItalic())}><Italic /></Btn>
-      <Btn title="Underline" active={is("underline")} disabled={!editor} onClick={() => run((c) => c.toggleUnderline())}><Underline /></Btn>
+      <Btn title="Bold" active={bold} disabled={off} onClick={toggleBold}><Bold /></Btn>
+      <Btn title="Italic" active={!!editor?.isActive("italic")} disabled={off} onClick={() => chain().toggleItalic().run()}><Italic /></Btn>
+      <Btn title="Underline" active={!!editor?.isActive("underline")} disabled={off} onClick={() => chain().toggleUnderline().run()}><Underline /></Btn>
 
       <span className="rp-tb-sep" />
 
-      <Dropdown title="Align" trigger={<CurrentAlign />}>
+      <Dropdown title="Align" disabled={off} trigger={<CurrentAlign />}>
         {(close) => ALIGNS.map(({ value, label, Icon }) => (
-          <Item key={value} selected={value === fmt.align} onClick={() => { set({ align: value }); close(); }}><Icon />{label}</Item>
+          <Item key={value} selected={value === align} onClick={() => { chain().setBlockFormat({ textAlign: value }).run(); close(); }}><Icon />{label}</Item>
         ))}
       </Dropdown>
-      <Dropdown title="Line spacing" trigger={<MoveVertical />}>
+      <Dropdown title="Line spacing" disabled={off} trigger={<MoveVertical />}>
         {(close) => SPACINGS.map((n) => (
-          <Item key={n} selected={n === fmt.spacing} onClick={() => { set({ spacing: n }); close(); }}>{n.toFixed(n === 1.15 ? 2 : 1)}</Item>
+          <Item key={n} selected={n === spacing} onClick={() => { chain().setBlockFormat({ lineHeight: n }).run(); close(); }}>{n.toFixed(n === 1.15 ? 2 : 1)}</Item>
         ))}
       </Dropdown>
 
       <span className="rp-tb-sep" />
 
-      <Btn title="Bulleted list" active={is("bulletList")} disabled={!editor} onClick={() => run((c) => c.toggleBulletList())}><List /></Btn>
-      <Btn title="Numbered list" active={is("orderedList")} disabled={!editor} onClick={() => run((c) => c.toggleOrderedList())}><ListOrdered /></Btn>
-      <Btn title="Decrease indent" disabled={!editor} onClick={() => run((c) => c.liftListItem("listItem"))}><IndentDecrease /></Btn>
-      <Btn title="Increase indent" disabled={!editor} onClick={() => run((c) => c.sinkListItem("listItem"))}><IndentIncrease /></Btn>
+      <Btn title="Bulleted list" active={!!editor?.isActive("bulletList")} disabled={off || !isBody} onClick={() => chain().toggleBulletList().run()}><List /></Btn>
+      <Btn title="Numbered list" active={!!editor?.isActive("orderedList")} disabled={off || !isBody} onClick={() => chain().toggleOrderedList().run()}><ListOrdered /></Btn>
+      <Btn title="Decrease indent" disabled={off || !isBody} onClick={() => chain().liftListItem("listItem").run()}><IndentDecrease /></Btn>
+      <Btn title="Increase indent" disabled={off || !isBody} onClick={() => chain().sinkListItem("listItem").run()}><IndentIncrease /></Btn>
 
       <span className="rp-tb-sep" />
 
-      <Btn title="Clear formatting" disabled={!editor} onClick={() => run((c) => c.unsetAllMarks().clearNodes())}><RemoveFormatting /></Btn>
+      <Btn title="Clear formatting" disabled={off} onClick={clearAll}><RemoveFormatting /></Btn>
     </div>
   );
 }

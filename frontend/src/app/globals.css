@@ -413,7 +413,7 @@ html { scroll-behavior: smooth; }
 .prose-chat tbody tr:nth-child(even) td:first-child { background: #e9f0eb; }
 
 .prose-chat hr:has(+ h2) { display: none; }
-/* ───────────────────────── Report: page + toolbar ───────────────────────── */
+
 .rp-sheet {
   --rp-font: "Times New Roman", Times, serif;
   --rp-size: 12pt;
@@ -433,9 +433,16 @@ html { scroll-behavior: smooth; }
 .rp-sheet h1 { font-size: 18pt; text-align: center; margin: 0 0 18pt; }
 .rp-sheet h2 { font-size: 16pt; margin: 20pt 0 8pt; }
 .rp-sheet h3 { font-size: 14pt; margin: 14pt 0 6pt; }
-.rp-sheet h1[contenteditable="true"], .rp-sheet h2[contenteditable="true"] { border-radius: 3px; outline: none; cursor: text; }
-.rp-sheet h1[contenteditable="true"]:hover, .rp-sheet h2[contenteditable="true"]:hover { background: rgba(14, 107, 98, .06); }
-.rp-sheet h1[contenteditable="true"]:focus, .rp-sheet h2[contenteditable="true"]:focus { background: rgba(14, 107, 98, .09); box-shadow: 0 0 0 2px rgba(14, 107, 98, .35); }
+/* Title + section headings are small TipTap editors (RichField). Defaults live here;
+   any formatting the user applies is inline on the text / paragraph and wins. */
+.rp-sheet .rp-field .ProseMirror { outline: none; border-radius: 3px; cursor: text; }
+.rp-sheet .rp-field .ProseMirror:hover { background: rgba(14, 107, 98, .06); }
+.rp-sheet .rp-field .ProseMirror:focus { background: rgba(14, 107, 98, .09); box-shadow: 0 0 0 2px rgba(14, 107, 98, .35); }
+.rp-sheet .rp-field p { margin: 0; font-family: "Times New Roman", Times, serif; font-weight: 700; }
+.rp-sheet .rp-field-title { margin: 0 0 18pt; }
+.rp-sheet .rp-field-title p { font-size: 18pt; line-height: 1.2; text-align: center; }
+.rp-sheet .rp-field-heading { margin: 20pt 0 8pt; }
+.rp-sheet .rp-field-heading p { font-size: 16pt; line-height: 1.2; text-align: left; }
 
 .rp-sheet p, .rp-sheet li, .rp-sheet td, .rp-sheet th {
   font-family: var(--rp-font);
@@ -456,7 +463,25 @@ html { scroll-behavior: smooth; }
 .rp-sheet table { border-collapse: collapse; width: 100%; margin: 10pt 0; }
 .rp-sheet th, .rp-sheet td { border: 1px solid #9aa0a8; padding: 4pt 6pt; text-align: left; }
 .rp-sheet .ProseMirror { outline: none; }
-.rp-sheet .cite a { color: #3b4cca; text-decoration: none; }
+.rp-sheet .cite {
+  display: inline;
+  vertical-align: baseline;
+  font-size: inherit;
+  line-height: inherit;
+  margin-left: 1px;
+}
+
+.rp-sheet .cite a {
+  color: var(--indigo);
+  font-size: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  padding: 0 1px;
+}
+
+.rp-sheet .cite a:hover {
+  text-decoration: underline;
+}
 .rp-sheet .rp-ref { text-align: left; margin: 0 0 6pt; padding-left: 26pt; text-indent: -26pt; }
 
 .rp-toolbar {
@@ -476,6 +501,7 @@ html { scroll-behavior: smooth; }
 .rp-tb-font { width: 132px; justify-content: space-between; }
 .rp-tb-font > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rp-tb-size { min-width: 38px; border: 1px solid var(--line); background: var(--paper); }
+.rp-tb-scope { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-soft); padding: 0 6px; min-width: 64px; }
 .rp-tb-sep { width: 1px; height: 18px; margin: 0 4px; background: var(--line); }
 .rp-menu {
   position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; min-width: 100%;

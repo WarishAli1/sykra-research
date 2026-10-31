@@ -372,7 +372,6 @@ def critique_node(state: AgentState) -> AgentState:
     if not section_outputs:
         return {"needs_revision": False}
 
-    # Reduced truncation limits to guarantee we stay well under token limits
     sections_block = "\n\n".join(
         f"### {s.get('title', s.get('module_id', ''))}\n"
         f"{s.get('content', '')[:1000]}"
@@ -397,7 +396,7 @@ def critique_node(state: AgentState) -> AgentState:
                     )
                 ),
             ],
-            max_tokens=1024,  # CRITICAL FIX: Prevents Groq 413 Request Too Large error
+            max_tokens=1024, 
             config={"timeout": settings.REPORT_CRITIQUE_TIMEOUT},
         )
         result = _extract_json_object(raw.content)

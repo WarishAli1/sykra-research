@@ -101,10 +101,15 @@ export function ChatPanel({
     if (chatId) return chatId;
     if (pendingChatRef.current) return pendingChatRef.current;
     if (!pendingChatPromiseRef.current) {
-      pendingChatPromiseRef.current = api.createChat(sessionId).then((c) => {
-        pendingChatRef.current = c.id;
-        return c.id;
-      });
+      pendingChatPromiseRef.current = api.createChat(sessionId)
+        .then((c) => {
+          pendingChatRef.current = c.id;
+          return c.id;
+        })
+        .catch((err) => {
+          pendingChatPromiseRef.current = null; 
+          throw err;
+        });
     }
     return pendingChatPromiseRef.current;
   }
@@ -676,6 +681,15 @@ export function ChatPanel({
               disabled: !hasUpload,
             },
             { value: "literature", label: "Literature only", hint: "Answer from external literature." },
+          ]}
+        />
+
+        <Dropdown
+          value={responseMode}
+          onChange={setResponseMode}
+          items={[
+            { value: "normal", label: "Normal", hint: "Quick answers and short academic help." },
+            { value: "researched", label: "Researched", hint: "Deeper reports with literature synthesis and citations." },
           ]}
         />
 

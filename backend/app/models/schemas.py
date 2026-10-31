@@ -157,6 +157,13 @@ class UploadResponse(BaseModel):
     link: str
 
 
+class PdfSection(BaseModel):
+    title: str = ""
+    title_html: Optional[str] = Field(None, max_length=20_000)
+    html: Optional[str] = Field(None, max_length=500_000)
+    markdown: str = ""
+
+
 class PdfExportRequest(BaseModel):
     session_id: str
     format: Literal["latex", "standard"] = "standard"
@@ -165,6 +172,8 @@ class PdfExportRequest(BaseModel):
     answer: str
     references: list[ReferenceEntry] = Field(default_factory=list)
     chart_path: Optional[str] = None
+    title_html: Optional[str] = Field(None, max_length=20_000)
+    sections: Optional[list[PdfSection]] = Field(None, max_length=40)
 
 
 class FilenameResponse(BaseModel):

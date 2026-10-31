@@ -58,7 +58,6 @@ def citation_node(state: AgentState) -> AgentState:
             for d in drops:
                 print(f"[ground:final]   - {d['reason']}: {d['sentence']}")
 
-    # Re-check user figures after grounding (runs even if there were no drops or no papers).
     if state.get("report_mode_enabled") and final_answer:
         lost = [
             rec for rec in (state.get("report_source_records") or [])

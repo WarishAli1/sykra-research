@@ -19,8 +19,6 @@ def require_research_session(
         raise HTTPException(status_code=404, detail="Resource not found.")
 
     record = None
-
-    # 1) New-style: the URL carries ResearchSession.id
     try:
         pk = UUID(external_id)
     except ValueError:
@@ -28,7 +26,6 @@ def require_research_session(
     if pk is not None:
         record = db.scalar(select(ResearchSession).where(ResearchSession.id == pk))
 
-    # 2) Legacy: external_id
     if record is None:
         record = db.scalar(
             select(ResearchSession).where(ResearchSession.external_id == external_id)

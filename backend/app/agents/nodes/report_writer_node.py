@@ -1,7 +1,7 @@
 import logging
 import re
 from langchain_core.messages import HumanMessage, SystemMessage
-
+from concurrent.futures import ThreadPoolExecutor
 from app.agents.nodes.summarize_node import (
     _block_for_ids, _clean_content, _dedupe_sections, _estimate_tokens, _evidence_mode_instruction,
     _fast_summaries, _ground_sections, _reclassify_evidence_types, _request_token_limit, _strip_leading_title,
@@ -81,6 +81,7 @@ CITATIONS:
   a measure (sensitivity, specificity, prevalence) its excerpt does not mention.
 - Do not write uncited background (reagent chemistry, mechanisms, thresholds). If it needs a
   citation and none supports it, leave it out.
+- Cite every ALLOWED SOURCE whose excerpt supports a statement you make; do not rely on one or two papers.
 RECOMMENDATIONS (only if this section is recommendations or next steps):
 - Each recommendation must follow directly from a stated finding or a stated data gap. No generic
   husbandry, nutrition or training advice. Frame them as follow-up steps for the report's author
@@ -136,7 +137,9 @@ def _evidence_ledger_block(state: AgentState, limit: int = 18) -> str:
         return "(no evidence ledger available)"
 
     lines = []
-    for ev in ledger[:limit]:
+    ordered = [e for e in ledger if isinstance(e.get("paper_id"), int)] + \
+            [e for e in ledger if not isinstance(e.get("paper_id"), int)]
+    for ev in ordered[:limit]:
         if ev.get("category") == "gap":
             continue
         pid = ev.get("paper_id")
@@ -219,7 +222,9 @@ FIX ONLY THESE PROBLEMS:
 def write_section(section, state, papers, summaries, done, fix=None, previous=None):
     limit = _request_token_limit()
     max_out = min(max(400, section["target_words"] * 3), int(limit * 0.30))
-    want = settings.REPORT_EVIDENCE_PAPERS if section.get("evidence_required") else 0
+    needs_lit = section.get("evidence_required") or section["section_id"] in (
+        "introduction", "background", "discussion", "literature_review")
+    want = settings.REPORT_EVIDENCE_PAPERS if needs_lit else 0
     ids = list(range(min(len(papers), want)))
 
     for digest_chars in (300, 120, 0):          
@@ -228,9 +233,9 @@ def write_section(section, state, papers, summaries, done, fix=None, previous=No
         if room > 0 or digest_chars == 0:
             break
     avail = max(0, room) * 4
-    while ids and avail // len(ids) < 300:
+    while len(ids) > 4 and avail // len(ids) < 200:
         ids.pop()
-    chars = min(900, avail // len(ids)) if ids else 0
+    chars = max(200, min(900, avail // len(ids))) if ids else 0
     block = _block_for_ids(papers, summaries, ids, chars) if ids else ""
     prompt = _build_prompt(section, state, done, block, ids, digest_chars, fix, previous)
 
@@ -336,7 +341,7 @@ def report_revise_node(state: AgentState) -> AgentState:
     if not target_ids:
         target_ids = {sections[0]["module_id"]}
 
-    changed = set()
+    jobs = []
     for i, s in enumerate(sections):
         sid = s["module_id"]
         if sid not in target_ids or sid not in plan:
@@ -344,9 +349,17 @@ def report_revise_node(state: AgentState) -> AgentState:
         others = [x for j, x in enumerate(sections) if j != i]
         section_fixes = fixes.get(sid) or [e.get("description", "") for e in errors]
         fix_text = "\n".join(f"- {m}" for m in section_fixes if m)
-        sections[i] = write_section(plan[sid], state, papers, summaries, others,
-                                    fix=fix_text, previous=s["content"])
-        changed.add(sid)
+        jobs.append((i, sid, others, fix_text, s["content"]))
+
+    def _run(job):
+        i, sid, others, fix_text, prev = job
+        return i, sid, write_section(plan[sid], state, papers, summaries, others,
+                                    fix=fix_text, previous=prev)
+    changed = set()
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        for i, sid, new in ex.map(_run, jobs):
+            sections[i] = new
+            changed.add(sid)
 
     sections = postprocess(sections, state, papers, only_ids=changed)
     return {"section_outputs": sections, "report_revision_count": count}

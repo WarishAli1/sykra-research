@@ -767,7 +767,8 @@ async def chat_stream(
                 if filtered_for_save:
                     papers_for_save = filtered_for_save
             if graph_error:
-                _update_message(db, assistant_message, assistant_content, status="failed")
+                _update_message(db, assistant_message, assistant_content, status="failed",
+                                citations={"status_steps": status_steps})
                 yield sse_event(
                     "error",
                     message="Something went wrong while generating this answer.",
@@ -807,7 +808,8 @@ async def chat_stream(
                     yield evt
 
                 if final_status.get("completed") is False:
-                    _update_message(db, assistant_message, final_answer, status="stopped")
+                    _update_message(db, assistant_message, final_answer, status="stopped",
+                                    citations={"status_steps": status_steps})
                     yield sse_event("cancelled")
                     return
                 assistant_content = final_answer
@@ -830,8 +832,8 @@ async def chat_stream(
             citations_payload = {
                 "references": [r.model_dump() for r in response.references],
                 "status_steps": status_steps,
-                "report_validation": response.report_validation_results,
-                "report_warnings": response.report_warnings,
+                "report_validation": state.get("report_validation_results"),
+                "report_warnings": state.get("report_warnings"),
                 **meta
             }
             _update_message(
@@ -886,7 +888,8 @@ async def chat_stream(
 
         finally:
             if not finished and assistant_message.status == "streaming":
-                _update_message(db, assistant_message, assistant_content, status="stopped")
+                _update_message(db, assistant_message, assistant_content, status="stopped",
+                                citations={"status_steps": status_steps})
             bridge_cleanup(request_id)
             cancellation.cleanup(request_id)
             db_gen.close()

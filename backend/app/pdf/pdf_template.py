@@ -255,8 +255,9 @@ def _mathjax_script_tag() -> str:
     )
 
 
-def build_pdf_html(body_html: str, title: str, latex_style: bool) -> str:
-    nice = prettify_title(title)
+def build_pdf_html(body_html: str, title: str, latex_style: bool,
+                   title_block: str | None = None, exact_title: bool = False) -> str:
+    nice = title if exact_title else prettify_title(title)
     date_str = datetime.now().strftime("%d %B %Y")
     serif_font = "'Source Serif Pro', Georgia, 'Times New Roman', serif"
     sans_font = "'Inter', 'Segoe UI', Helvetica, Arial, sans-serif"
@@ -272,7 +273,7 @@ def build_pdf_html(body_html: str, title: str, latex_style: bool) -> str:
     header_block = (
         '<div class="report-header">'
         '<div class="report-overline">Research Report</div>'
-        f'<h1 class="report-title">{safe_title}</h1>'
+        + (title_block or f'<h1 class="report-title">{safe_title}</h1>') +
         f'<div class="report-meta">Generated {date_str}'
         f'<span class="sep">•</span>{BRAND_NAME}</div>'
         '</div>'

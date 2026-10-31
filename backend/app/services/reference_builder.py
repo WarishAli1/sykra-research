@@ -86,7 +86,7 @@ class CitationNumberer:
 
     def __init__(self, id_map: dict[str, int]):
         self.id_map = id_map or {}
-        self.order: dict[int, int] = {}  # reference id -> displayed number
+        self.order: dict[int, int] = {} 
 
     def rewrite(self, text: str) -> str:
         if not text:

@@ -1,6 +1,6 @@
 "use client";
 
-import { Library, Network } from "lucide-react";
+import { LibraryBig, Network } from "lucide-react";
 import { LibraryPanel } from "./LibraryPanel";
 import { ExplorePanel } from "./ExplorePanel";
 import type { Paper } from "@/lib/types";
@@ -30,7 +30,7 @@ export function RightRail({
         <TabButton
           active={tab === "library"}
           onClick={() => setTab("library")}
-          icon={<Library className="h-3.5 w-3.5" />}
+          icon={<LibraryBig className="h-3.5 w-3.5" />}
           label="Library"
           badge={papers.length || undefined}
         />

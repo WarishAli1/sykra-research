@@ -10,10 +10,15 @@ pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.vers
 
 interface PdfViewerProps {
   url: string;
+  name?: string;
   onClose: () => void;
 }
 
-export function PdfViewer({ url, onClose }: PdfViewerProps) {
+export function PdfViewer(props: PdfViewerProps) {
+  return <PdfViewerInner key={props.url} {...props} />;
+}
+
+function PdfViewerInner({ url, name, onClose }: PdfViewerProps) {
   const [numPages, setNumPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
   const [scale, setScale] = useState(1);
@@ -21,10 +26,43 @@ export function PdfViewer({ url, onClose }: PdfViewerProps) {
   const [loading, setLoading] = useState(true);
   const [pageWidth, setPageWidth] = useState(800);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+
   const viewerRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
 
+  useEffect(() => {
+    let isMounted = true;
+    let currentBlobUrl: string | null = null;
+
+    fetch(url, { credentials: "include" })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`Failed to load PDF: ${res.status} ${res.statusText}`);
+        const blob = await res.blob();
+        currentBlobUrl = URL.createObjectURL(blob);
+        if (isMounted) {
+          setBlobUrl(currentBlobUrl);
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        console.error("PDF fetch error:", err);
+        if (isMounted) {
+          setLoadError("Couldn't load this PDF. You may not have permission, or the file is missing.");
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+      if (currentBlobUrl) {
+        URL.revokeObjectURL(currentBlobUrl);
+      }
+    };
+  }, [url]);
+
   const filename = useMemo(() => {
+    if (name) return name;
     try {
       const u = new URL(url, window.location.origin);
       const last = u.pathname.split("/").filter(Boolean).pop() ?? "";
@@ -32,7 +70,7 @@ export function PdfViewer({ url, onClose }: PdfViewerProps) {
     } catch {
       return decodeURIComponent(url.split("/").pop() || "document.pdf");
     }
-  }, [url]);
+  }, [url, name]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -73,7 +111,8 @@ export function PdfViewer({ url, onClose }: PdfViewerProps) {
     return () => observer.disconnect();
   }, [numPages]);
 
-  const validUrl = /^https?:\/\//i.test(url);
+  const validUrl = /^(https?|blob):/i.test(url);
+  const fileToLoad = blobUrl; // never hand the raw URL to pdf.js (no cookies -> 401)
 
   return (
     <div className="flex h-full w-full min-w-0">
@@ -117,8 +156,7 @@ export function PdfViewer({ url, onClose }: PdfViewerProps) {
             </button>
           </div>
         </div>
-
-        {/* Body */}
+        
         {!validUrl || loadError ? (
           <div className="flex flex-1 items-center justify-center p-8 text-center">
             <p className="text-[13.5px] text-white/70">{loadError ?? "No PDF to display."}</p>
@@ -127,8 +165,8 @@ export function PdfViewer({ url, onClose }: PdfViewerProps) {
           <div className="flex flex-1 overflow-hidden">
             {showSidebar && (
               <div className="sidebar">
-                <Document
-                  file={url}
+                {fileToLoad && <Document
+                  file={fileToLoad}
                   loading={null}
                   onLoadError={(err) => console.error("PDF sidebar load error:", err)}
                 >
@@ -151,7 +189,7 @@ export function PdfViewer({ url, onClose }: PdfViewerProps) {
                       <p style={{ marginTop: 8, fontSize: 11, textAlign: "center" }}>{index + 1}</p>
                     </div>
                   ))}
-                </Document>
+                </Document>}
               </div>
             )}
             <div ref={viewerRef} className="pdf-viewer">
@@ -160,8 +198,8 @@ export function PdfViewer({ url, onClose }: PdfViewerProps) {
                   <span style={{ color: "rgba(255,255,255,0.85)", fontWeight: 600 }}>Loading PDF...</span>
                 </div>
               )}
-              <Document
-                file={url}
+              {fileToLoad && <Document
+                file={fileToLoad}
                 loading={null}
                 onLoadSuccess={({ numPages }) => {
                   setNumPages(numPages);
@@ -192,7 +230,7 @@ export function PdfViewer({ url, onClose }: PdfViewerProps) {
                     </div>
                   </div>
                 ))}
-              </Document>
+              </Document>}
             </div>
           </div>
         )}

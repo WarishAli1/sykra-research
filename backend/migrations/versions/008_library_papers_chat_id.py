@@ -15,7 +15,6 @@ def upgrade():
     op.create_foreign_key("fk_library_papers_chat_id", "library_papers", "chats", ["chat_id"], ["id"], ondelete="CASCADE")
     op.create_index("ix_library_papers_chat_id", "library_papers", ["chat_id"])
 
-    # Optional backfill: attach each existing paper to the oldest chat in its session.
     op.execute("""
         UPDATE library_papers p
         SET chat_id = (

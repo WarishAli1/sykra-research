@@ -24,7 +24,9 @@ import type {
   ReportStructureDraft,
   ReportStreamEvent,
   ReportArtifact,
+  StatusStep,
   EvidenceMode,
+  ReportListItem,
 } from "./types";
 
 export class ApiError extends Error {
@@ -221,30 +223,48 @@ export const api = {
       body: JSON.stringify(body),
       signal,
     }),
+
   reportStructure: (body: { query: string; session_id?: string; evidence_mode?: EvidenceMode; guideline_text?: string | null }, signal?: AbortSignal) =>
     request<ReportStructureDraft>("/report/structure", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body), signal,
     }),
+
   reportRunStream: (body: Record<string, unknown>, onEvent: (e: ReportStreamEvent) => void, signal?: AbortSignal) =>
     streamRequest("/report/run/stream", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body), signal,
     }, onEvent),
+
   reportLatest: (sessionId: string) =>
-    request<{ chat_id: string; message_id: string; artifact: ReportArtifact; created_at: string } | null>(
+    request<{ chat_id: string; message_id: string; artifact: ReportArtifact; created_at: string; status_steps?: StatusStep[] } | null>(
       `/report/latest/${encodeURIComponent(sessionId)}`, { method: "GET" }),
-  reportRefineStream: (body: { chat_id: string; message_id: string; instruction: string; request_id: string }, onEvent: (e: ReportStreamEvent) => void, signal?: AbortSignal) =>
+
+  reportRefineStream: (body: { chat_id: string; message_id: string; instruction: string; request_id: string; guideline_text?: string | null; data_text?: string | null; has_upload?: boolean }, onEvent: (e: ReportStreamEvent) => void, signal?: AbortSignal) =>
     streamRequest("/report/refine/stream", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body), signal,
     }, onEvent),
-  reportPatchSections: (body: { chat_id: string; message_id: string; title?: string; sections: { section_id: string; content?: string; title?: string }[]; }) =>
+
+  reportPatchSections: (body: { chat_id: string; message_id: string; title?: string; title_html?: string; sections: { section_id: string; content?: string; title?: string; html?: string; title_html?: string }[]; }) =>
     request<{ ok: boolean; answer: string }>("/report/sections", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+
+  reportList: (sessionId: string) =>
+    request<ReportListItem[]>(`/report/list/${encodeURIComponent(sessionId)}`, { method: "GET" }),
+
+  reportGet: (sessionId: string, messageId: string) =>
+    request<{ chat_id: string; message_id: string; artifact: ReportArtifact; created_at: string; status_steps?: StatusStep[] }>(
+      `/report/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`,
+      { method: "GET" }),
+    
+  reportDelete: (sessionId: string, chatId: string) =>
+    request<{ ok: boolean }>(`/report/${encodeURIComponent(sessionId)}/chat/${encodeURIComponent(chatId)}`,
+      { method: "DELETE" }),
+
   reportGuidelineText: (file: File) => {
     const fd = new FormData();
     fd.append("file", file);

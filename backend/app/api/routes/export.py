@@ -53,20 +53,26 @@ def export_pdf(req: PdfExportRequest):
         raise HTTPException(status_code=400, detail="Nothing to export — answer is empty.")
     latex_style = req.format == "latex"
 
-    slug = get_filename(req.turn_id) if req.turn_id else None
-    if not slug:
-        slug = generate_filename(
-            req.turn_id or uuid.uuid4().hex, _prose_for_title(req.answer)
-        )
-
-    if slug and slug != "research-answer":
-        title = prettify_title(slug, source=req.answer)
+    sections = [s.model_dump() for s in req.sections] if req.sections else None
+    if sections:
+        # Formatted export: the user's own (possibly edited) title wins over a generated slug.
+        slug = None
+        title = (req.title or "").strip() or "Research Report"
     else:
-        raw = (req.title or "").strip()
-        if raw and not _is_section_label(raw, req.answer):
-            title = prettify_title(raw, source=req.answer)
+        slug = get_filename(req.turn_id) if req.turn_id else None
+        if not slug:
+            slug = generate_filename(
+                req.turn_id or uuid.uuid4().hex, _prose_for_title(req.answer)
+            )
+
+        if slug and slug != "research-answer":
+            title = prettify_title(slug, source=req.answer)
         else:
-            title = "Research Report"
+            raw = (req.title or "").strip()
+            if raw and not _is_section_label(raw, req.answer):
+                title = prettify_title(raw, source=req.answer)
+            else:
+                title = "Research Report"
 
     references = [
         r.model_dump() if hasattr(r, "model_dump") else r
@@ -80,6 +86,8 @@ def export_pdf(req: PdfExportRequest):
             references=references,
             chart_path=req.chart_path,
             latex_style=latex_style,
+            sections=sections,
+            title_html=req.title_html,
         )
     except FileNotFoundError as e:
         print(f"[export] {e}")

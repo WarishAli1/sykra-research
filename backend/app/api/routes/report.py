@@ -1,10 +1,11 @@
 import asyncio
-import datetime
 import json
 import time
 import uuid
 import io
 import traceback
+import re
+from datetime import datetime, timezone
 from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
@@ -28,7 +29,10 @@ from app.api.routes.chat import (
 from app.auth import get_current_user
 from app.config import settings
 from app.db.database import get_db
-from app.db.models import Chat, Message, ResearchSession, User
+from app.db.models import Chat, LibraryPaper, Message, ResearchSession, User
+from app.services.vector_store import vector_store
+from app.services.graph_store import graph_store
+from app.pdf.pdf_renderer import sanitize_report_html
 from app.models.schemas import ChatRequest, ConfirmedRecord, ReportPrepareRequest, ReferenceEntry
 from app.services import cancellation
 from app.services.citation_grounding import ground_text
@@ -88,12 +92,16 @@ class ReportRefineRequest(BaseModel):
     message_id: str
     instruction: str = Field(min_length=2, max_length=4000)
     request_id: str
-
+    guideline_text: Optional[str] = Field(None, max_length=20000)
+    data_text: Optional[str] = Field(None, max_length=200_000)
+    has_upload: bool = False
 
 class SectionPatch(BaseModel):
     section_id: str
     content: str | None = None
     title: str | None = Field(None, min_length=1, max_length=200)
+    html: str | None = Field(None, max_length=500_000)
+    title_html: str | None = Field(None, max_length=20_000)
 
 
 class ReportPatchRequest(BaseModel):
@@ -101,6 +109,16 @@ class ReportPatchRequest(BaseModel):
     message_id: str
     sections: list[SectionPatch] = Field(default_factory=list)
     title: str | None = Field(None, min_length=1, max_length=200)
+    title_html: str | None = Field(None, max_length=20_000)
+
+
+def _set_or_pop(d: dict, key: str, raw_html: str | None) -> None:
+    """Store sanitized html under key; empty value removes it (= back to default look)."""
+    clean = sanitize_report_html(raw_html)
+    if clean:
+        d[key] = clean
+    else:
+        d.pop(key, None)
 
 
 def _own_message(db: DBSession, user: User, chat_id: str, message_id: str) -> Message:
@@ -288,7 +306,7 @@ async def report_run_stream(request: Request, req: ReportRunRequest,
                     break
             await graph_task
             if graph_error:
-                _update_message(db2, msg, "", status="failed")
+                _update_message(db2, msg, "", status="failed", citations={"status_steps": status_steps})
                 yield sse_event("error", message="Something went wrong while generating this report.")
                 return
 
@@ -351,7 +369,8 @@ async def report_run_stream(request: Request, req: ReportRunRequest,
             _update_message(db2, msg, answer, status="complete", citations=citations_payload)
             finished = True
             try:
-                save_papers(db2, user_id, req.session_id, papers_for_save, chat_id=chat_id)
+                await asyncio.to_thread(save_papers, db2, user_id, req.session_id,
+                                        papers_for_save, chat_id=chat_id)
             except Exception as e:
                 log_print(f"[report_run] save_papers failed: {type(e).__name__}: {e}")
             filename = await asyncio.to_thread(generate_filename, turn_id, answer)
@@ -360,7 +379,7 @@ async def report_run_stream(request: Request, req: ReportRunRequest,
             yield sse_event("done")
         finally:
             if not finished and msg.status == "streaming":
-                _update_message(db2, msg, "", status="stopped")
+                _update_message(db2, msg, "", status="stopped", citations={"status_steps": status_steps})
             bridge_cleanup(request_id)
             cancellation.cleanup(request_id)
             db_gen.close()
@@ -391,8 +410,99 @@ async def report_latest(session_id: str, user: User = Depends(get_current_user),
         art = (m.citations or {}).get("report_artifact")
         if art:
             return {"chat_id": str(m.chat_id), "message_id": str(m.id),
-                    "artifact": art, "created_at": m.created_at.isoformat()}
+                    "artifact": art, "created_at": m.created_at.isoformat(),
+                    "status_steps": (m.citations or {}).get("status_steps") or []}
     return None
+
+
+@router.get("/report/list/{session_id}")
+async def report_list(session_id: str, user: User = Depends(get_current_user),
+                      db: DBSession = Depends(get_db)):
+    try:
+        sid = uuid.UUID(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid session identifier.") from exc
+    owned = db.scalar(select(ResearchSession).where(
+        ResearchSession.id == sid, ResearchSession.user_id == user.id))
+    if not owned:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    rows = db.scalars(
+        select(Message)
+        .join(Chat, Message.chat_id == Chat.id)
+        .where(Chat.session_id == sid, Chat.user_id == user.id,
+               Chat.kind == "report", Chat.deleted_at.is_(None),
+               Message.role == "assistant")
+        .order_by(Message.created_at.desc())
+    ).all()
+    out = []
+    for m in rows:
+        art = (m.citations or {}).get("report_artifact")
+        if not art:
+            continue
+        out.append({
+            "chat_id": str(m.chat_id),
+            "message_id": str(m.id),
+            "title": art.get("title") or "Report",
+            "created_at": m.created_at.isoformat(),
+            "updated_at": (m.chat.updated_at or m.created_at).isoformat(),
+        })
+    return out
+
+
+@router.get("/report/{session_id}/message/{message_id}")
+async def report_get(session_id: str, message_id: str,
+                     user: User = Depends(get_current_user),
+                     db: DBSession = Depends(get_db)):
+    try:
+        sid = uuid.UUID(session_id)
+        mid = uuid.UUID(message_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid identifier.") from exc
+    msg = db.get(Message, mid)
+    if (not msg or msg.chat.user_id != user.id or msg.chat.session_id != sid
+            or msg.chat.kind != "report"):
+        raise HTTPException(status_code=404, detail="Report not found.")
+    art = (msg.citations or {}).get("report_artifact")
+    if not art:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    return {"chat_id": str(msg.chat_id), "message_id": str(msg.id),
+            "artifact": art, "created_at": msg.created_at.isoformat(),
+            "status_steps": (msg.citations or {}).get("status_steps") or []}
+
+
+@router.delete("/report/{session_id}/chat/{chat_id}")
+async def report_delete(session_id: str, chat_id: str,
+                        user: User = Depends(get_current_user),
+                        db: DBSession = Depends(get_db)):
+    try:
+        sid = uuid.UUID(session_id)
+        cid = uuid.UUID(chat_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid identifier.") from exc
+    chat = db.scalar(select(Chat).where(
+        Chat.id == cid, Chat.session_id == sid,
+        Chat.user_id == user.id, Chat.kind == "report"))
+    if not chat:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    links = list(db.scalars(select(LibraryPaper.link).where(
+        LibraryPaper.session_id == sid, LibraryPaper.chat_id == cid)))
+    db.delete(chat) 
+    db.commit()
+    if links:
+        still_live = set(db.scalars(select(LibraryPaper.link).where(
+            LibraryPaper.session_id == sid, LibraryPaper.link.in_(links))))
+        for link in links:
+            if link in still_live:
+                continue
+            try:
+                vector_store.delete_paper(link, session_id)
+            except Exception as e:
+                log_print(f"[report_delete] vector purge failed for {link}: {type(e).__name__}: {e}")
+            try:
+                graph_store.delete_paper(link)
+            except Exception as e:
+                log_print(f"[report_delete] graph purge failed for {link}: {type(e).__name__}: {e}")
+    return {"ok": True}
 
 
 @router.patch("/report/sections")
@@ -410,15 +520,74 @@ async def report_patch_sections(req: ReportPatchRequest,
         if p:
             if p.content is not None:
                 sec["content"] = p.content
+                # html is the formatted twin of content; no html sent => formatting is gone.
+                _set_or_pop(sec, "html", p.html)
             if p.title:
                 sec["title"] = p.title.strip()
+            if p.title_html is not None:
+                _set_or_pop(sec, "title_html", p.title_html)
     if req.title:
         art["title"] = req.title.strip()
+    if req.title_html is not None:
+        _set_or_pop(art, "title_html", req.title_html)
     answer = _rebuild_answer(art)
     art["sections"] = art.get("sections")
     cit["report_artifact"] = art
     _update_message(db, msg, answer, citations=cit)
     return {"ok": True, "answer": answer}
+
+
+def _wc(t: str) -> int:
+    return len((t or "").split())
+
+def _norm(t: str) -> str:
+    return re.sub(r"\s+", " ", t or "").strip()
+
+_SKIP_WHY = {"failed": "model error", "too_short": "output too short", "unchanged": "no change produced"}
+
+def _refine_outcome(changed: list[dict], skipped: list[dict]) -> tuple[str, str]:
+    if changed:
+        s = "Updated " + ", ".join(
+            f"{c['title']} ({c['words_before']} → {c['words_after']} words)" for c in changed) + "."
+        if skipped:
+            s += " Skipped " + ", ".join(f"{k['title']} ({_SKIP_WHY[k['reason']]})" for k in skipped) + "."
+        return "done", s
+    if skipped and all(k["reason"] == "failed" for k in skipped):
+        return "failed", "The rewrite failed. Your report was not modified. Please try again."
+    if skipped:
+        return "nochange", "No changes made: " + ", ".join(
+            f"{k['title']} ({_SKIP_WHY[k['reason']]})" for k in skipped) + ". Try a more specific instruction."
+    return "nochange", "No changes made."
+
+
+async def _attach_context(req: ReportRefineRequest, msg, art: dict) -> str:
+    new_material = req.has_upload or bool(req.data_text)
+    texts: list[str] = []
+    if new_material or art.get("has_uploads"):
+        texts += await asyncio.to_thread(
+            load_uploaded_full_text, str(msg.chat.session_id), settings.REPORT_EXTRACT_MAX_CHARS)
+    if req.data_text:
+        texts.append(req.data_text)
+    if req.guideline_text:
+        art["guideline_text"] = req.guideline_text[:20000]
+    if not texts:
+        return ""
+    src, _ = build_source_text(req.instruction, texts)
+    if new_material:
+        try:
+            new, _ = await asyncio.to_thread(extract_records, src)
+        except ExtractionError:
+            new = []
+        recs = list(art.get("records") or [])
+        have = {(r.get("field_name"), r.get("value_raw")) for r in recs}
+        for r in new:
+            d = r if isinstance(r, dict) else r.model_dump()
+            if (d.get("field_name"), d.get("value_raw")) not in have:
+                recs.append(d)
+        art["records"] = recs
+        art["has_uploads"] = True
+        art["evidence_mode"] = "blended"
+    return src
 
 
 @router.post("/report/refine/stream")
@@ -432,22 +601,33 @@ async def report_refine_stream(request: Request, req: ReportRefineRequest,
     art = dict(cit.get("report_artifact") or {})
     if not art:
         raise HTTPException(status_code=404, detail="Report not found.")
+    extra_ctx = await _attach_context(req, msg, art)
+    guideline = art.get("guideline_text") or ""
     sections = [dict(s) for s in (art.get("sections") or [])]
     sources = art.get("sources") or []
     texts_by_id = {str(s["id"]): f"{s.get('title','')}. {s.get('excerpt','')}" for s in sources}
     extra = "\n".join([str(r.get("value_raw") or r.get("value") or "")
-                       for r in (art.get("records") or [])] + [art.get("query") or ""])
+                       for r in (art.get("records") or [])] + [art.get("query") or "", extra_ctx])
+    ctx_block = ((f"ATTACHED MATERIAL (authoritative; use exact figures, never invent):\n{extra_ctx[:12000]}\n\n" if extra_ctx else "")
+                 + (f"GUIDELINE:\n{guideline[:4000]}\n\n" if guideline else ""))
     cancellation.register(req.request_id)
 
     async def event_stream():
-        finished = False
+        changed: list[dict] = []
+        skipped: list[dict] = []
+        cancelled = False
         try:
+            yield sse_event("progress", label="Understanding your request")
             listing = "\n".join(f"- [{s['section_id']}] {s['title']}" for s in sections)
             target_prompt = (
                 f"INSTRUCTION: {req.instruction}\nSECTIONS:\n{listing}\n"
-                'Return JSON only: {"section_ids": ["..."], "global": false}. '
-                "Pick the sections that must be rewritten to satisfy the instruction; "
-                "set global=true only if the instruction restructures the whole report.")
+                + (f"GUIDELINE:\n{guideline[:3000]}\n" if req.guideline_text else "")
+                + (f"NEW DATA PREVIEW:\n{extra_ctx[:1500]}\n" if extra_ctx and (req.has_upload or req.data_text) else "")
+                + 'Return JSON only: {"section_ids": [], "global": false, '
+                  '"add": [{"title": "", "after": "<section_id or null>", "brief": ""}], "remove": []}. '
+                  "section_ids: existing sections to rewrite. global=true only if the whole report must be rewritten. "
+                  "add: new sections the user asks for or the guideline/data clearly requires (max 4). "
+                  "remove: section ids, only if the user explicitly asks to delete them.")
             try:
                 llm_fast = get_llm(temperature=0, task="fast")
                 raw = await asyncio.to_thread(
@@ -456,30 +636,78 @@ async def report_refine_stream(request: Request, req: ReportRefineRequest,
                      HumanMessage(content=target_prompt)],
                     config={"timeout": 8},
                 )
-                ids = [str(x) for x in (raw or {}).get("section_ids", [])] if isinstance(raw, dict) else []
-                glob = bool((raw or {}).get("global")) if isinstance(raw, dict) else False
+                d = raw if isinstance(raw, dict) else {}
+                ids = [str(x) for x in d.get("section_ids", [])]
+                glob = bool(d.get("global"))
+                adds = [a for a in d.get("add", []) if isinstance(a, dict)]
+                rems = {str(x) for x in d.get("remove", [])}
             except Exception:
-                ids, glob = [], False
-            valid = {s["section_id"] for s in sections}
-            ids = [i for i in ids if i in valid]
-            if glob or not ids:
-                ids = [s["section_id"] for s in sections if s["section_id"] != "references"] or valid
+                ids, glob, adds, rems = [], False, [], set()
+
+            by_id = {s["section_id"]: s for s in sections}
+            rem_titles = [by_id[i]["title"] for i in rems if i in by_id and i != "references"]
+            rems = {i for i in rems if i in by_id and i != "references"}
+            sections[:] = [s for s in sections if s["section_id"] not in rems]
+            new_ids, briefs = [], {}
+            for a in adds[:4]:
+                t = str(a.get("title") or "").strip()[:120]
+                if not t:
+                    continue
+                nid = f"s_{uuid.uuid4().hex[:8]}"
+                pos = next((i + 1 for i, s in enumerate(sections) if s["section_id"] == a.get("after")), None)
+                if pos is None:
+                    pos = next((i for i, s in enumerate(sections) if s["section_id"] == "references"), len(sections))
+                sections.insert(pos, {"section_id": nid, "title": t, "content": "", "confidence": "medium"})
+                new_ids.append(nid)
+                briefs[nid] = str(a.get("brief") or "")[:500]
+            by_id = {s["section_id"]: s for s in sections}
+            body_ids = [s["section_id"] for s in sections if s["section_id"] != "references"]
+            ids = [i for i in ids if i in by_id]
+            if glob:
+                ids = body_ids
+            ids += [i for i in new_ids if i not in ids]
+
+            if not ids and not rems:
+                names = ", ".join(by_id[i]["title"] for i in body_ids)
+                msg_txt = f"I couldn't tell which section you mean. Name one of: {names}."
+                _log_turn(art, req.instruction, "nochange", msg_txt, [])
+                _persist(db, msg, art)
+                yield sse_event("refine_done", status="nochange", changed=[], summary=msg_txt)
+                finished = True
+                yield sse_event("done")
+                return
+
+            yield sse_event("refine_plan",
+                            sections=[{"section_id": i, "title": by_id[i]["title"]} for i in ids])
+
             llm = get_llm(temperature=0, task="strong")
             allowed = ", ".join(texts_by_id.keys()) or "none"
-            changed = []
+
             for sid in ids:
                 if cancellation.is_cancelled(req.request_id):
-                    yield sse_event("cancelled")
-                    return
-                sec = next(s for s in sections if s["section_id"] == sid)
-                prompt = (
-                    f"REPORT TITLE: {art.get('title','')}\nSECTION: {sec['title']}\n"
-                    f"CURRENT CONTENT:\n{sec['content']}\n\n"
-                    f"USER INSTRUCTION: {req.instruction}\n\n"
-                    f"Rewrite ONLY this section to satisfy the instruction.\n"
-                    f"Keep every user-provided number exactly as written. "
-                    f"Keep citation markers [N] only with N in {{{allowed}}}; cite only what the source states. "
-                    f"Markdown only, no heading, no <think>.")
+                    cancelled = True
+                    break
+                sec = by_id[sid]
+                yield sse_event("progress", label=f"Rewriting {sec['title']}")
+                before = sec["content"]
+
+                is_new = sid in briefs
+                if is_new:
+                    prompt = (
+                        f"REPORT TITLE: {art.get('title','')}\nNEW SECTION: {sec['title']}\nPURPOSE: {briefs[sid]}\n"
+                        f"OTHER SECTIONS:\n{listing}\n\n{ctx_block}USER INSTRUCTION: {req.instruction}\n\n"
+                        f"Write this new section only. Keep every user-provided number exactly as written. "
+                        f"Keep citation markers [N] only with N in {{{allowed}}}. Markdown only, no heading, no <think>.")
+                else:
+                    prompt = (
+                        f"REPORT TITLE: {art.get('title','')}\nSECTION: {sec['title']}\n"
+                        f"CURRENT CONTENT:\n{before}\n\n{ctx_block}"
+                        f"USER INSTRUCTION: {req.instruction}\n\n"
+                        f"Rewrite ONLY this section to satisfy the instruction. "
+                        f"The result MUST visibly differ from the current content; never return it unchanged.\n"
+                        f"Keep every user-provided number exactly as written. "
+                        f"Keep citation markers [N] only with N in {{{allowed}}}; cite only what the source states. "
+                        f"Markdown only, no heading, no <think>.")
                 try:
                     raw = await asyncio.to_thread(
                         llm.invoke,
@@ -490,26 +718,49 @@ async def report_refine_stream(request: Request, req: ReportRefineRequest,
                     new = (raw.content or "").strip()
                 except Exception as e:
                     log_print(f"[refine] section {sid} failed: {type(e).__name__}: {e}")
+                    skipped.append({"section_id": sid, "title": sec["title"], "reason": "failed"})
                     continue
                 if len(new.split()) < 15:
+                    skipped.append({"section_id": sid, "title": sec["title"], "reason": "too_short"})
                     continue
                 if texts_by_id:
-                    new, drops = ground_text(new, texts_by_id, None,
-                                             numeric_check=getattr(settings, "GROUNDING_NUMERIC_CHECK_ENABLED", True),
-                                             extra_text=extra)
+                    new, _ = ground_text(new, texts_by_id, None,
+                                         numeric_check=getattr(settings, "GROUNDING_NUMERIC_CHECK_ENABLED", True),
+                                         extra_text=extra)
+                if _norm(new) == _norm(before):
+                    skipped.append({"section_id": sid, "title": sec["title"], "reason": "unchanged"})
+                    continue
+
                 sec["content"] = new
-                changed.append(sid)
-                yield sse_event("report_section", section_id=sid,
-                                title=sec["title"], markdown=new, final=True)
+                sec.pop("html", None)
+                info = {"section_id": sid, "title": sec["title"],
+                        "words_before": _wc(before), "words_after": _wc(new)}
+                changed.append(info)
+                yield sse_event("report_section", section_id=sid, title=sec["title"], markdown=new, final=True)
+
+            status, summary = _refine_outcome(changed, skipped)
+            if cancelled:
+                summary = "Stopped. " + (summary if changed else "No changes were saved.")
+            
+            sections[:] = [s for s in sections if s["section_id"] not in new_ids or s["content"].strip()]
+            status, summary = _refine_outcome(changed, skipped)
+            if rem_titles:
+                summary += f" Removed {', '.join(rem_titles)}."
+                status = "done"
+            art["sections"] = sections           
+            _log_turn(art, req.instruction, status, summary, changed)
+            answer = _persist(db, msg, art)     
+            if new_ids or rems:
+                yield sse_event("report_structure",
+                                sections=[{"section_id": s["section_id"], "title": s["title"]} for s in sections])
+                                
+            if cancelled:
+                yield sse_event("refine_done", status=status, changed=changed, summary=summary)
+                yield sse_event("cancelled")
+                return
             if changed:
-                answer = _rebuild_answer(art)
-                cit2 = dict(msg.citations or {})
-                cit2["report_artifact"] = art
-                _update_message(db, msg, answer, citations=cit2)
-                yield sse_event("result", payload={"answer": answer, "changed": changed})
-            else:
-                yield sse_event("error", message="No section could be rewritten for that instruction.")
-            finished = True
+                yield sse_event("result", payload={"answer": answer, "changed": [c["section_id"] for c in changed]})
+            yield sse_event("refine_done", status=status, changed=changed, summary=summary)
             yield sse_event("done")
         finally:
             cancellation.cleanup(req.request_id)
@@ -542,3 +793,19 @@ def _rebuild_answer(art: dict) -> str:
     for s in art.get("sections") or []:
         parts.append(f"## {s.get('title')}\n\n{s.get('content')}\n")
     return "\n".join(parts).strip()
+
+
+def _log_turn(art: dict, instruction: str, status: str, summary: str, changed: list[dict]) -> None:
+    log = list(art.get("refine_log") or [])[-49:]
+    log.append({"instruction": instruction, "status": status, "summary": summary,
+                "changed": changed, "ts": datetime.now(timezone.utc).isoformat()})
+    art["refine_log"] = log
+
+def _persist(db, msg, art: dict) -> str:
+    answer = _rebuild_answer(art)
+    cit = dict(msg.citations or {})
+    cit["report_artifact"] = art
+    _update_message(db, msg, answer, citations=cit)
+    return answer
+
+    

@@ -144,7 +144,7 @@ MODULE_LIBRARY = {
         "purpose": "State limitations, missing evidence, scope constraints, and caveats.",
         "evidence_policy": "first_principles_allowed",
         "requires_citations": False,
-        "always": False,          # ← no longer forced
+        "always": False,     
     },
     "references": {
         "title": "References",

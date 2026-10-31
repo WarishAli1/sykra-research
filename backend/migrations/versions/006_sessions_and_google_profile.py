@@ -24,7 +24,6 @@ def upgrade():
     op.create_foreign_key("fk_library_papers_session_id", "library_papers", "research_sessions", ["session_id"], ["id"], ondelete="CASCADE")
     op.create_index("ix_library_papers_session_id", "library_papers", ["session_id"])
 
-    # Preserve pre-session data by placing each user's existing records in one owned session.
     op.execute("""
         INSERT INTO research_sessions (id, external_id, user_id, name)
         SELECT gen_random_uuid(), 'default-' || u.id::text, u.id, 'My Session'

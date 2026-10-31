@@ -5,8 +5,10 @@ Answer markdown -> HTML -> headless Chromium (Playwright) + vendored MathJax
 runs and restored AFTER, so markdown can never corrupt LaTeX.
 """
 import base64
+import html as html_lib
 import os
 import re
+from html.parser import HTMLParser
 import markdown as md_lib
 from playwright.sync_api import sync_playwright
 from app.utils.text_sanitizer import sanitize_for_web
@@ -129,14 +131,161 @@ def _build_references_html(references: list[dict] | None, inline_refs: str | Non
     return ""
 
 
+_ALLOWED_TAGS = {
+    "p", "br", "strong", "b", "em", "i", "u", "s", "span", "ul", "ol", "li",
+    "h1", "h2", "h3", "h4", "h5", "h6", "table", "thead", "tbody", "tr", "th", "td",
+    "blockquote", "code", "pre", "hr", "sup", "sub", "a",
+}
+_VOID_TAGS = {"br", "hr"}
+_DROP_CONTENT = {"script", "style", "iframe", "object", "embed", "noscript", "template", "svg", "math"}
+_STYLE_TAGS = {"p", "span", "li", "th", "td", "h1", "h2", "h3", "h4", "h5", "h6"}
+_STYLE_RULES = {
+    "font-family": re.compile(r"^[\w\s,'\"-]{1,80}$"),
+    "font-size": re.compile(r"^\d{1,3}(\.\d+)?(pt|px|em|%)$"),
+    "line-height": re.compile(r"^\d{1,2}(\.\d+)?(pt|px|em|%)?$"),
+    "font-weight": re.compile(r"^(normal|bold|[1-9]00)$"),
+    "text-align": re.compile(r"^(left|right|center|justify)$"),
+    "text-decoration": re.compile(r"^(none|underline|line-through)$"),
+    "color": re.compile(r"^(#[0-9a-fA-F]{3,8}|[a-zA-Z]{3,20})$"),
+}
+
+
+def _clean_style(value: str) -> str:
+    out = []
+    for decl in (value or "").split(";"):
+        if ":" not in decl:
+            continue
+        k, v = decl.split(":", 1)
+        k, v = k.strip().lower(), v.strip()
+        rule = _STYLE_RULES.get(k)
+        if rule and rule.match(v):
+            out.append(f"{k}:{v}")
+    return ";".join(out)
+
+
+class _Sanitizer(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out: list[str] = []
+        self.stack: list[str] = []
+        self.skip = 0
+
+    @staticmethod
+    def _attrs(tag, attrs):
+        d = {(k or "").lower(): (v or "") for k, v in attrs}
+        parts = []
+        if tag in _STYLE_TAGS:
+            st = _clean_style(d.get("style", ""))
+            if st:
+                parts.append(f'style="{html_lib.escape(st, quote=True)}"')
+        if tag in ("td", "th"):
+            for k in ("colspan", "rowspan"):
+                if re.fullmatch(r"[0-9]{1,2}", d.get(k, "")):
+                    parts.append(f'{k}="{d[k]}"')
+        if tag == "a":
+            href = d.get("href", "").strip()
+            if re.match(r"^(https?://|mailto:|#)", href, re.I):
+                parts.append(f'href="{html_lib.escape(href, quote=True)}" target="_blank" rel="noopener noreferrer"')
+        return (" " + " ".join(parts)) if parts else ""
+
+    def handle_starttag(self, tag, attrs):
+        if self.skip:
+            if tag in _DROP_CONTENT:
+                self.skip += 1
+            return
+        if tag in _DROP_CONTENT:
+            self.skip = 1
+            return
+        if tag not in _ALLOWED_TAGS:
+            return
+        self.out.append(f"<{tag}{self._attrs(tag, attrs)}>")
+        if tag not in _VOID_TAGS:
+            self.stack.append(tag)
+
+    def handle_startendtag(self, tag, attrs):
+        if tag in _DROP_CONTENT:
+            return
+        self.handle_starttag(tag, attrs)
+        if tag in _ALLOWED_TAGS and tag not in _VOID_TAGS and not self.skip:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag):
+        if self.skip:
+            if tag in _DROP_CONTENT:
+                self.skip -= 1
+            return
+        if tag in _VOID_TAGS or tag not in self.stack:
+            return
+        while self.stack:
+            t = self.stack.pop()
+            self.out.append(f"</{t}>")
+            if t == tag:
+                break
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.out.append(html_lib.escape(data, quote=False))
+
+
+def sanitize_report_html(raw: str | None) -> str:
+    """Allow-list sanitizer: safe tags, a handful of typographic style properties, nothing else."""
+    if not raw:
+        return ""
+    p = _Sanitizer()
+    p.feed(raw)
+    p.close()
+    while p.stack:
+        p.out.append(f"</{p.stack.pop()}>")
+    return "".join(p.out)
+
+
+_P_WRAP = re.compile(r"^\s*<p([^>]*)>(.*)</p>\s*$", re.S)
+
+
+def _heading_html(title_html: str | None, title: str, tag: str, extra_attrs: str = "") -> str:
+    """Single-paragraph editor html -> <h1>/<h2> carrying the same inline formatting."""
+    clean = sanitize_report_html(title_html)
+    m = _P_WRAP.match(clean) if clean else None
+    if m:
+        return f"<{tag}{extra_attrs}{m.group(1)}>{m.group(2)}</{tag}>"
+    return f"<{tag}{extra_attrs}>{html_lib.escape(title or '')}</{tag}>"
+
+
+def _sections_body_html(sections: list[dict]) -> str:
+    parts = []
+    for s in sections:
+        head = _heading_html(s.get("title_html"), s.get("title") or "", "h2")
+        if s.get("html"):
+            body = _normalize_citations(sanitize_report_html(s["html"]))
+        else:
+            md = _normalize_citations(_strip_disclaimer(s.get("markdown") or ""))
+            body = markdown_to_html(sanitize_for_web(md))
+        parts.append(f"<section>{head}{body}</section>")
+    return "".join(parts)
+
+
 def render_answer_pdf(
     answer: str,
     title: str,
     references: list[dict] | None = None,
     chart_path: str | None = None,
     latex_style: bool = False,
+    sections: list[dict] | None = None,
+    title_html: str | None = None,
 ) -> bytes:
-    """Main entry point: answer markdown -> branded PDF bytes."""
+    """Main entry point: answer markdown -> branded PDF bytes.
+
+    When `sections` is given, each section is rendered from its stored formatted
+    html (falling back to markdown), and the title / headings keep their own formatting.
+    """
+    if sections:
+        nice_title = (title or "").strip() or "Research Report"
+        body_html = _sections_body_html(sections)
+        refs_html = _build_references_html(references, None)
+        title_block = _heading_html(title_html, nice_title, "h1", ' class="report-title"')
+        html_doc = build_pdf_html(body_html + refs_html, title=nice_title, latex_style=latex_style,
+                                  title_block=title_block, exact_title=True)
+        return _print_html_to_pdf(html_doc, nice_title)
     answer = _strip_disclaimer(answer)
     body, inline_refs = _split_answer_and_references(answer)
     body = _normalize_citations(body)

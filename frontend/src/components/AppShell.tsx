@@ -3,9 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import {
-  ChevronsLeft,
-  ChevronsRight,
-  Library,
+  PanelLeft,
+  LibraryBig,
   Network,
   ArrowLeft,
   Plus,
@@ -15,6 +14,7 @@ import {
   Pencil,
   Pin,
   FileText,
+  PanelRight,
 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
@@ -525,7 +525,7 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                 aria-label="Collapse sidebar"
                 className="ml-auto flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-ink-soft hover:bg-paper hover:text-ink transition-colors"
               >
-                <ChevronsLeft className="h-3.5 w-3.5" />
+                <PanelLeft className="h-3.5 w-3.5" />
               </button>
             </div>
 
@@ -551,7 +551,7 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                       : "text-ink-soft hover:bg-paper hover:text-ink"
                   }`}
                 >
-                  <Library className="h-3.5 w-3.5 shrink-0" />
+                  <LibraryBig className="h-3.5 w-3.5 shrink-0" />
                   Library
                   {papers.length > 0 && (
                     <span className="ml-auto rounded-full bg-paper px-1.5 py-0 text-micro text-ink-soft">
@@ -625,7 +625,7 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                 title="Expand sidebar"
                 className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-soft hover:bg-paper hover:text-ink transition-colors"
               >
-                <ChevronsRight className="h-4 w-4" />
+                <PanelLeft className="h-4 w-4" />
               </button>
             </div>
 
@@ -669,7 +669,7 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                 />
               )}
 
-              <Library className="h-4 w-4" />
+              <LibraryBig className="h-4 w-4" />
 
               {papers.length > 0 && (
                 <span
@@ -833,7 +833,7 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                     aria-label="Collapse panel"
                     className="flex h-6 w-6 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink"
                   >
-                    <ChevronsRight className="h-3.5 w-3.5" />
+                    <PanelRight className="h-3.5 w-3.5" />
                   </button>
                 </div>
                 <div className="flex-1 min-h-0">
@@ -858,7 +858,7 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                   aria-label="Expand panel"
                   className="flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink mb-1"
                 >
-                  <ChevronsLeft className="h-3.5 w-3.5" />
+                  <PanelRight className="h-3.5 w-3.5" />
                 </button>
                 <button
                   onClick={() => {
@@ -868,7 +868,7 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                   aria-label="Open library"
                   className="relative flex h-8 w-8 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink"
                 >
-                  <Library className="h-4 w-4" />
+                  <LibraryBig className="h-4 w-4" />
                   {papers.length > 0 && (
                     <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-accent" />
                   )}

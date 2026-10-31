@@ -185,7 +185,8 @@ def _llm_review(state, sections) -> list[dict]:
 def report_validate_node(state: AgentState) -> AgentState:
     sections = state.get("section_outputs") or []
     papers = state.get("ranked_papers") or []
-    evidence = "  ".join((p.get("summary") or p.get("text") or " ") for p in papers[:8])
+    evidence = "  ".join((p.get("summary") or p.get("text") or " ")
+                     for p in papers[:int(settings.REPORT_EVIDENCE_PAPERS)])
 
     disc = " ".join(d.get("description", "") for d in state.get("report_discrepancies") or [])
     issues = validate_report(sections, state.get("report_source_records") or [],

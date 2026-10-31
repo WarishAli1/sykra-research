@@ -302,6 +302,8 @@ export interface PdfExportRequest {
   title?: string;
   turn_id?: string;
   chart_path?: string;
+  title_html?: string | null;
+  sections?: { title: string; title_html?: string | null; html?: string | null; markdown: string }[];
 }
 
 export type StudioVisualType = "chart" | "flowchart" | "dfd" | "architecture" | "diagram";
@@ -525,22 +527,31 @@ export type ReportStructureDraft = {
   analysis: ReportAnalysis; structure_source: string; standard_used?: string | null;
   sections: ReportStructureSection[]; notes: string[];
 };
-export type ReportRunSection = { section_id: string; title: string; content: string; confidence?: string };
+export type ReportRunSection = {
+  section_id: string; title: string; content: string; confidence?: string;
+  html?: string | null; title_html?: string | null;
+};
 
 
 export type ReportRunResult = {
   turn_id: string; chat_id: string; message_id: string; title: string; answer: string;
   references: ReferenceEntry[]; sections: ReportRunSection[]; papers: Paper[];
-  method_note?: string | null; disclaimer?: string | null;
+  method_note?: string | null; disclaimer?: string | null; title_html?: string | null;
 };
 
 
+export type RefineSection = { section_id: string; title: string; words_before?: number; words_after?: number };
+export type RefineStatus = "done" | "nochange" | "failed";
+
 export type ReportStreamEvent =
   | { type: "progress"; label: string; stage?: string; detail?: string; items?: string[] }
+  | { type: "refine_plan"; sections: RefineSection[] }
   | { type: "report_section"; section_id: string; title?: string; markdown: string; final: boolean }
+  | { type: "refine_done"; status: RefineStatus; changed: RefineSection[]; summary: string }
   | { type: "result"; payload: ReportRunResult | { answer: string; changed: string[] } }
   | { type: "filename"; filename: string }
-  | { type: "done" } | { type: "cancelled" } | { type: "error"; message: string };
+  | { type: "done" } | { type: "cancelled" } | { type: "error"; message: string }
+  | { type: "report_structure"; sections: { section_id: string; title: string }[] };
 
 
 export type ReportArtifact = {
@@ -548,5 +559,15 @@ export type ReportArtifact = {
   sections: ReportRunSection[]; references: ReferenceEntry[];
   sources: { id: number; title: string; excerpt: string }[];
   records: ReportRecord[]; evidence_mode: EvidenceMode; report_type?: string | null;
-  paper_links: string[]; analysis?: ReportAnalysis | null;
+  paper_links: string[]; analysis?: ReportAnalysis | null; title_html?: string | null;
+  refine_log?: { instruction: string; status: RefineStatus; summary: string; changed: RefineSection[]; ts: string }[];
+};
+
+
+export type ReportListItem = {
+  chat_id: string;
+  message_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
 };

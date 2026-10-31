@@ -123,7 +123,7 @@ def extract_records(source_text: str) -> tuple[list[dict], list[dict]]:
             kept.append(d)
 
     ids = {r["id"] for r in kept}
-    for r in kept:                               # drop dangling refs
+    for r in kept:                            
         for ref in ("numerator_ref", "denominator_ref"):
             if r.get(ref) and r[ref] not in ids:
                 r[ref] = None
@@ -255,7 +255,7 @@ def _build_evidence_ledger(
         )
 
     papers = state.get("ranked_papers") or []
-    for i, p in enumerate(papers[:8]):
+    for i, p in enumerate(papers[:int(settings.REPORT_EVIDENCE_PAPERS)]):
         source = str(p.get("source") or "").lower()
         category = "uploaded_document" if source in ("user_upload", "uploaded") else "literature"
         title = str(p.get("title") or "Uploaded document")[:180]

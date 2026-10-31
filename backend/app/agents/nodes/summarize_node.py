@@ -3823,7 +3823,6 @@ def summarize_node(state: AgentState) -> AgentState:
         target_k=state.get("target_paper_k"),
     )
 
-    # TEMP DEBUG: remove once citations look right.
     _n = lambda t: len(re.findall(r"\[paper_id=\d+\]", t or ""))
     print(
         "[cite-debug] markers per section:",
