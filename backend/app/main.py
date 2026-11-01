@@ -23,6 +23,7 @@ from app.api.routes import (
     filename as filename_route,
     sessions,
     avatar,
+    diagrams,
 )
 from app.config import settings
 from app.db.database import create_tables
@@ -113,6 +114,7 @@ app.include_router(research.router, prefix="/api", dependencies=protected)
 app.include_router(filename_route.router, prefix="/api", dependencies=protected)
 app.include_router(export.router, prefix="/api", dependencies=protected)
 app.include_router(studio_router, prefix="/api/studio", tags=["studio"], dependencies=protected)
+app.include_router(diagrams.router, prefix="/api/diagrams", tags=["diagrams"], dependencies=protected)
 app.include_router(report_router, prefix="/api", dependencies=protected)
 app.mount("/exports", StaticFiles(directory="exports"), name="exports")
 
