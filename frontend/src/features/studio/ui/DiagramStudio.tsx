@@ -11,6 +11,7 @@ import {
   applyEdgeChanges,
   applyNodeChanges,
   useEdgesState,
+  useReactFlow,
   useNodesState,
   type Connection,
   type Edge,
@@ -45,6 +46,9 @@ import {
 import { migrateDiagramDocument } from "../core/migrations";
 import { documentToSvg, exportPng, type ExportOptions } from "../core/export";
 import { diagramApi } from "@/lib/diagram-api";
+import { applyCommand, type DiagramCommand } from "../core/commands";
+import { loadDiagramType } from "../registry/registry";
+import type { DiagramIssue, DiagramTypeDefinition, PaletteItem } from "../registry/definition";
 
 type EditorNode = Node<{ label: string; kind: DiagramNode["type"] }>;
 
@@ -82,6 +86,10 @@ function DiagramStudioInner({ sessionId, initialDocument, onChange }: { sessionI
   const [history, setHistory] = useState<DiagramDocument[]>([]);
   const [future, setFuture] = useState<DiagramDocument[]>([]);
   const [exportOptions, setExportOptions] = useState<ExportOptions>({ background: "light", scale: 1 });
+  const [definition, setDefinition] = useState<DiagramTypeDefinition>();
+  const [issues, setIssues] = useState<DiagramIssue[]>([]);
+  const [showIssues, setShowIssues] = useState(false);
+  const flow = useReactFlow();
   const handleNodesChange: OnNodesChange<EditorNode> = (changes) => {
     const nextNodes = applyNodeChanges(changes, nodes);
     onNodesChange(changes);
@@ -94,6 +102,24 @@ function DiagramStudioInner({ sessionId, initialDocument, onChange }: { sessionI
   };
   const handleNodeClick: NodeMouseHandler<EditorNode> = (_, node) => setSelectedId(node.id);
 
+  useEffect(() => {
+    let active = true;
+    void loadDiagramType(page.diagramType).then((loaded) => {
+      if (active) setDefinition(loaded);
+    }).catch(() => {
+      if (active) setIssues([{ id: "plugin-load", severity: "error", message: "This diagram type could not be loaded.", targetIds: [], ruleId: "plugin-load" }]);
+    });
+    return () => { active = false; };
+  }, [page.diagramType]);
+
+  useEffect(() => {
+    if (!definition) return;
+    const timer = window.setTimeout(() => {
+      setIssues(definition.validateDocument(document).filter((issue) => !document.dismissedIssues.includes(issue.id)));
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [definition, document]);
+
   const commit = useCallback((nextNodes: Node[], nextEdges: Edge[]) => {
     const nextPage = {
       ...page,
@@ -103,7 +129,7 @@ function DiagramStudioInner({ sessionId, initialDocument, onChange }: { sessionI
         position: node.position,
         label: String(node.data?.label ?? "Untitled"),
       })),
-      edges: nextEdges.map(({ id, source, target, label }) => ({ id, source, target, ...(typeof label === "string" ? { label } : {}) })),
+      edges: nextEdges.map(({ id, source, target, label, type }) => ({ id, source, target, ...(typeof label === "string" ? { label } : {}), ...(typeof type === "string" ? { type } : {}) })),
     };
     const nextDocument = { ...document, pages: document.pages.map((item) => item.id === page.id ? nextPage : item), updatedAt: new Date().toISOString() };
     setDocument(nextDocument);
@@ -156,7 +182,7 @@ function DiagramStudioInner({ sessionId, initialDocument, onChange }: { sessionI
       id,
       type: "studio",
       position: { x: 180 + nodes.length * 24, y: 120 + nodes.length * 24 },
-      data: { kind, label: palette.find((item) => item.type === kind)?.label ?? "Untitled" },
+      data: { kind, label: paletteItems.find((item) => item.nodeType === kind)?.label ?? "Untitled" },
     };
     const nextNodes = [...nodes, nextNode];
     setNodes(nextNodes);
@@ -172,6 +198,21 @@ function DiagramStudioInner({ sessionId, initialDocument, onChange }: { sessionI
     setEdges(nextEdges);
     setSelectedId(undefined);
     commit(nextNodes, nextEdges);
+  };
+
+  const replaceDocument = (nextDocument: DiagramDocument) => {
+    const nextPage = nextDocument.pages.find((item) => item.id === nextDocument.activePageId) ?? nextDocument.pages[0];
+    setDocument(nextDocument);
+    setNodes(toFlowNodes(nextPage.nodes));
+    setEdges(nextPage.edges);
+    setHistory((items) => [...items.slice(-19), document]);
+    setFuture([]);
+    setSaveState("saving");
+    onChange?.(validateDiagramDocument(nextDocument));
+  };
+
+  const executeCommand = (command: DiagramCommand) => {
+    replaceDocument(applyCommand(document, command));
   };
 
   const restore = (next: DiagramDocument, previous: DiagramDocument[], nextFuture: DiagramDocument[]) => {
@@ -196,7 +237,8 @@ function DiagramStudioInner({ sessionId, initialDocument, onChange }: { sessionI
     restore(next, [...history, document], future.slice(1));
   };
 
-  const filteredPalette = useMemo(() => palette.filter((item) => item.label.toLowerCase().includes(query.toLowerCase())), [query]);
+  const paletteItems: PaletteItem[] = definition?.palette.flatMap((group) => group.items) ?? palette.map((item) => ({ id: item.type, label: item.label, nodeType: item.type }));
+  const filteredPalette = paletteItems.filter((item) => item.label.toLowerCase().includes(query.toLowerCase()) && item.nodeType);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-paper text-ink">
@@ -206,6 +248,7 @@ function DiagramStudioInner({ sessionId, initialDocument, onChange }: { sessionI
         <button className="studio-tool disabled:opacity-30" aria-label="Undo" disabled={!history.length} onClick={undo}><Undo2 className="h-4 w-4" /></button>
         <button className="studio-tool disabled:opacity-30" aria-label="Redo" disabled={!future.length} onClick={redo}><Redo2 className="h-4 w-4" /></button>
         <button className="studio-tool" aria-label="Delete selected" onClick={deleteSelected}><Trash2 className="h-4 w-4" /></button>
+        <button className={`studio-tool ${issues.length ? "text-danger" : ""}`} aria-label="Toggle issues" onClick={() => setShowIssues((value) => !value)}><span className="text-[10px] font-bold">{issues.length || ""}!</span></button>
         <span className="mx-1 h-5 w-px bg-line" />
         <button className="studio-tool" aria-label="Zoom out"><Minus className="h-4 w-4" /></button>
         <button className="studio-tool" aria-label="Zoom in"><Plus className="h-4 w-4" /></button>
@@ -215,18 +258,19 @@ function DiagramStudioInner({ sessionId, initialDocument, onChange }: { sessionI
         <aside className="flex w-56 shrink-0 flex-col border-r border-line bg-white">
           <label className="m-3 flex items-center gap-2 rounded-lg border border-line px-2.5 py-2"><Search className="h-4 w-4 text-ink-soft" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search shapes" className="min-w-0 bg-transparent text-xs outline-none" /></label>
           <button className="flex items-center gap-2 px-4 py-2 text-left text-xs font-semibold" onClick={() => setOpenPalette((value) => !value)}>{openPalette ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />} Flowchart</button>
-          {openPalette && <div className="space-y-2 px-3">{filteredPalette.map((item) => <button key={item.type} onClick={() => addNode(item.type)} className={`flex w-full items-center gap-2 rounded-lg border border-line px-3 py-2 text-left text-xs hover:border-indigo ${item.color}`}><span className="h-5 w-5 rounded border border-current/30" />{item.label}</button>)}</div>}
+          {openPalette && <div className="space-y-2 px-3">{filteredPalette.map((item) => <button key={item.id} onClick={() => addNode(item.nodeType!)} className="flex w-full items-center gap-2 rounded-lg border border-line bg-white px-3 py-2 text-left text-xs hover:border-indigo"><span className="h-5 w-5 rounded border border-current/30" />{item.label}</button>)}</div>}
           <div className="mt-auto border-t border-line p-3 text-xs text-ink-soft"><p className="font-semibold text-ink">Tip</p><p className="mt-1 leading-5">Click a shape to add it, then drag between handles to connect nodes.</p></div>
         </aside>
-        <main className="min-w-0 flex-1">
+        <main className="relative min-w-0 flex-1">
           <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={handleNodesChange} onEdgesChange={handleEdgesChange} onConnect={onConnect} onNodeClick={handleNodeClick} onPaneClick={() => setSelectedId(undefined)} fitView>
             <Background color="var(--line)" gap={20} size={1} />
             <Controls />
           </ReactFlow>
+          {showIssues && <section aria-label="Diagram issues" className="absolute bottom-4 left-4 z-10 max-h-64 w-80 overflow-y-auto rounded-xl border border-line bg-white p-3 shadow-xl"><div className="flex items-center justify-between"><h2 className="font-semibold text-sm">Issues</h2><span className="text-xs text-ink-soft">{issues.length} active</span></div>{issues.length === 0 ? <p className="mt-2 text-xs text-ink-soft">No issues found.</p> : <ul className="mt-2 space-y-2">{issues.map((issue) => <li key={issue.id} className="rounded-lg border border-line p-2 text-xs"><button className={`text-left ${issue.severity === "error" ? "text-danger" : "text-ink"}`} onClick={() => { const target = nodes.find((node) => issue.targetIds.includes(node.id)); if (target) { setSelectedId(target.id); flow.setCenter(target.position.x, target.position.y, { zoom: 1.1, duration: 250 }); } }}>{issue.message}</button><div className="mt-1 flex gap-2">{issue.quickFix && <button className="font-semibold text-indigo" onClick={() => executeCommand(issue.quickFix!.command)}>Fix</button>}<button className="text-ink-soft" onClick={() => executeCommand({ type: "dismiss-issue", issueId: issue.id })}>Dismiss</button></div></li>)}</ul>}</section>}
         </main>
         <aside className="hidden w-64 shrink-0 border-l border-line bg-white p-4 lg:block"><p className="text-label text-ink-soft">Format</p><h2 className="mt-2 font-serif text-xl">{selectedId ? "Selected shape" : "No selection"}</h2><p className="mt-2 text-xs leading-5 text-ink-soft">{selectedId ? "Use the handles to connect this shape or delete it from the toolbar." : "Select a shape to inspect and edit its properties."}</p></aside>
       </div>
-      <div className="flex shrink-0 items-center gap-2 border-t border-line bg-white px-3 py-2 text-xs"><button className="rounded-md bg-indigo-tint px-3 py-1.5 font-medium">Page 1</button><button className="rounded-md p-1.5 text-ink-soft hover:bg-paper" aria-label="Add page"><Plus className="h-4 w-4" /></button></div>
+      <div className="flex shrink-0 items-center gap-2 border-t border-line bg-white px-3 py-2 text-xs"><button className="rounded-md bg-indigo-tint px-3 py-1.5 font-medium">Page 1</button><span className="ml-auto text-ink-soft">{issues.length} issue{issues.length === 1 ? "" : "s"}</span><button className="rounded-md p-1.5 text-ink-soft hover:bg-paper" aria-label="Add page"><Plus className="h-4 w-4" /></button></div>
     </div>
   );
 }
