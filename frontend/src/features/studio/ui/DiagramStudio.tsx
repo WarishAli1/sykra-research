@@ -42,6 +42,8 @@ import {
   type DiagramNode,
   validateDiagramDocument,
 } from "../core/document";
+import { migrateDiagramDocument } from "../core/migrations";
+import { documentToSvg, exportPng, type ExportOptions } from "../core/export";
 import { diagramApi } from "@/lib/diagram-api";
 
 type EditorNode = Node<{ label: string; kind: DiagramNode["type"] }>;
@@ -79,6 +81,7 @@ function DiagramStudioInner({ sessionId, initialDocument, onChange }: { sessionI
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
   const [history, setHistory] = useState<DiagramDocument[]>([]);
   const [future, setFuture] = useState<DiagramDocument[]>([]);
+  const [exportOptions, setExportOptions] = useState<ExportOptions>({ background: "light", scale: 1 });
   const handleNodesChange: OnNodesChange<EditorNode> = (changes) => {
     const nextNodes = applyNodeChanges(changes, nodes);
     onNodesChange(changes);
@@ -133,7 +136,7 @@ function DiagramStudioInner({ sessionId, initialDocument, onChange }: { sessionI
     void diagramApi.list(sessionId).then((result) => {
       const latest = result.documents[0];
       if (!latest) return;
-      const parsed = validateDiagramDocument(latest.document);
+      const parsed = migrateDiagramDocument(latest.document);
       setDocument(parsed);
       setSavedId(latest.id);
       setNodes(toFlowNodes(parsed.pages[0].nodes));
@@ -206,7 +209,7 @@ function DiagramStudioInner({ sessionId, initialDocument, onChange }: { sessionI
         <span className="mx-1 h-5 w-px bg-line" />
         <button className="studio-tool" aria-label="Zoom out"><Minus className="h-4 w-4" /></button>
         <button className="studio-tool" aria-label="Zoom in"><Plus className="h-4 w-4" /></button>
-        <div className="ml-auto flex items-center gap-3 text-xs text-ink-soft"><span>{saveState === "saving" ? "Saving..." : saveState === "error" ? "Save failed" : "Saved"}</span><button className="studio-tool" aria-label="Export document" onClick={() => downloadJson(document)}><Download className="h-4 w-4" /></button><button className="rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white" onClick={() => setSaveState("saving")}><Save className="mr-1 inline h-3.5 w-3.5" /> Save</button></div>
+        <div className="ml-auto flex items-center gap-2 text-xs text-ink-soft"><span>{saveState === "saving" ? "Saving..." : saveState === "error" ? "Save failed" : "Saved"}</span><select aria-label="Export background" value={exportOptions.background} onChange={(event) => setExportOptions({ ...exportOptions, background: event.target.value as ExportOptions["background"] })} className="rounded border border-line bg-white px-1.5 py-1"><option value="light">Light</option><option value="dark">Dark</option><option value="transparent">Transparent</option></select><select aria-label="Export scale" value={exportOptions.scale} onChange={(event) => setExportOptions({ ...exportOptions, scale: Number(event.target.value) as ExportOptions["scale"] })} className="rounded border border-line bg-white px-1.5 py-1"><option value="1">1x</option><option value="2">2x</option><option value="3">3x</option><option value="4">4x</option></select><button className="studio-tool" aria-label="Export SVG" onClick={() => downloadBlob(new Blob([documentToSvg(document, exportOptions)], { type: "image/svg+xml" }), "svg")}><Download className="h-4 w-4" /></button><button className="studio-tool" aria-label="Export PNG" onClick={() => void exportPng(document, exportOptions).then((blob) => downloadBlob(blob, "png"))}><span className="text-[10px] font-bold">PNG</span></button><button className="studio-tool" aria-label="Export JSON" onClick={() => downloadJson(document)}><span className="text-[10px] font-bold">JSON</span></button><button className="rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white" onClick={() => setSaveState("saving")}><Save className="mr-1 inline h-3.5 w-3.5" /> Save</button></div>
       </div>
       <div className="flex min-h-0 flex-1">
         <aside className="flex w-56 shrink-0 flex-col border-r border-line bg-white">
@@ -242,6 +245,15 @@ function downloadJson(document: DiagramDocument) {
   const anchor = window.document.createElement("a");
   anchor.href = url;
   anchor.download = `${document.title.replace(/[^a-z0-9]+/gi, "-").toLowerCase() || "diagram"}.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadBlob(blob: Blob, extension: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = window.document.createElement("a");
+  anchor.href = url;
+  anchor.download = `diagram.${extension}`;
   anchor.click();
   URL.revokeObjectURL(url);
 }
