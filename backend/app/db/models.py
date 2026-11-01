@@ -134,6 +134,26 @@ class ResearchSession(Base):
     __table_args__ = (Index("ix_research_sessions_user_updated", "user_id", "updated_at"),)
 
 
+class DiagramDocument(Base):
+    __tablename__ = "diagram_documents"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    session_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("research_sessions.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(200), default="Untitled flowchart")
+    document: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (Index("ix_diagram_documents_session_updated", "session_id", "updated_at"),)
+
+
 class UploadedFile(Base):
     __tablename__ = "uploaded_files"
 

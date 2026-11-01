@@ -14,6 +14,7 @@ import {
   AlertTriangle,
   Eye,
   EyeOff,
+  Shapes,
 } from "lucide-react";
 import type {
   StudioVisualSpec,
@@ -25,8 +26,9 @@ import { DataInputPanel } from "./DataInputPanel";
 import { SpecEditorPanel } from "./SpecEditorPanel";
 import { PreviewCanvas } from "./PreviewCanvas";
 import { HistoryStrip } from "./HistoryStrip";
+import { DiagramStudio } from "@/features/studio/ui/DiagramStudio";
 
-type StudioMode = "create" | "draft" | "edit" | "browse";
+type StudioMode = "canvas" | "create" | "draft" | "edit" | "browse";
 
 export function StudioView({
   sessionId,
@@ -35,7 +37,7 @@ export function StudioView({
   sessionId: string;
   getConversationContext?: () => StudioConversationContext | null;
 }) {
-  const [mode, setMode] = useState<StudioMode>("create");
+  const [mode, setMode] = useState<StudioMode>("canvas");
   const [currentSpec, setCurrentSpec] = useState<StudioVisualSpec | null>(null);
   const [assetUrl, setAssetUrl] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -143,6 +145,12 @@ export function StudioView({
           {/* Mode Toggle */}
           <div className="flex items-center gap-1 rounded-lg bg-paper-dim p-1">
             <ModeButton
+              active={mode === "canvas"}
+              onClick={() => setMode("canvas")}
+              icon={<Shapes className="h-3.5 w-3.5" />}
+              label="Canvas"
+            />
+            <ModeButton
               active={mode === "create"}
               onClick={() => { setMode("create"); setCurrentSpec(null); setAssetUrl(null); }}
               icon={<Plus className="h-3.5 w-3.5" />}
@@ -168,6 +176,17 @@ export function StudioView({
       {/* ─── Main Content ─── */}
       <div className="flex flex-1 min-h-0">
         <AnimatePresence mode="wait">
+          {mode === "canvas" && (
+            <motion.div
+              key="canvas"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="min-h-0 flex-1"
+            >
+              <DiagramStudio sessionId={sessionId} />
+            </motion.div>
+          )}
           {mode === "create" && (
             <motion.div
               key="create"
