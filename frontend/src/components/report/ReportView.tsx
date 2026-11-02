@@ -7,7 +7,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import katex from "katex";
 import { useEditor, EditorContent, type Editor } from "@tiptap/react";
-import { ArrowRight, ArrowUp, Download, Loader2, Paperclip, Plus, Square, X, History, Trash2, PanelRight, Check, FileText } from "lucide-react";
+import { ArrowRight, ArrowUp, Download, Loader2, Paperclip, SquarePen, Square, X, History, Trash2, PanelRight, Check, FileText } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import type {
   EvidenceMode, ReportPrepareResponse, ReportRecord, ReportStreamEvent, RefineSection,
@@ -16,6 +16,7 @@ import type {
 import { ReportPrepareModal, toConfirmed } from "@/components/ReportPrepareModal";
 import dynamic from "next/dynamic";
 import { UploadPreviewCard } from "@/components/UploadPreviewCard";
+import { UploadMenu } from "@/components/UploadMenu";
 import { ResearchSteps } from "@/components/ResearchSteps";
 import { ReportToolbar } from "@/components/report/ReportToolBar";
 import { RichField } from "@/components/report/RichField";
@@ -96,7 +97,7 @@ function SectionEditor({ initial, initialHtml, onSave, onCancel, onActivate, onR
     if (!editor) return;
     onActivate({ editor, kind: "body" });
     return () => onRelease(editor);
-  }, [editor]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [editor]);
   const save = () => { if (editor) onSave(editorMarkdown(editor), editor.getHTML()); };
   return (
     <div onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) save(); }}
@@ -194,7 +195,7 @@ export function ReportView({ sessionId }: { sessionId: string }) {
   const patchFile = (id: string, patch: Partial<Attached>) =>
     setFiles((p) => p.map((f) => (f.id === id ? { ...f, ...patch } : f)));
 
-  async function addFiles(list: FileList | null) {
+  async function addFiles(list: FileList | File[] | null) {
     if (!list) return;
     for (const f of Array.from(list)) {
       const id = crypto.randomUUID();
@@ -217,7 +218,7 @@ export function ReportView({ sessionId }: { sessionId: string }) {
           if (ev.type === "progress") patchFile(id, { status: "processing", progress: ev.label });
           if (ev.type === "result") { setHasUpload(true); patchFile(id, { status: "done", progress: "Ready" }); }
           if (ev.type === "error") { setError(ev.message); patchFile(id, { status: "error" }); }
-        }, undefined, crypto.randomUUID(), undefined);
+        }, undefined, crypto.randomUUID(), undefined, "report");
       } catch { patchFile(id, { status: "error" }); setError("Upload failed."); } finally { setBusyUpload(false); }
     }
   }
@@ -256,14 +257,14 @@ export function ReportView({ sessionId }: { sessionId: string }) {
     );
   };
 
-  const startRun = useCallback(async (d: ReportStructureDraft, records: ReportRecord[], path?: string) => {
+  const startRun = useCallback(async (d: ReportStructureDraft, records: ReportRecord[], path?: string, runQuery = query, resumeChatId?: string) => {
     setError(null); setRunning(true); setStarted(true);
     setSheet([]); setSteps([]); setResult(null); setFilename(null); setTitleHtml("");
     const controller = new AbortController(); abortRef.current = controller;
     const requestId = crypto.randomUUID(); requestIdRef.current = requestId;
     try {
       await api.reportRunStream({
-        query, session_id: sessionId, request_id: requestId, evidence_mode: evidenceMode,
+        query: runQuery, session_id: sessionId, chat_id: resumeChatId, request_id: requestId, evidence_mode: evidenceMode,
         execution_path: path ?? null, title: title || undefined, guideline_text: guidelineText || null,
         analysis: d.analysis, sections: d.sections,
         confirmed_source_records: records.length ? records : null,
@@ -289,6 +290,18 @@ export function ReportView({ sessionId }: { sessionId: string }) {
       if (!(e instanceof ApiError && e.status === 0)) setError(e instanceof ApiError ? e.message : "Report generation failed.");
     } finally { setRunning(false); abortRef.current = null; requestIdRef.current = null; refreshReports(); }
   }, [query, sessionId, evidenceMode, title, guidelineText, refreshReports]);
+
+  async function resumePaused(item: ReportListItem) {
+    setPage("new");
+    await openReport(item);
+    await startRun(
+      { sections: [{ section_id: "resume", title: "Resume", level: 1 }] } as ReportStructureDraft,
+      [],
+      undefined,
+      "Continue and complete the remaining report sections.",
+      item.chat_id,
+    );
+  }
 
   async function handleGenerate() {
     setError(null); setPlanning(true);
@@ -427,6 +440,12 @@ export function ReportView({ sessionId }: { sessionId: string }) {
     const pending = files.filter((f) => !f.sent && f.status === "done");
     const instruction = chatInput.trim() || (pending.length ? "Use the attached file(s) to improve the report." : "");
     if (!instruction || !meta || refining || running || busyUpload) return;
+    const paused = reports.find((report) => report.chat_id === meta.chatId && report.status === "paused");
+    if (paused && /^(continue|complete|finish|resume)\b/i.test(instruction.trim())) {
+      setChatInput("");
+      await resumePaused(paused);
+      return;
+    }
     const newData = pending.filter((f) => f.kind === "data" && f.text).map((f) => f.text).join("\n\n");
     const newGuide = pending.filter((f) => f.kind === "guideline" && f.text).map((f) => f.text).join("\n\n");
     const hasUp = pending.some((f) => f.kind === "data" && f.url);
@@ -536,7 +555,7 @@ export function ReportView({ sessionId }: { sessionId: string }) {
           </div>
           <button onClick={goNew}
             className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-caption text-ink hover:bg-paper-dim">
-            <Plus className="h-4 w-4" /> New report
+            <SquarePen className="h-4 w-4" /> New report
           </button>
         </div>
 
@@ -582,9 +601,12 @@ export function ReportView({ sessionId }: { sessionId: string }) {
                     <div className="mt-1 flex items-center gap-2 text-micro text-ink-soft">
                       <span>{d.t}</span>
                       <span aria-hidden>·</span>
+                      {r.status === "paused" && <span className="text-gold">Paused ({r.completed_sections ?? 0}/{r.total_sections ?? 0} sections)</span>}
+                      {r.status === "failed" && <span className="text-danger">Failed</span>}
                       <button onClick={() => openReport(r)} className="flex items-center gap-1 hover:text-indigo">
-                        Open <ArrowRight className="h-3 w-3" />
+                        {r.status === "paused" ? "Open" : "Open"} <ArrowRight className="h-3 w-3" />
                       </button>
+                      {r.status === "paused" && <button onClick={() => void resumePaused(r)} className="ml-2 flex items-center gap-1 rounded-md bg-indigo px-2 py-1 text-micro text-white hover:bg-indigo-dark">Resume</button>}
                     </div>
                   </div>
                 </li>
@@ -624,10 +646,10 @@ export function ReportView({ sessionId }: { sessionId: string }) {
         {fileCards("mb-2 flex flex-col gap-1.5")}
         <div className="rounded-2xl border border-line bg-paper-dim/50 px-3 py-2 focus-within:border-indigo/50">
           <div className="flex items-end gap-2">
-            <button onClick={() => fileRef.current?.click()} disabled={busyUpload} aria-label="Attach files"
-              className="mb-0.5 shrink-0 rounded-lg p-1.5 text-ink-soft hover:bg-paper-dim hover:text-ink disabled:opacity-50">
-              {busyUpload ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
-            </button>
+            <UploadMenu sessionId={sessionId} disabled={busyUpload} ariaLabel="Attach files" maxSelect={5} extensions={[".pdf", ".txt", ".md", ".csv"]}
+              onPickComputer={() => fileRef.current?.click()} onPickFiles={addFiles}
+              buttonClassName="mb-0.5 shrink-0 rounded-lg p-1.5 text-ink-soft hover:bg-paper-dim hover:text-ink disabled:opacity-50"
+              icon={busyUpload ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />} />
             <input ref={fileRef} type="file" multiple accept=".pdf,.txt,.md,.csv" className="hidden"
               onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} />
 
@@ -734,7 +756,7 @@ export function ReportView({ sessionId }: { sessionId: string }) {
               <span aria-hidden className="my-1 h-px w-5 bg-line" />
               <button onClick={goNew} aria-label="New report" title="New report"
                 className="rounded-md p-1.5 text-ink-soft hover:bg-paper-dim hover:text-ink">
-                <Plus className="h-4 w-4" />
+                <SquarePen className="h-4 w-4" />
               </button>
               <button onClick={goHistory} disabled={running || refining} aria-label="Report history" title="History"
                 className="rounded-md p-1.5 text-ink-soft hover:bg-paper-dim hover:text-ink disabled:opacity-40">
@@ -758,7 +780,7 @@ export function ReportView({ sessionId }: { sessionId: string }) {
               <button onClick={expandForRefine} disabled={running || !result}
                 aria-label="Refine report" title="Tell Sykra what to change"
                 className="rounded-md p-1.5 text-ink-soft hover:bg-paper-dim hover:text-ink disabled:opacity-40">
-                <Plus className="h-4 w-4" />
+                <SquarePen className="h-4 w-4" />
               </button>
             </div>
           </>
@@ -774,7 +796,7 @@ export function ReportView({ sessionId }: { sessionId: string }) {
               <div className="flex items-center justify-between px-3 pb-2.5 pt-1">
                 <button onClick={goNew}
                   className="flex items-center gap-1.5 rounded-md px-2 py-1 text-caption text-ink-soft hover:bg-paper-dim hover:text-ink">
-                  <Plus className="h-4 w-4" /> New report
+                  <SquarePen className="h-4 w-4" /> New report
                 </button>
                 <button onClick={goHistory} disabled={running || refining} aria-label="Report history"
                   className="flex items-center gap-1 rounded-md px-2 py-1 text-caption text-ink-soft hover:bg-paper-dim hover:text-ink disabled:opacity-40">
@@ -829,11 +851,10 @@ export function ReportView({ sessionId }: { sessionId: string }) {
               <div className="flex items-end gap-2 rounded-xl border border-line bg-paper-dim/70 px-2.5 py-1.5 focus-within:border-indigo/50">
                 <input ref={refineFileRef} type="file" multiple accept=".pdf,.txt,.md,.csv" className="hidden"
                   onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} />
-                <button onClick={() => refineFileRef.current?.click()} disabled={busyUpload || running || refining || !result}
-                  aria-label="Attach files"
-                  className="mb-0.5 shrink-0 rounded-lg p-1.5 text-ink-soft hover:bg-paper-dim hover:text-ink disabled:opacity-50">
-                  {busyUpload ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
-                </button>
+                <UploadMenu sessionId={sessionId} disabled={busyUpload || running || refining || !result} ariaLabel="Attach files" maxSelect={5} extensions={[".pdf", ".txt", ".md", ".csv"]}
+              onPickComputer={() => refineFileRef.current?.click()} onPickFiles={addFiles}
+              buttonClassName="mb-0.5 shrink-0 rounded-lg p-1.5 text-ink-soft hover:bg-paper-dim hover:text-ink disabled:opacity-50"
+              icon={busyUpload ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />} />
                 <textarea ref={refineRef} value={chatInput} onChange={(e) => setChatInput(e.target.value)} rows={1} disabled={running || !result}
                   onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleRefine(); } }}
                   placeholder={running ? "Writing…" : "Tell Sykra what to change…"}

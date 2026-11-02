@@ -63,6 +63,59 @@ type NameDialogProps = {
   onSubmit: (name: string) => Promise<void>;
 };
 
+type PromptDialogProps = {
+  open: boolean;
+  title: string;
+  label: string;
+  initialValue: string;
+  maxLength?: number;
+  error?: string;
+  onCancel: () => void;
+  onSubmit: (value: string) => void | Promise<void>;
+};
+
+export function PromptDialog({ open, ...rest }: PromptDialogProps) {
+  if (!open) return null;
+  return <PromptDialogBody {...rest} />;
+}
+
+function PromptDialogBody({
+  title,
+  label,
+  initialValue,
+  maxLength = 60,
+  error,
+  onCancel,
+  onSubmit,
+}: {
+  title: string;
+  label: string;
+  initialValue: string;
+  maxLength?: number;
+  error?: string;
+  onCancel: () => void;
+  onSubmit: (value: string) => void | Promise<void>;
+}) {
+  const [value, setValue] = useState(initialValue);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    });
+  }, []);
+  const trimmed = value.trim();
+  return <div className="fixed inset-0 z-[100] flex items-center justify-center bg-forest/30 p-5 backdrop-blur-sm" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+    <form role="dialog" aria-modal="true" aria-labelledby="prompt-title" onSubmit={(event) => { event.preventDefault(); if (trimmed && trimmed !== initialValue.trim()) void onSubmit(trimmed); }} className="w-full max-w-md rounded-xl border border-line bg-paper p-6 shadow-2xl">
+      <h2 id="prompt-title" className="font-serif text-2xl text-ink">{title}</h2>
+      <label className="mt-5 block text-xs font-semibold text-ink-soft" htmlFor="prompt-value">{label}</label>
+      <input ref={inputRef} id="prompt-value" value={value} maxLength={maxLength} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") onCancel(); }} className="mt-2 w-full rounded-xl border border-line bg-white px-4 py-3 text-sm outline-none focus:border-forest focus:ring-2 focus:ring-mint" />
+      {error && <p className="mt-2 text-xs text-danger">{error}</p>}
+      <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={onCancel} className="rounded-full px-4 py-2 text-sm font-semibold text-ink-soft hover:bg-white">Cancel</button><button type="submit" disabled={!trimmed || trimmed === initialValue.trim()} className="rounded-full bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">Rename</button></div>
+    </form>
+  </div>;
+}
+
 export function NameDialog({ open, ...rest }: NameDialogProps) {
   if (!open) return null;
   return <NameDialogBody {...rest} />;

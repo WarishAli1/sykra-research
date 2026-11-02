@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useMemo, useState, useSyncExternalStore } from "react";
-import { ArrowLeft, FolderKanban, List, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { ArrowLeft, FolderKanban, List, MoreHorizontal, Pencil, SquarePen, Search, Trash2 } from "lucide-react";
 
 export type DashboardSession = {
   id: string;
@@ -90,7 +90,7 @@ export function SessionDashboard({
               <ArrowLeft className="h-4 w-4" /> Website
             </Link>
             <button onClick={onCreateSession} className="inline-flex h-9 items-center gap-2 rounded-lg bg-accent px-3.5 text-sm font-semibold text-white transition hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
-              <Plus className="h-4 w-4" /> New Session
+              <SquarePen className="h-4 w-4" /> New Session
             </button>
           </div>
         </header>
@@ -137,7 +137,7 @@ export function SessionDashboard({
               <div className={`mt-4 grid gap-4 ${listView ? "" : "md:grid-cols-2 lg:grid-cols-3"}`}>
                 {filtered.map((session) => <SessionCard key={session.id} session={session} onOpen={onOpen} onRename={onRename} onDelete={onDelete} listView={listView} now={now} />)}
                 <button onClick={onCreateSession} className={`flex min-h-32 items-center justify-center gap-2 rounded-2xl border border-dashed border-ink-soft/40 text-sm font-medium text-ink-soft transition hover:border-accent hover:bg-gold-tint/30 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent ${listView ? "py-5" : ""}`}>
-                  <Plus className="h-4 w-4" /> Create new session
+                  <SquarePen className="h-4 w-4" /> Create new session
                 </button>
               </div>
             </section>
@@ -149,7 +149,7 @@ export function SessionDashboard({
             <div className="mx-auto grid h-20 w-20 place-items-center rounded-3xl bg-mint"><img src="/sykra-logo.svg" alt="" className="h-12 w-12 object-contain" /></div>
             <h2 className="mt-6 font-serif text-3xl">A calm home for your research</h2>
             <p className="mt-3 text-sm leading-6 text-ink-soft">Create a session to gather papers, ask cited questions, and follow the ideas through your research graph.</p>
-            <button onClick={onCreateSession} className="mt-7 inline-flex h-11 items-center gap-2 rounded-lg bg-accent px-5 text-sm font-semibold text-white hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"><Plus className="h-4 w-4" /> Create your first session</button>
+            <button onClick={onCreateSession} className="mt-7 inline-flex h-11 items-center gap-2 rounded-lg bg-accent px-5 text-sm font-semibold text-white hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"><SquarePen className="h-4 w-4" /> Create your first session</button>
           </section>
         )}
       </div>

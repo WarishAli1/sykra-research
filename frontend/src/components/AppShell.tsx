@@ -1,13 +1,12 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import {
   PanelLeft,
-  LibraryBig,
-  Network,
+  FolderOpen,
   ArrowLeft,
-  Plus,
+  SquarePen,
   Shapes,
   LogOut,
   Trash2,
@@ -15,6 +14,7 @@ import {
   Pin,
   FileText,
   PanelRight,
+  Sun, Moon,
 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
@@ -24,6 +24,7 @@ import { GraphView } from "./GraphView";
 import { api, ApiError } from "@/lib/api";
 import { StudioView } from "./studio/StudioView";
 import { ReportView } from "./report/ReportView";
+import { FilesPage } from "./FilesPage";
 
 import type { ChatTurn, Paper, EvidenceMode, StatusStep, ReportType, ReportRecord } from "@/lib/types";
 import dynamic from "next/dynamic";
@@ -35,6 +36,8 @@ import { PdfViewerBoundary } from "./PdfViewerBoundary";
 import { ConfirmDialog, NameDialog } from "./ConfirmDialog";
 import { SessionDashboard, type DashboardSession } from "./SessionDashboard";
 import { Avatar } from "./Avatar";
+import { ThemeProvider, useTheme, useLocalStorageFlag } from "@/lib/theme";
+import { watchGeneration } from "@/lib/chatGenerationStore";
 
 const isHttpUrl = (v?: string | null) =>
   !!v && /^https?:\/\//i.test(v.replace(/^user_upload:\/\//i, ""));
@@ -47,6 +50,7 @@ function mergePapers(existing: Paper[], incoming: Paper[]): Paper[] {
       byTitle.set(p.title, p);
       continue;
     }
+
     byTitle.set(p.title, {
       ...prev,
       ...p,
@@ -67,7 +71,7 @@ const PDF_WIDTH_DEFAULT = 50;
 const PDF_WIDTH_MIN = 30;
 const PDF_WIDTH_MAX = 70;
 
-type ChatSummary = { id: string; title: string; session_id?: string; session_name?: string | null; created_at: string; updated_at: string; pinned_at?: string | null };
+type ChatSummary = { id: string; title: string; session_id?: string; session_name?: string | null; created_at: string; updated_at: string; pinned_at?: string | null; generation_status?: string | null };
 
 function groupChats(chats: ChatSummary[]): [string, ChatSummary[]][] {
   const now = new Date();
@@ -142,14 +146,15 @@ function SessionMenu({ onRename, onDelete }: { onRename: () => void; onDelete: (
   );
 }
 
-function ChatHistory({ chats, activeChatId, sessionId, onRename, onDelete, onPin }: { chats: ChatSummary[]; activeChatId?: string; sessionId: string; onRename: (chat: ChatSummary) => void; onDelete: (chat: ChatSummary) => void; onPin: (chat: ChatSummary) => void }) {
+function ChatHistory({ chats, activeChatId, sessionId, onRename, onDelete, onPin, onNavigate }: { chats: ChatSummary[]; activeChatId?: string; sessionId: string; onRename: (chat: ChatSummary) => void; onDelete: (chat: ChatSummary) => void; onPin: (chat: ChatSummary) => void; onNavigate?: () => void }) {
   const pinned = chats.filter((chat) => chat.pinned_at);
   const groups = groupChats(chats.filter((chat) => !chat.pinned_at));
-  const renderRow = (chat: ChatSummary) => <div key={chat.id} className={`group/chat flex min-w-0 items-center gap-1 rounded-md ${activeChatId === chat.id ? "bg-gold-tint text-ink font-medium" : "text-ink-soft"}`}><Link href={`/app/s/${sessionId}/chat/${chat.id}`} className="min-w-0 flex-1 truncate px-2.5 py-1.5 text-caption hover:text-ink">{chat.title}</Link><div className={`mr-1 flex shrink-0 gap-0.5 ${activeChatId === chat.id ? "" : "opacity-0 group-hover/chat:opacity-100"}`}><button onClick={() => onPin(chat)} aria-label={chat.pinned_at ? "Unpin chat" : "Pin chat"} className="rounded p-1 hover:bg-paper"><Pin className={`h-3 w-3 ${chat.pinned_at ? "fill-current" : ""}`} /></button><SessionMenu onRename={() => onRename(chat)} onDelete={() => onDelete(chat)} /></div></div>;
+  const renderRow = (chat: ChatSummary) => <div key={chat.id} className={`group/chat flex min-w-0 items-center gap-1 rounded-md ${activeChatId === chat.id ? "app-sidebar-selected text-ink font-medium" : "text-ink-soft"}`}><Link href={`/app/s/${sessionId}/chat/${chat.id}`} onClick={onNavigate} className="flex min-w-0 flex-1 items-center gap-2 truncate px-2.5 py-1.5 text-caption hover:text-ink">{chat.generation_status === "generating" || chat.generation_status === "streaming" ? <span className="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full border-2 border-indigo border-t-transparent" aria-label="Generating" /> : chat.generation_status === "complete" && activeChatId !== chat.id ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-gold" aria-label="Completed" /> : null}<span className="truncate">{chat.title}</span></Link><div className={`mr-1 flex shrink-0 gap-0.5 ${activeChatId === chat.id ? "" : "opacity-0 group-hover/chat:opacity-100"}`}><button onClick={() => onPin(chat)} aria-label={chat.pinned_at ? "Unpin chat" : "Pin chat"} className="rounded p-1 hover:bg-paper"><Pin className={`h-3 w-3 ${chat.pinned_at ? "fill-current" : ""}`} /></button><SessionMenu onRename={() => onRename(chat)} onDelete={() => onDelete(chat)} /></div></div>;
   return <>{pinned.length > 0 && <div className="mb-3"><p className="px-1.5 pb-1 text-micro font-semibold uppercase tracking-wide text-ink-soft/60">PINNED</p>{pinned.map(renderRow)}</div>}{groups.map(([group, items]) => <div key={group} className="mb-3"><p className="px-1.5 pb-1 text-micro font-semibold uppercase tracking-wide text-ink-soft/60">{group}</p>{items.map(renderRow)}</div>)}</>;
 }
 
-export function AppShell({ initialSessionId, initialChatId, dashboard = false }: { initialSessionId?: string; initialChatId?: string; dashboard?: boolean }) {
+function AppShellInner({ initialSessionId, initialChatId, dashboard = false, initialGraphView = false, initialFiles = false, initialStudio = false, initialReport = false }: { initialSessionId?: string; initialChatId?: string; dashboard?: boolean; initialGraphView?: boolean; initialFiles?: boolean; initialStudio?: boolean; initialReport?: boolean }) {
+  const { theme, toggleTheme } = useTheme();
   const router = useRouter();
   const [currentUser, setCurrentUser] = useState<{ name: string | null; email: string; image: string | null } | null>(null);
   const [recentChats, setRecentChats] = useState<ChatSummary[]>([]);
@@ -164,19 +169,28 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
   const [toast, setToast] = useState<string | null>(null);
   const [uploadedFilename, setUploadedFilename] = useState<string | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [studioTurns, setStudioTurns] = useState<ChatTurn[]>([]);
   const [railOpen, setRailOpen] = useState(true);
+  const [studioChatOpen, setStudioChatOpen] = useLocalStorageFlag("sykra:studio-chat-open", true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const [tab, setTab] = useState<"library" | "explore">("library");
-  const [showGraphView, setShowGraphView] = useState(false);
+  const [tab, setTab] = useState<"library" | "explore">(initialGraphView ? "explore" : "library");
+  const [localGraph, setLocalGraph] = useState(false);
+  const showGraphView = initialGraphView || localGraph;
+  const [seenGraphView, setSeenGraphView] = useState(initialGraphView);
+  if (seenGraphView !== initialGraphView) {
+    setSeenGraphView(initialGraphView);
+    setTab(initialGraphView ? "explore" : "library");
+  }
   const containerRef = useRef<HTMLDivElement>(null);
 
   const [pdfViewerUrl, setPdfViewerUrl] = useState<string | null>(null);
   const [pdfWidthPct, setPdfWidthPct] = useState(PDF_WIDTH_DEFAULT);
   const [draggingPdf, setDraggingPdf] = useState(false);
 
-  const [showStudio, setShowStudio] = useState(false);
-  const [showReport, setShowReport] = useState(false);
+  const showFiles = initialFiles;
+  const showStudio = initialStudio;
+  const showReport = initialReport;
   const [hasUpload, setHasUpload] = useState(false);
   const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>("literature");
   const refreshLibrary = useCallback(() => {
@@ -197,11 +211,20 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
       .then((response) => (response.ok ? response.json() : null))
       .then((user: { name: string | null; email: string; image: string | null } | null) => {
         setCurrentUser(user);
-        if (user) api.listChats(undefined, initialSessionId).then(setRecentChats).catch(() => setRecentChats([]));
       })
       .catch(() => setCurrentUser(null));
-  }, [initialSessionId]);
+  }, []);
 
+  useEffect(() => {
+    if (!currentUser) return;
+    api.listChats(undefined, initialSessionId).then(setRecentChats).catch(() => setRecentChats([]));
+  }, [currentUser, initialSessionId, initialChatId]);
+
+  const [seenChatId, setSeenChatId] = useState(initialChatId);
+  if (seenChatId !== initialChatId) {
+    setSeenChatId(initialChatId);
+    if (initialChatId) setTurns([]);
+  }
   useEffect(() => {
     if (!initialChatId) return;
     api.getChat(initialChatId).then((messages) => {
@@ -212,6 +235,8 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
           id: message.id,
           role: message.role as ChatTurn["role"],
           text: message.content,
+          streaming: isA && message.status === "streaming",
+          stopped: isA && message.status === "interrupted",
           references: Array.isArray(c.references) ? c.references as ChatTurn["references"] : [],
           statusSteps: Array.isArray(c.status_steps) ? c.status_steps as StatusStep[] : undefined,
           responseMode: isA ? ((c.response_mode as ChatTurn["responseMode"]) ?? (/^## /m.test(message.content) ? "researched" : "normal")) : undefined,
@@ -228,7 +253,24 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
           paperLinks: Array.isArray(c.paper_links) ? c.paper_links as string[] : undefined,
         };
       }));
+      const cleanups = messages
+        .filter((message) => message.status === "generating" || message.status === "streaming")
+        .map((message) => watchGeneration(initialChatId, message.id, (snapshot) => {
+          setTurns((current) => current.map((turn) => turn.id === snapshot.id ? {
+            ...turn,
+            text: snapshot.content,
+            streaming: snapshot.status === "generating" || snapshot.status === "streaming",
+            stopped: snapshot.status === "interrupted" || snapshot.status === "stopped",
+          } : turn));
+        }));
+      (window as Window & { __sykraGenerationCleanups?: (() => void)[] }).__sykraGenerationCleanups?.forEach((cleanup) => cleanup());
+      (window as Window & { __sykraGenerationCleanups?: (() => void)[] }).__sykraGenerationCleanups = cleanups;
     }).catch(() => setTurns([]));
+    return () => {
+      const state = window as Window & { __sykraGenerationCleanups?: (() => void)[] };
+      state.__sykraGenerationCleanups?.forEach((cleanup) => cleanup());
+      state.__sykraGenerationCleanups = [];
+    };
   }, [initialChatId]);
 
   const prevChatId = useRef<string | undefined>(undefined);
@@ -314,16 +356,20 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
   }, []);
 
   const handleOpenGraph = () => {
-    setShowGraphView(true);
+    if (initialSessionId && initialChatId) {
+      router.push(`/app/s/${initialSessionId}/chat/${initialChatId}/graph`);
+      return;
+    }
+    setLocalGraph(true);
     setRailOpen(true);
-    setShowStudio(false);
-    setShowReport(false);
     setTab("explore");
   };
   const handleBackToChat = () => {
-    setShowGraphView(false);
-    setShowStudio(false);
-    setShowReport(false);
+    if (initialSessionId && initialChatId && initialGraphView) {
+      router.push(`/app/s/${initialSessionId}/chat/${initialChatId}`);
+      return;
+    }
+    setLocalGraph(false);
   };
 
   const handleOpenPdf = (url: string) => setPdfViewerUrl(url);
@@ -353,17 +399,14 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
   }, []);
 
   const handleNewChat = async () => {
-    // Always leave Graph / Studio / Report first, even if we return early below.
-    setShowGraphView(false);
-    setShowStudio(false);
-    setShowReport(false);
+    setLocalGraph(false);
     setTurns([]);
     setUploadedFilename(null);
     setUploadState({ status: "idle", filename: "", progress: "", stage: "", fileUrl: "" });
     setHasUpload(false);
     setEvidenceMode("literature");
-    if (sessionId && !initialChatId) return;
-    if (sessionId) router.push(`/app/s/${sessionId}`);
+    const onPlainSession = !initialChatId && !initialFiles && !initialStudio && !initialReport;
+    if (sessionId && !onPlainSession) router.push(`/app/s/${sessionId}`);
   };
   const handleRenameChat = async (chat: ChatSummary) => {
     setDialog({ kind: "rename-chat", item: chat });
@@ -417,50 +460,6 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
     setConfirm(null);
     window.setTimeout(() => setToast(null), 2200);
   };
-  const handleDeletePaper = async (paper: Paper) => {
-    const remainingPapers = papers.filter((p) => p.link !== paper.link);
-    setPapers(remainingPapers);
-
-    const wasActiveUpload =
-      paper.link === uploadState.fileUrl ||
-      (uploadState.filename && paper.title === uploadState.filename);
-
-    const stillHasUpload = remainingPapers.some((p) => p.is_uploaded);
-
-    if (!stillHasUpload) {
-      setUploadState({ status: "idle", filename: "", progress: "", stage: "", fileUrl: "" });
-      setHasUpload(false);
-      setEvidenceMode("literature");
-      setUploadedFilename(null);
-    }
-
-    try {
-      await api.deleteUploadedPdf(sessionId, paper.link, initialChatId);
-    } catch (e) {
-      console.error("Failed to delete paper:", e);
-      const restoredPapers = papers.some((p) => p.link === paper.link)
-        ? remainingPapers
-        : [...remainingPapers, paper];
-      setPapers(restoredPapers);
-
-      const hasUploadAfterRestore = restoredPapers.some((p) => p.is_uploaded);
-      if (hasUploadAfterRestore) {
-        setHasUpload(true);
-        if (wasActiveUpload || !stillHasUpload) {
-          setUploadedFilename(paper.title);
-          setEvidenceMode("uploaded");
-          setUploadState({
-            status: "done",
-            filename: paper.title,
-            progress: "Ready",
-            stage: "",
-            fileUrl: paper.link,
-          });
-        }
-      }
-    }
-  };
-
   const handleDownloadConversationPdf = useCallback(async () => {
     const assistantTurns = turns.filter((t) => t.role === "assistant");
     if (!assistantTurns.length) return;
@@ -508,6 +507,29 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
     ]);
   }
 
+  const chatPanel = (
+    <ChatPanel
+      context={showStudio ? "studio" : "research"}
+      uploadedFilename={uploadedFilename}
+      onUploadComplete={handleUploadComplete}
+      onNewPapers={handleNewPapers}
+      onOpenPdf={handleOpenPdf}
+      turns={showStudio ? studioTurns : turns}
+      setTurns={showStudio ? setStudioTurns : setTurns}
+      sessionId={sessionId}
+      chatId={showStudio ? undefined : initialChatId}
+      onOpenGraph={handleOpenGraph}
+      onRegenerated={refreshLibrary}
+      uploadState={uploadState}
+      setUploadState={setUploadState}
+      hasUpload={hasUpload}
+      setHasUpload={setHasUpload}
+      evidenceMode={evidenceMode}
+      setEvidenceMode={setEvidenceMode}
+      wide={!sidebarOpen && !railOpen}
+    />
+  );
+
   return (
     <div className="flex h-screen bg-paper overflow-hidden">
       <div
@@ -530,77 +552,58 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
             </div>
 
             {dashboard ? <div className="flex min-h-0 flex-1 flex-col px-3">
-              <button onClick={handleCreateSession} className="flex w-full items-center gap-2 rounded-lg bg-gold-tint border border-gold/40 px-3 py-2 text-caption font-medium text-ink hover:bg-gold-tint/70 transition-colors"><Plus className="h-3.5 w-3.5" />New Session</button>
+              <button onClick={handleCreateSession} className="flex w-full items-center gap-2 rounded-lg bg-[var(--selected)] border border-line px-3 py-2 text-caption font-medium text-ink hover:bg-[var(--hover)] transition-colors"><SquarePen className="h-3.5 w-3.5" />New Session</button>
               <p className="mt-6 px-1.5 pb-2 text-label text-ink-soft/70">SESSIONS</p>
-              <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">{sessions.slice(0, 5).map((session) => <div key={session.id} className={`group/session flex items-center gap-1 rounded-md ${session.id === initialSessionId ? "bg-gold-tint text-ink font-medium" : "text-ink-soft"}`}><button onClick={() => router.push(`/app/s/${session.id}`)} className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2.5 py-2 text-left text-caption hover:text-ink"><span className="h-2 w-2 shrink-0 rounded-full bg-sage" /><span className="truncate">{session.name}</span></button><SessionMenu onRename={() => handleRenameSession(session)} onDelete={() => handleDeleteSession(session)} /></div>)}</div>
+              <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">{sessions.slice(0, 5).map((session) => <div key={session.id} className={`group/session flex items-center gap-1 rounded-md ${session.id === initialSessionId ? "app-sidebar-selected text-ink font-medium" : "text-ink-soft"}`}><button onClick={() => router.push(`/app/s/${session.id}`)} className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2.5 py-2 text-left text-caption hover:text-ink"><span className="h-2 w-2 shrink-0 rounded-full bg-sage" /><span className="truncate">{session.name}</span></button><SessionMenu onRename={() => handleRenameSession(session)} onDelete={() => handleDeleteSession(session)} /></div>)}</div>
             </div> : <div className="flex min-h-0 flex-1 flex-col px-3">
               <Link href="/app/dashboard" className="mb-4 flex items-center gap-2 px-2 text-caption text-ink-soft hover:text-ink"><ArrowLeft className="h-3.5 w-3.5" /> Dashboard</Link>
               <div className="flex items-center justify-between px-2"><div className="min-w-0"><p className="text-label text-ink-soft/70">SESSION</p><p className="truncate text-sm font-medium text-ink">{sessionName}</p></div><SessionMenu onRename={() => { const item = sessions.find((session) => session.id === initialSessionId); if (item) handleRenameSession(item); }} onDelete={() => { const item = sessions.find((session) => session.id === initialSessionId); if (item) handleDeleteSession(item); }} /></div>
               <div className="mt-4 space-y-1">
-                <button
-                  onClick={() => {
-                    setShowGraphView(false);
-                    setShowStudio(false);
-                    setShowReport(false);
-                    setTab("library");
-                    setRailOpen(true);
-                  }}
+                <Link
+                  href={`/app/s/${sessionId}/files`}
                   className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-caption transition-colors ${
-                    !showGraphView && !showStudio && !showReport && tab === "library" && railOpen
-                      ? "bg-gold-tint text-ink font-medium"
+                    showFiles
+                      ? "app-sidebar-selected text-ink font-medium"
                       : "text-ink-soft hover:bg-paper hover:text-ink"
                   }`}
                 >
-                  <LibraryBig className="h-3.5 w-3.5 shrink-0" />
-                  Library
-                  {papers.length > 0 && (
-                    <span className="ml-auto rounded-full bg-paper px-1.5 py-0 text-micro text-ink-soft">
-                      {papers.length}
-                    </span>
-                  )}
-                </button>
-                <button
-                  onClick={handleOpenGraph}
-                  className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-caption transition-colors ${
-                    showGraphView
-                      ? "bg-gold-tint text-ink font-medium"
-                      : "text-ink-soft hover:bg-paper hover:text-ink"
-                  }`}
-                >
-                  <Network className="h-3.5 w-3.5 shrink-0" />
-                  Explore Graph
-                </button>
-                <button
-                  onClick={() => { setShowStudio(true); setShowGraphView(false); setShowReport(false); }}
+                  <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+                  Files
+                </Link>
+                <Link
+                  href={`/app/s/${sessionId}/studio`}
                   className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-caption transition-colors ${
                     showStudio
-                      ? "bg-indigo-tint text-ink font-medium"
+                      ? "app-sidebar-selected text-ink font-medium"
                       : "text-ink-soft hover:bg-paper hover:text-ink"
                   }`}
                 >
                   <Shapes className="h-3.5 w-3.5 shrink-0" />
                   Studio
-                </button>
-                <button
-                  onClick={() => { setShowReport(true); setShowStudio(false); setShowGraphView(false); }}
+                </Link>
+                <Link
+                  href={`/app/s/${sessionId}/report`}
                   className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-caption transition-colors ${
                     showReport
-                      ? "bg-indigo-tint text-ink font-medium"
+                      ? "app-sidebar-selected text-ink font-medium"
                       : "text-ink-soft hover:bg-paper hover:text-ink"
                   }`}
                 >
                   <FileText className="h-3.5 w-3.5 shrink-0" />
                   Report
-                </button>
+                </Link>
               </div>
               <div className="mt-4 border-t border-line pt-4">
-                <button onClick={handleNewChat} className="flex w-full items-center gap-2 rounded-lg bg-gold-tint border border-gold/40 px-3 py-2 text-caption font-medium text-ink hover:bg-gold-tint/70"><Plus className="h-3.5 w-3.5" />New Chat</button>
+                <button onClick={handleNewChat} className="flex w-full items-center gap-2 rounded-lg bg-[var(--selected)] border border-line px-3 py-2 text-caption font-medium text-ink hover:bg-[var(--hover)]"><SquarePen className="h-3.5 w-3.5" />New Chat</button>
                 <p className="mt-5 px-1.5 pb-1.5 text-label text-ink-soft/70">CHATS</p>
                 <div className="min-h-0 max-h-[40vh] flex-1 overflow-y-auto">{recentChats.length === 0 ? <p className="px-2 py-3 text-caption text-ink-soft">No chats yet</p> : <ChatHistory chats={recentChats} activeChatId={initialChatId} sessionId={sessionId} onRename={handleRenameChat} onDelete={handleDeleteChat} onPin={handlePinChat} />}</div>
               </div>
             </div>}
 
             <div className="mt-auto border-t border-line px-3 py-3 shrink-0">
+              <button onClick={toggleTheme} aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"} title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"} className="mb-2 flex h-9 w-9 items-center justify-center rounded-lg text-ink-soft hover:bg-paper hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+                {theme === "dark" ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+              </button>
               <div className="group relative">
               <button onClick={() => setUserMenuOpen((value) => !value)} className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-paper">
                 <Avatar name={currentUser?.name} email={currentUser?.email} className="h-7 w-7" />
@@ -630,6 +633,9 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
             </div>
 
             <div className="my-1 h-px w-6 bg-line" aria-hidden="true" />
+            <button onClick={toggleTheme} aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"} title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"} className="flex h-9 w-9 items-center justify-center rounded-lg text-ink-soft hover:bg-paper hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </button>
 
             {/* New Chat */}
             <button
@@ -638,86 +644,36 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
               title="New chat"
               className="relative flex h-9 w-9 items-center justify-center rounded-lg text-ink-soft hover:bg-paper hover:text-ink transition-colors"
             >
-              <Plus className="h-4 w-4" />
+              <SquarePen className="h-4 w-4" />
               <span
                 className="absolute bottom-1.5 h-[2px] w-3.5 rounded-full bg-line/80"
                 aria-hidden="true"
               />
             </button>
 
-            {/* Library */}
-            <button
-              onClick={() => {
-                setShowGraphView(false);
-                setShowStudio(false);
-                setShowReport(false);
-                setTab("library");
-                setRailOpen(true);
-              }}
-              aria-label="Open library"
-              title="Library"
+            <Link
+              href={`/app/s/${sessionId}/files`}
+              aria-label="Open files"
+              title="Files"
               className={`relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
-                !showGraphView && !showStudio && !showReport && tab === "library" && railOpen
-                  ? "bg-gold-tint text-ink"
-                  : "text-ink-soft hover:bg-paper hover:text-ink"
+                "text-ink-soft hover:bg-paper hover:text-ink"
               }`}
             >
-              {!showGraphView && !showStudio && !showReport && tab === "library" && railOpen && (
-                <span
-                  className="absolute -left-1.5 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-accent"
-                  aria-hidden="true"
-                />
-              )}
-
-              <LibraryBig className="h-4 w-4" />
-
-              {papers.length > 0 && (
-                <span
-                  className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-accent"
-                  aria-hidden="true"
-                />
-              )}
-
+              <FolderOpen className="h-4 w-4" />
               <span
                 className="absolute bottom-1.5 h-[2px] w-3.5 rounded-full bg-line/80"
                 aria-hidden="true"
               />
-            </button>
-
-            {/* Explore Graph */}
-            <button
-              onClick={handleOpenGraph}
-              aria-label="Open explore graph"
-              title="Explore Graph"
-              className={`relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
-                showGraphView
-                  ? "bg-gold-tint text-ink"
-                  : "text-ink-soft hover:bg-paper hover:text-ink"
-              }`}
-            >
-              {showGraphView && (
-                <span
-                  className="absolute -left-1.5 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-accent"
-                  aria-hidden="true"
-                />
-              )}
-
-              <Network className="h-4 w-4" />
-
-              <span
-                className="absolute bottom-1.5 h-[2px] w-3.5 rounded-full bg-line/80"
-                aria-hidden="true"
-              />
-            </button>
+            </Link>
 
             {/* Studio */}
-            <button
-              onClick={() => { setShowStudio(true); setShowGraphView(false); setShowReport(false); }}
+            <Link
+              href={`/app/s/${sessionId}/studio`}
               aria-label="Open Studio"
               title="Studio"
               className={`relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
                 showStudio
-                  ? "bg-indigo-tint text-ink"
+                  ? "app-sidebar-selected text-ink"
                   : "text-ink-soft hover:bg-paper hover:text-ink"
               }`}
             >
@@ -732,16 +688,16 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                 className="absolute bottom-1.5 h-[2px] w-3.5 rounded-full bg-line/80"
                 aria-hidden="true"
               />
-            </button>
+            </Link>
 
             {/* Report */}
-            <button
-              onClick={() => { setShowReport(true); setShowStudio(false); setShowGraphView(false); }}
+            <Link
+              href={`/app/s/${sessionId}/report`}
               aria-label="Open Report"
               title="Report"
               className={`relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
                 showReport
-                  ? "bg-indigo-tint text-ink"
+                  ? "app-sidebar-selected text-ink"
                   : "text-ink-soft hover:bg-paper hover:text-ink"
               }`}
             >
@@ -756,19 +712,23 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                 className="absolute bottom-1.5 h-[2px] w-3.5 rounded-full bg-line/80"
                 aria-hidden="true"
               />
-            </button>
+            </Link>
           </div>
         )}
       </div>
 
       <div ref={containerRef} className="flex flex-1 min-h-0 min-w-0">
         <main className="flex-1 min-w-0">
-          {dashboard ? <SessionDashboard sessions={sessions} chats={recentChats} userName={currentUser?.name} onOpen={(id) => router.push(`/app/s/${id}`)} onRename={handleRenameSession} onDelete={handleDeleteSession} onCreateSession={handleCreateSession} /> : showReport ? (
+          {dashboard ? <SessionDashboard sessions={sessions} chats={recentChats} userName={currentUser?.name} onOpen={(id) => router.push(`/app/s/${id}`)} onRename={handleRenameSession} onDelete={handleDeleteSession} onCreateSession={handleCreateSession} /> : showFiles ? (
+            <FilesPage sessionId={sessionId} onOpenPdf={handleOpenPdf} />
+          ) : showReport ? (
             <ReportView sessionId={sessionId} />
           ) : showStudio ? (
             <StudioView
               sessionId={sessionId}
               getConversationContext={getConversationContext}
+              chatOpen={studioChatOpen}
+              onToggleChat={() => setStudioChatOpen((open) => !open)}
             />
           ) : showGraphView ? (
             <div className="h-full flex flex-col">
@@ -779,48 +739,51 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                 >
                   <ArrowLeft className="h-4 w-4" /> Back to Chat
                 </button>
-                <span className="font-serif text-[15px] font-semibold text-ink">Knowledge Graph</span>
+                <span className="font-serif text-[15px] font-semibold text-ink">Knowledge graph · {recentChats.find((chat) => chat.id === initialChatId)?.title ?? "Chat"}</span>
                 <span className="w-[90px]" />
               </div>
-              <div className="flex-1 min-h-0">
+              <div className="flex-1 min-h-0 bg-paper">
                 <GraphView sessionId={sessionId} chatId={initialChatId} activeTurnId={lastAssistantTurnId} messagePaperLinks={lastAssistantPaperLinks} />
               </div>
             </div>
           ) : (
-            <ChatPanel
-              uploadedFilename={uploadedFilename}
-              onUploadComplete={handleUploadComplete}
-              onNewPapers={handleNewPapers}
-              onOpenPdf={handleOpenPdf}
-              turns={turns}
-              setTurns={setTurns}
-              sessionId={sessionId}
-              chatId={initialChatId}
-              onOpenGraph={handleOpenGraph}
-              onDeletePaper={async (link) => {
-                const paper =
-                  papers.find((p) => p.link === link) ??
-                  papers.find((p) => uploadState.filename && p.title === uploadState.filename) ?? {
-                    title: uploadState.filename,
-                    authors: [],
-                    summary: "",
-                    link,
-                  };
-                await handleDeletePaper(paper as Paper);
-              }}
-              onRegenerated={refreshLibrary}
-              uploadState={uploadState}
-              setUploadState={setUploadState}
-              hasUpload={hasUpload}
-              setHasUpload={setHasUpload}
-              evidenceMode={evidenceMode}
-              setEvidenceMode={setEvidenceMode}
-              wide={!sidebarOpen && !railOpen}
-            />
+            chatPanel
           )}
         </main>
 
-        {!dashboard && !pdfViewerUrl && !showStudio && !showReport && (
+        {!dashboard && showStudio && (
+          <aside
+            className={`relative shrink-0 h-full overflow-hidden transition-[width] duration-200 ease-out ${studioChatOpen ? "border-l border-line" : ""}`}
+            style={{ width: studioChatOpen ? RAIL_WIDTH : 0 }}
+            aria-label="Studio chat"
+          >
+            {studioChatOpen ? (
+              <div className="h-full flex flex-col" style={{ width: RAIL_WIDTH }}>
+                <div className="flex items-center justify-between border-b border-line px-3 py-2">
+                  <span className="text-xs font-semibold text-ink">Diagram assistant</span>
+                  <button
+                    onClick={() => setStudioChatOpen(false)}
+                    aria-label="Collapse studio chat"
+                    className="rounded-md p-1 text-ink-soft hover:bg-paper hover:text-ink"
+                  >
+                    <PanelRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1">{chatPanel}</div>
+              </div>
+            ) : (
+              <button
+                onClick={() => setStudioChatOpen(true)}
+                aria-label="Expand studio chat"
+                className="m-2 flex h-8 w-8 items-center justify-center rounded-md text-ink-soft hover:bg-paper hover:text-ink"
+              >
+                <PanelRight className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </aside>
+        )}
+
+        {!dashboard && !showFiles && !pdfViewerUrl && !showStudio && !showReport && (
           <div
             className="relative shrink-0 h-full border-l border-line overflow-hidden transition-[width] duration-200 ease-out"
             style={{ width: railOpen ? RAIL_WIDTH : STRIP_WIDTH }}
@@ -844,7 +807,6 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                     tab={tab}
                     setTab={setTab}
                     onOpenPdf={handleOpenPdf}
-                    onDeletePaper={handleDeletePaper}
                   />
                 </div>
               </div>
@@ -859,29 +821,6 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
                   className="flex h-7 w-7 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink mb-1"
                 >
                   <PanelRight className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  onClick={() => {
-                    setTab("library");
-                    setRailOpen(true);
-                  }}
-                  aria-label="Open library"
-                  className="relative flex h-8 w-8 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink"
-                >
-                  <LibraryBig className="h-4 w-4" />
-                  {papers.length > 0 && (
-                    <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-accent" />
-                  )}
-                </button>
-                <button
-                  onClick={() => {
-                    setTab("explore");
-                    setRailOpen(true);
-                  }}
-                  aria-label="Open explore"
-                  className="relative flex h-8 w-8 items-center justify-center rounded-md text-ink-soft hover:bg-paper-dim hover:text-ink"
-                >
-                  <Network className="h-4 w-4" />
                 </button>
               </div>
             )}
@@ -922,5 +861,25 @@ export function AppShell({ initialSessionId, initialChatId, dashboard = false }:
       <ConfirmDialog open={confirm !== null} title={confirm?.kind === "chat" ? "Delete chat?" : "Delete session?"} body={confirm?.kind === "chat" ? `This will permanently delete "${(confirm.item as ChatSummary).title}" and all its messages. This can't be undone.` : `This will permanently delete "${(confirm?.item as DashboardSession)?.name}" including ${(confirm?.item as DashboardSession)?.chat_count} ${(confirm?.item as DashboardSession)?.chat_count === 1 ? "chat" : "chats"} and ${(confirm?.item as DashboardSession)?.paper_count} ${(confirm?.item as DashboardSession)?.paper_count === 1 ? "paper" : "papers"}.`} onCancel={() => setConfirm(null)} onConfirm={confirmDelete} />
       {toast && <div role="status" className="fixed bottom-5 left-1/2 z-[110] -translate-x-1/2 rounded-full bg-forest px-4 py-2 text-sm font-medium text-white shadow-lg">{toast}</div>}
     </div>
+  );
+}
+
+export function AppShell(props: { initialSessionId?: string; initialChatId?: string; dashboard?: boolean; initialGraphView?: boolean; initialFiles?: boolean; initialStudio?: boolean; initialReport?: boolean }) {
+  return <ThemeProvider><AppShellInner {...props} /></ThemeProvider>;
+}
+
+export function SessionShell({ sessionId }: { sessionId: string }) {
+  const pathname = usePathname();
+  const rest = pathname.split("/").filter(Boolean).slice(3);
+  const chatId = rest[0] === "chat" ? rest[1] : undefined;
+  return (
+    <AppShell
+      initialSessionId={sessionId}
+      initialChatId={chatId}
+      initialGraphView={!!chatId && rest[2] === "graph"}
+      initialFiles={rest[0] === "files"}
+      initialStudio={rest[0] === "studio"}
+      initialReport={rest[0] === "report"}
+    />
   );
 }

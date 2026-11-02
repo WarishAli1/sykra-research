@@ -8,7 +8,7 @@ services:
     restart: "no"
 
   clamav:
-    profiles: ["scan"]            # off by default; enable with --profile scan
+    profiles: ["scan"]          
 
   backend:
     restart: "no"
@@ -24,8 +24,8 @@ services:
         --reload --reload-dir app
         --reload-exclude 'app/db/vector_db/*'
     volumes:
-      - ./backend:/app                          # source, migrations, alembic.ini, uploads, exports
-      - chroma_data:/app/app/db/vector_db       # keep Chroma off the host and out of the watcher
+      - ./backend:/app                        
+      - chroma_data:/app/app/db/vector_db      
       - hf_cache:/app/huggingface_cache
     healthcheck:
       start_period: 60s
@@ -33,10 +33,10 @@ services:
   frontend:
     restart: "no"
     build:
-      target: deps                              # stops before `next build`; has node_modules, no source
+      target: deps                            
     command: npm run dev -- -H 0.0.0.0
     environment:
-      WATCHPACK_POLLING: "true"                 # only needed on Windows/macOS
+      WATCHPACK_POLLING: "true"               
     volumes:
       - ./frontend:/app
       - /app/node_modules

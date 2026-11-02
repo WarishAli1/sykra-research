@@ -3,10 +3,11 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-DiagramType = Literal["flowchart", "dfd", "architecture"]
+DiagramType = Literal["flowchart", "dfd", "architecture", "usecase"]
 NodeType = Literal[
     "start", "process", "decision", "data", "end",
     "external", "store", "client", "service", "database", "boundary", "note",
+    "actor", "use-case", "system-boundary", "chart",
 ]
 
 
@@ -19,6 +20,7 @@ class DiagramNodeDocument(BaseModel):
     label: str = Field(default="Untitled", max_length=500)
     parentId: str | None = Field(default=None, min_length=1, max_length=100)
     style: dict[str, str] | None = None
+    data: dict[str, object] | None = None
 
 
 class DiagramEdgeDocument(BaseModel):

@@ -27,6 +27,18 @@ export type Paper = {
   file_url?: string | null;
 };
 
+export type SessionFile = {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+  uploaded_at: string | null;
+  source: "chat" | "report" | "files";
+  url: string;
+  references: string[];
+  used_in?: string[];
+};
+
 export type ConfidenceLevel = "high" | "medium" | "low";
 
 
@@ -198,6 +210,7 @@ export type RegenerateRequest = {
 };
 
 export type StreamEvent =
+  | { type: "generation"; message_id: string; chat_id: string }
   | { type: "progress"; label: string; stage?: string; detail?: string; items?: string[] }
   | { type: "token"; text: string; kind?: "preview" | "final" }
   | { type: "result"; payload: ChatResponse }
@@ -570,4 +583,7 @@ export type ReportListItem = {
   title: string;
   created_at: string;
   updated_at: string;
+  status?: "running" | "paused" | "completed" | "failed";
+  completed_sections?: number;
+  total_sections?: number;
 };

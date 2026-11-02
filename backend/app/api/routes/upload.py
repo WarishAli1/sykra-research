@@ -6,6 +6,7 @@ from uuid import UUID
 from PIL import Image
 import pytesseract
 from fastapi import APIRouter, Depends, Request, UploadFile, File, HTTPException
+from pydantic import BaseModel
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from app.services.sse import sse_event
@@ -17,7 +18,7 @@ from app.services.graph_store import graph_store
 from app.config import settings
 from app.auth import get_current_user
 from app.db.database import get_db
-from app.db.models import UploadedFile, User, LibraryPaper
+from app.db.models import UploadedFile, User, LibraryPaper, Chat, Report
 from app.services.ownership import require_research_session
 from app.services.storage import LocalPrivateStorage
 from app.services.upload_validation import read_pdf_content
@@ -35,6 +36,11 @@ _SCANNED_PAGE_CHAR_THRESHOLD = 50
 _DPI = 150
 
 _BACKEND_PUBLIC_URL = getattr(settings, "BACKEND_PUBLIC_URL", "http://localhost:8000")
+
+
+class FileLinkPayload(BaseModel):
+    chat_id: UUID | None = None
+    report_id: UUID | None = None
 
 
 def _is_scanned_page(text: str) -> bool:
@@ -108,12 +114,15 @@ async def upload_pdf(
     file: UploadFile = File(...),
     session_id: str = "default",
     chat_id: str | None = None,
+    source: str = "chat",
     user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
     enforce_rate_limit(request, "upload", 20)
     original_name = _original_filename(file.filename)
     research_session = require_research_session(db, user, session_id, create=True)
+    if source not in {"chat", "report", "files"}:
+        raise HTTPException(status_code=422, detail="Invalid upload source.")
 
     content = read_pdf_content(await file.read(settings.MAX_UPLOAD_BYTES + 1))
     try:
@@ -141,6 +150,9 @@ async def upload_pdf(
             user_id=user.id,
             original_filename=original_name,
             stored_filename=stored_name,
+            mime_type=file.content_type or "application/pdf",
+            source=source,
+            extracted_text=text,
             size_bytes=len(content),
         )
     )
@@ -175,6 +187,139 @@ async def upload_pdf(
         file_url=file_url,
         link=file_url,
     )
+
+
+@router.get("/files/{session_id}")
+async def list_session_files(
+    session_id: str,
+    user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
+    research_session = require_research_session(db, user, session_id)
+    rows = list(db.scalars(select(UploadedFile).where(
+        UploadedFile.session_id == research_session.id,
+        UploadedFile.user_id == user.id,
+    ).order_by(UploadedFile.created_at.desc())))
+    result = []
+    for row in rows:
+        chat_refs = list(db.scalars(select(Chat.title).join(
+            LibraryPaper, LibraryPaper.chat_id == Chat.id
+        ).where(
+            LibraryPaper.user_id == user.id,
+            LibraryPaper.session_id == research_session.id,
+            LibraryPaper.link == f"{_BACKEND_PUBLIC_URL}/api/uploads/{session_id}/{row.stored_filename}",
+        )))
+        report_refs = list(db.scalars(select(Report.title).join(
+            Chat, Report.chat_id == Chat.id
+        ).join(
+            LibraryPaper, LibraryPaper.chat_id == Chat.id
+        ).where(
+            Report.user_id == user.id,
+            Report.session_id == research_session.id,
+            LibraryPaper.user_id == user.id,
+            LibraryPaper.session_id == research_session.id,
+            LibraryPaper.link == f"{_BACKEND_PUBLIC_URL}/api/uploads/{session_id}/{row.stored_filename}",
+        )))
+        result.append({
+            "id": str(row.id),
+            "name": row.original_filename,
+            "type": row.mime_type,
+            "size": row.size_bytes,
+            "uploaded_at": row.created_at.isoformat() if row.created_at else None,
+            "source": row.source,
+            "url": f"{_BACKEND_PUBLIC_URL}/api/uploads/{session_id}/{row.stored_filename}",
+            "references": chat_refs + report_refs,
+        })
+    return result
+
+
+@router.post("/files/{session_id}/{file_id}/link")
+async def link_session_file(
+    session_id: str,
+    file_id: UUID,
+    payload: FileLinkPayload,
+    user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
+    research_session = require_research_session(db, user, session_id)
+    uploaded = db.scalar(select(UploadedFile).where(
+        UploadedFile.id == file_id,
+        UploadedFile.session_id == research_session.id,
+        UploadedFile.user_id == user.id,
+    ))
+    if not uploaded or (payload.chat_id is None and payload.report_id is None):
+        raise HTTPException(status_code=404, detail="File or destination not found.")
+    chat_id = payload.chat_id
+    if payload.report_id is not None:
+        report = db.scalar(select(Report).where(
+            Report.id == payload.report_id,
+            Report.session_id == research_session.id,
+            Report.user_id == user.id,
+        ))
+        if not report:
+            raise HTTPException(status_code=404, detail="Report not found.")
+        chat_id = report.chat_id
+    chat = db.scalar(select(Chat).where(
+        Chat.id == chat_id,
+        Chat.session_id == research_session.id,
+        Chat.user_id == user.id,
+        Chat.deleted_at.is_(None),
+    ))
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found.")
+    link = f"{_BACKEND_PUBLIC_URL}/api/uploads/{session_id}/{uploaded.stored_filename}"
+    existing = db.scalar(select(LibraryPaper).where(
+        LibraryPaper.user_id == user.id,
+        LibraryPaper.session_id == research_session.id,
+        LibraryPaper.chat_id == chat.id,
+        LibraryPaper.link == link,
+    ))
+    if not existing:
+        db.add(LibraryPaper(
+            user_id=user.id,
+            session_id=research_session.id,
+            chat_id=chat.id,
+            title=uploaded.original_filename,
+            link=link,
+            paper_metadata={"source": "user_upload", "is_uploaded": True, "file_url": link},
+        ))
+        db.commit()
+    return {"status": "linked", "chat_id": str(chat.id), "indexed": False}
+
+
+@router.delete("/files/{session_id}/{file_id}")
+async def delete_session_file(
+    session_id: str,
+    file_id: UUID,
+    user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
+    research_session = require_research_session(db, user, session_id)
+    uploaded = db.scalar(select(UploadedFile).where(
+        UploadedFile.id == file_id,
+        UploadedFile.session_id == research_session.id,
+        UploadedFile.user_id == user.id,
+    ))
+    if not uploaded:
+        raise HTTPException(status_code=404, detail="File not found.")
+    link = f"{_BACKEND_PUBLIC_URL}/api/uploads/{session_id}/{uploaded.stored_filename}"
+    references = list(db.scalars(select(LibraryPaper).where(
+        LibraryPaper.user_id == user.id,
+        LibraryPaper.session_id == research_session.id,
+        LibraryPaper.link == link,
+    )))
+    stored_name = uploaded.stored_filename
+    try:
+        vector_store.delete_paper(link, session_id)
+        graph_store.delete_paper(link)
+        storage.delete(session_id, stored_name)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="File metadata was deleted but storage cleanup failed.") from exc
+    db.delete(uploaded)
+    for reference in references:
+        db.delete(reference)
+    db.commit()
+    return {"status": "deleted", "references_removed": len(references)}
 
 
 @router.get("/uploads/{session_id}/{filename}")
@@ -286,10 +431,13 @@ async def upload_pdf_stream(
     session_id: str = "default",
     chat_id: str | None = None,
     request_id: str = "",
+    source: str = "chat",
     user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
     enforce_rate_limit(request, "upload", 20)
+    if source not in {"chat", "report", "files"}:
+        raise HTTPException(status_code=422, detail="Invalid upload source.")
     original_name = _original_filename(file.filename)
     research_session = require_research_session(db, user, session_id, create=True)
 
@@ -361,6 +509,9 @@ async def upload_pdf_stream(
                         user_id=user.id,
                         original_filename=original_name,
                         stored_filename=stored_name,
+                        mime_type=file.content_type or "application/pdf",
+                        source=source,
+                        extracted_text=text,
                         size_bytes=len(content),
                     )
                 )

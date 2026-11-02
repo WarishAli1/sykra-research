@@ -112,7 +112,7 @@ function PdfViewerInner({ url, name, onClose }: PdfViewerProps) {
   }, [numPages]);
 
   const validUrl = /^(https?|blob):/i.test(url);
-  const fileToLoad = blobUrl; // never hand the raw URL to pdf.js (no cookies -> 401)
+  const fileToLoad = blobUrl; 
 
   return (
     <div className="flex h-full w-full min-w-0">

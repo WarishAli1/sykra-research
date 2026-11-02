@@ -55,7 +55,6 @@ def export_pdf(req: PdfExportRequest):
 
     sections = [s.model_dump() for s in req.sections] if req.sections else None
     if sections:
-        # Formatted export: the user's own (possibly edited) title wins over a generated slug.
         slug = None
         title = (req.title or "").strip() or "Research Report"
     else:

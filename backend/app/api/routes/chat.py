@@ -43,6 +43,7 @@ from app.services.reference_builder import (
 )
 from app.services.citation_grounding import ABSTAIN_TEXT
 from app.services.chat_titles import schedule_title_generation
+from app.services import background_jobs
 from app.services.library_store import save_papers
 from app.config import settings
 from app.agents.report_text import is_auto_title
@@ -601,11 +602,11 @@ async def chat_stream(
     previous = previous_papers_from_db(db, user.id, chat_record)
     print(f"[chat] chat_id={chat_record.id} history={len(history)} previous_papers={len(previous)}")
     _persist_message(db, chat_record, "user", req.query, status="complete")
-    assistant_message = _create_message(db, chat_record, "assistant")
+    assistant_message = _create_message(db, chat_record, "assistant", status="generating")
     chat_id = str(chat_record.id)
     message_id = assistant_message.id
     user_id = user.id
-    async def event_stream():
+    async def generation_stream():
         db_gen = get_db()
         db = next(db_gen)
         assistant_message = db.get(Message, message_id)
@@ -614,6 +615,7 @@ async def chat_stream(
         status_steps: list[dict] = []
         finished = False
         try:
+            yield sse_event("generation", message_id=str(message_id), chat_id=chat_id)
 
             state: AgentState = _build_initial_state(req, session_id, turn_id, history, previous)
 
@@ -887,20 +889,40 @@ async def chat_stream(
             yield sse_event("done")
 
         finally:
-            if not finished and assistant_message.status == "streaming":
+            if not finished and assistant_message.status == "generating":
                 _update_message(db, assistant_message, assistant_content, status="stopped",
                                 citations={"status_steps": status_steps})
             bridge_cleanup(request_id)
             cancellation.cleanup(request_id)
             db_gen.close()
 
+    background_jobs.start(str(message_id), generation_stream)
     return StreamingResponse(
-        event_stream(),
+        background_jobs.stream(str(message_id)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.get("/chat/generation/{message_id}")
+async def chat_generation(
+    message_id: uuid.UUID,
+    since: int = 0,
+    user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
+    message = db.scalar(select(Message).join(Chat).where(
+        Message.id == message_id, Chat.user_id == user.id,
+    ))
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found.")
+    return StreamingResponse(
+        background_jobs.stream(str(message_id), since=since),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
