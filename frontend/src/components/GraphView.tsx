@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Loader2, MessageSquare, Network, ZoomIn, ZoomOut, Maximize2, Pause, Play,
   Type, RefreshCw, AlertTriangle, Search, BarChart3, Route, ExternalLink,
-  ChevronRight, X, Square, Sun, Moon,
+  ChevronRight, X, Square,
 } from "lucide-react";
 import { forceCollide, forceX, forceY } from "d3-force";
 import dynamic from "next/dynamic";
@@ -12,6 +12,7 @@ import { api } from "@/lib/api";
 import type { GraphNode, GraphScope, GraphViewResponse } from "@/lib/types";
 import type { GraphLink, GraphStats, LegendEntry, NodeRel, SuggestMatch } from "@/lib/types";
 import { GRAPH_CONFIG as CFG } from "@/lib/GraphConfig";
+import { useTheme } from "@/lib/theme";
 
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -24,7 +25,6 @@ type RichLink = GraphLink & {
   color: string; dash: number[] | null;
 };
 type PathResult = { nodes: Set<string>; links: Set<string>; hops: number; chain: string[] };
-type Theme = "dark" | "light";
 
 const LINK_LABELS: Record<string, string> = {
   discusses: "discusses", uses: "uses", evaluates: "evaluates on",
@@ -96,9 +96,7 @@ export function GraphView({
   const [sugs, setSugs] = useState<SuggestMatch[] | null>(null);
   const [sugOpen, setSugOpen] = useState(false);
   const [hoverLink, setHoverLink] = useState<RichLink | null>(null);
-  const [theme, setTheme] = useState<Theme>(() => {
-    try { return (localStorage.getItem("graph-theme") as Theme) || "light"; } catch { return "light"; }
-  });
+  const { theme } = useTheme();
   const [nonce, setNonce] = useState(0);
 
   const mouseRef = useRef({ x: 0, y: 0 });
@@ -763,10 +761,6 @@ export function GraphView({
               title={labelsAuto ? "Labels: adaptive (zoom/hub aware)" : "Labels: show all"}
               onClick={() => setLabelsAuto(v => !v)}>
               <Type className="h-3.5 w-3.5" />
-            </button>
-            <button className={ctrlBtn} title={theme === "dark" ? "Light mode" : "Dark mode"}
-              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
-              {theme === "dark" ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
             </button>
             <button className={ctrlBtn} title="Rebuild graph" onClick={rebuild}><RefreshCw className="h-3.5 w-3.5" /></button>
           </div>

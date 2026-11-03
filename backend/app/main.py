@@ -26,7 +26,9 @@ from app.api.routes import (
     diagrams,
 )
 from app.config import settings
-from app.db.database import create_tables
+from app.db.database import create_tables, SessionLocal
+from app.db.models import Message
+from sqlalchemy import update
 from app.auth import get_current_user
 from app.api.routes.studio import router as studio_router
 from app.api.routes.report import router as report_router
@@ -46,6 +48,9 @@ Path("exports").mkdir(exist_ok=True)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     create_tables()
+    with SessionLocal() as db:
+        db.execute(update(Message).where(Message.status.in_({"streaming", "generating"})).values(status="interrupted"))
+        db.commit()
     
     try:
         graph_store.ensure_constraints()

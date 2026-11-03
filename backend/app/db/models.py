@@ -168,7 +168,56 @@ class UploadedFile(Base):
     )
     original_filename: Mapped[str] = mapped_column(String(255))
     stored_filename: Mapped[str] = mapped_column(String(255), unique=True)
+    mime_type: Mapped[str] = mapped_column(String(120), default="application/pdf", server_default="application/pdf")
+    source: Mapped[str] = mapped_column(String(16), default="chat", server_default="chat")
+    extracted_text: Mapped[str | None] = mapped_column(Text)
+    file_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict, server_default="{}")
     size_bytes: Mapped[int] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (Index("ix_uploaded_files_user_session", "user_id", "session_id"),)
+
+
+class Report(Base):
+    __tablename__ = "reports"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    session_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("research_sessions.id", ondelete="CASCADE"), index=True
+    )
+    chat_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("chats.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(200), default="Report")
+    status: Mapped[str] = mapped_column(String(16), default="running", index=True)
+    plan: Mapped[list] = mapped_column(JSONB, default=list)
+    references: Mapped[list] = mapped_column(JSONB, default=list)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (Index("ix_reports_session_updated", "session_id", "updated_at"),)
+
+
+class ReportSection(Base):
+    __tablename__ = "report_sections"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    report_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("reports.id", ondelete="CASCADE"), index=True)
+    section_key: Mapped[str] = mapped_column(String(120))
+    title: Mapped[str] = mapped_column(String(200))
+    content: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    position: Mapped[int] = mapped_column()
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (Index("ix_report_sections_report_position", "report_id", "position"),)
+
+
+class ReportConversationMessage(Base):
+    __tablename__ = "report_conversation_messages"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    report_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("reports.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

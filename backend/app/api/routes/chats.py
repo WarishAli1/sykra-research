@@ -23,6 +23,7 @@ class ChatRead(BaseModel):
     updated_at: datetime
     pinned_at: datetime | None = None
     session_name: str | None = None
+    generation_status: str | None = None
 
 
 class MessageRead(BaseModel):
@@ -61,6 +62,11 @@ def list_chats(
             updated_at=chat.updated_at,
             pinned_at=chat.pinned_at,
             session_name=chat.research_session.name if chat.research_session else None,
+            generation_status=next(
+                (message.status for message in reversed(chat.messages)
+                 if message.role == "assistant" and message.status in {"generating", "streaming", "complete"}),
+                None,
+            ),
         )
         for chat in chats
     ]

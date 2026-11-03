@@ -9,6 +9,16 @@ from app.auth import get_current_user
 from app.db.database import get_db
 from app.db.models import DiagramDocument, User
 from app.services.ownership import require_research_session
+from app.models.diagram_schema import DiagramDocumentModel
+from app.models.diagram_ai import (
+    DiagramAiEditOutput,
+    DiagramAiEditRequest,
+    DiagramAiGenerateRequest,
+    AiDiagramOutput,
+)
+from app.services.diagram_ai import edit as edit_diagram, generate as generate_diagram
+from app.services.rate_limit import enforce_rate_limit
+from fastapi import Request
 
 router = APIRouter()
 
@@ -16,15 +26,40 @@ router = APIRouter()
 class DiagramDocumentRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=200)
     title: str = Field(min_length=1, max_length=200)
-    document: dict
+    document: DiagramDocumentModel
+
+
+@router.post("/ai/generate", response_model=AiDiagramOutput)
+def ai_generate(
+    request: Request,
+    payload: DiagramAiGenerateRequest,
+    user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
+    require_research_session(db, user, payload.session_id)
+    enforce_rate_limit(request, "diagram-ai", 10)
+    return generate_diagram(payload.diagram_type, payload.instruction)
+
+
+@router.post("/ai/edit", response_model=DiagramAiEditOutput)
+def ai_edit(
+    request: Request,
+    payload: DiagramAiEditRequest,
+    user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
+    require_research_session(db, user, payload.session_id)
+    enforce_rate_limit(request, "diagram-ai", 10)
+    return edit_diagram(payload.document.model_dump(by_alias=True), payload.instruction)
 
 
 def _serialize(record: DiagramDocument) -> dict:
+    validated = DiagramDocumentModel.model_validate(record.document)
     return {
         "id": str(record.id),
         "session_id": str(record.session_id),
         "title": record.title,
-        "document": record.document,
+        "document": validated.model_dump(by_alias=True),
         "created_at": record.created_at,
         "updated_at": record.updated_at,
     }
@@ -42,7 +77,7 @@ def create_document(
         session_id=session.id,
         user_id=user.id,
         title=request.title,
-        document=request.document,
+        document=request.document.model_dump(by_alias=True),
     )
     db.add(record)
     db.commit()
@@ -86,7 +121,7 @@ def update_document(
     if record.session_id != session.id:
         raise HTTPException(status_code=400, detail="Document session cannot be changed.")
     record.title = request.title
-    record.document = request.document
+    record.document = request.document.model_dump(by_alias=True)
     db.commit()
     db.refresh(record)
     return _serialize(record)

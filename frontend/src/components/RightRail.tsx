@@ -1,6 +1,7 @@
 "use client";
 
 import { LibraryBig, Network } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { LibraryPanel } from "./LibraryPanel";
 import { ExplorePanel } from "./ExplorePanel";
 import type { Paper } from "@/lib/types";
@@ -14,7 +15,6 @@ export function RightRail({
   tab,
   setTab,
   onOpenPdf,
-  onDeletePaper,
 }: {
   papers: Paper[];
   sessionId: string;
@@ -22,28 +22,34 @@ export function RightRail({
   tab: Tab;
   setTab: (t: Tab) => void;
   onOpenPdf: (url: string) => void;
-  onDeletePaper: (paper: Paper) => void | Promise<void>;
 }) {
+  const router = useRouter();
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col bg-paper text-ink">
       <div className="flex shrink-0 border-b border-line">
         <TabButton
           active={tab === "library"}
-          onClick={() => setTab("library")}
+          onClick={() => {
+            setTab("library");
+            if (chatId) router.push(`/app/s/${sessionId}/chat/${chatId}`);
+          }}
           icon={<LibraryBig className="h-3.5 w-3.5" />}
-          label="Library"
+          label="Papers"
           badge={papers.length || undefined}
         />
         <TabButton
           active={tab === "explore"}
-          onClick={() => setTab("explore")}
+          onClick={() => {
+            setTab("explore");
+            if (chatId) router.push(`/app/s/${sessionId}/chat/${chatId}/graph`);
+          }}
           icon={<Network className="h-3.5 w-3.5" />}
           label="Explore"
         />
       </div>
 
       <div className="flex-1 min-h-0">
-        {tab === "library" && <LibraryPanel papers={papers} onOpenPdf={onOpenPdf} onDeletePaper={onDeletePaper} />}
+        {tab === "library" && <LibraryPanel papers={papers} onOpenPdf={onOpenPdf} />}
         {tab === "explore" && <ExplorePanel key={`${sessionId}:${chatId ?? ""}`} projectId={sessionId} chatId={chatId} />}
       </div>
     </div>

@@ -29,7 +29,10 @@ class StudioApiError extends Error {
 }
 
 async function studioRequest<T>(path: string, init: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}/studio${path}`, { ...init });
+  const response = await fetch(`${API_BASE_URL}/studio${path}`, {
+    ...init,
+    credentials: "include",
+  });
   if (!response.ok) {
     let message = `Studio request failed (${response.status})`;
     try {

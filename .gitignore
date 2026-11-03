@@ -6,7 +6,6 @@ __pycache__/
 venv/
 env/
 
-# Local environment files and variants. Keep only explicitly safe templates.
 **/.env*
 !**/.env.example
 
@@ -40,7 +39,7 @@ htmlcov/
 .idea/
 *.swp
 
-
+AGENTS.md
 SECURITY.md
 docs/
 .github/dependabot.yml

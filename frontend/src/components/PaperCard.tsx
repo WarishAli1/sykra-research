@@ -1,4 +1,4 @@
-import { ExternalLink, X } from "lucide-react";
+import { ExternalLink } from "lucide-react";
 import { RelevanceStack } from "./RelevanceStack";
 import { resolvePdfUrl } from "@/lib/api";
 import type { Paper } from "@/lib/types";
@@ -7,12 +7,10 @@ export function PaperCard({
   paper,
   index,
   onOpenPdf,
-  onDeletePaper,
 }: {
   paper: Paper;
   index?: number;
   onOpenPdf: (url: string) => void;
-  onDeletePaper: (paper: Paper) => void | Promise<void>;
 }) {
   const isUpload = paper.source === "user_upload";
   const pdfUrl = isUpload ? resolvePdfUrl(paper) : null;
@@ -39,15 +37,6 @@ export function PaperCard({
             {paper.title}
           </h4>
         </div>
-        {paper.source === "user_upload" && (
-          <button
-            onClick={() => onDeletePaper(paper)}
-            aria-label="Remove uploaded PDF"
-            className="opacity-0 group-hover:opacity-100 transition text-ink-soft hover:text-danger shrink-0"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        )}
       </div>
 
       <p className="mt-1 text-[11.5px] text-ink-soft line-clamp-1">

@@ -10,11 +10,9 @@ type SortMode = "relevance" | "newest" | "oldest" | "title";
 export function LibraryPanel({
   papers,
   onOpenPdf,
-  onDeletePaper,
 }: {
   papers: Paper[];
   onOpenPdf: (url: string) => void;
-  onDeletePaper: (paper: Paper) => void | Promise<void>;
 }) {
   const [query, setQuery] = useState("");
   const [minRelevance, setMinRelevance] = useState(0);
@@ -69,11 +67,11 @@ export function LibraryPanel({
   const filterActive = minRelevance > 0 || sortMode !== "relevance";
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col bg-paper text-ink">
       <div className="border-b border-line px-4 py-3">
         <div className="flex items-center gap-2 mb-3">
           <LibraryBig className="h-4 w-4 text-indigo" />
-          <span className="font-serif text-[15px] font-semibold text-ink">Library</span>
+          <span className="font-serif text-[15px] font-semibold text-ink">Papers</span>
           <span className="ml-auto text-[11px] text-ink-soft">{papers.length}</span>
         </div>
         <div className="flex items-center gap-1.5 rounded-lg border border-line bg-paper-dim/75 px-2.5 py-1.5 shadow-inner shadow-black/5">
@@ -177,7 +175,7 @@ export function LibraryPanel({
         )}
 
         {filtered.map((p, i) => (
-          <PaperCard key={`${p.link}-${i}`} paper={p} onOpenPdf={onOpenPdf} onDeletePaper={onDeletePaper} />
+          <PaperCard key={`${p.link}-${i}`} paper={p} onOpenPdf={onOpenPdf} />
         ))}
       </div>
     </div>

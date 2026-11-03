@@ -29,7 +29,7 @@ from app.api.routes.chat import (
 from app.auth import get_current_user
 from app.config import settings
 from app.db.database import get_db
-from app.db.models import Chat, LibraryPaper, Message, ResearchSession, User
+from app.db.models import Chat, LibraryPaper, Message, ResearchSession, User, Report, ReportSection, ReportConversationMessage
 from app.services.vector_store import vector_store
 from app.services.graph_store import graph_store
 from app.pdf.pdf_renderer import sanitize_report_html
@@ -41,6 +41,8 @@ from app.services.library_store import save_papers
 from app.services.llm_client import get_llm
 from app.services.previous_papers import previous_papers_from_db
 from app.services.reference_builder import CitationNumberer, paper_id_to_ref_id_map
+from app.services.report_document import dedupe_sections, extract_guide_titles, guide_diff, strip_matching_heading
+from app.services import background_jobs
 from app.services.sse import (
     sse_event, progress_event, bridge_register, bridge_push, bridge_get,
     bridge_cleanup, stream_section_words,
@@ -203,18 +205,60 @@ async def report_run_stream(request: Request, req: ReportRunRequest,
     chat_record.kind = "report"
     chat_id = str(chat_record.id)
     _persist_message(db, chat_record, "user", req.query, status="complete")
-    assistant_message = _create_message(db, chat_record, "assistant")
+    assistant_message = _create_message(db, chat_record, "assistant", status="generating")
     message_uuid = assistant_message.id
     message_id = str(message_uuid)
     user_id = user.id
     history: list[dict] = []
     previous = previous_papers_from_db(db, user.id, chat_record)
 
+    existing_report = None
+    existing_sections: list[dict] = []
+    if req.chat_id:
+        existing_report = db.scalar(select(Report).where(
+            Report.chat_id == chat_record.id, Report.user_id == user.id,
+            Report.status == "paused",
+        ))
+        if existing_report:
+            existing_sections = [
+                {"section_id": section.section_key, "title": section.title, "content": section.content}
+                for section in db.scalars(select(ReportSection).where(
+                    ReportSection.report_id == existing_report.id
+                ).order_by(ReportSection.position.asc()))
+            ]
+            pending_keys = {item["id"] for item in (existing_report.plan or []) if item.get("status") != "done"}
+            req.sections = [
+                StructureSectionInput(section_id=section["section_id"], title=section["title"])
+                for section in existing_sections if section["section_id"] in pending_keys
+            ]
     sections_in = [StructureSection(**s.model_dump()) for s in req.sections]
     plan = structure_to_plan(sections_in)
     contracts = structure_to_contracts(sections_in)
     report_type = req.report_type or "general"
     title = req.title or " ".join(req.query.split())[:110]
+    durable_report = existing_report or Report(
+        session_id=uuid.UUID(req.session_id),
+        chat_id=chat_record.id,
+        user_id=user.id,
+        title=title,
+        status="running",
+        plan=[{"id": s.section_id, "title": s.title, "status": "pending"} for s in sections_in],
+    )
+    if not existing_report:
+        db.add(durable_report)
+        db.flush()
+        for position, section in enumerate(sections_in):
+            db.add(ReportSection(
+                report_id=durable_report.id,
+                section_key=section.section_id,
+                title=section.title,
+                position=position,
+            ))
+        db.commit()
+    else:
+        durable_report.status = "running"
+        db.commit()
+    durable_report_id = durable_report.id
 
     chat_req = ChatRequest(
         query=req.query, session_id=req.session_id, chat_id=chat_id, turn_id=turn_id,
@@ -237,7 +281,7 @@ async def report_run_stream(request: Request, req: ReportRunRequest,
         "report_title": title,
     })
 
-    async def event_stream():
+    async def generation_stream():
         db_gen = get_db()
         db2 = next(db_gen)
         msg = db2.get(Message, message_uuid)
@@ -296,16 +340,46 @@ async def report_run_stream(request: Request, req: ReportRunRequest,
                     yield step
                 elif etype == "report_section_draft":
                     _, mid, sec_title, content = event
+                    row = db2.scalar(select(ReportSection).where(
+                        ReportSection.report_id == durable_report_id,
+                        ReportSection.section_key == mid,
+                    ))
+                    if row:
+                        row.status = "running"
+                        row.content = content or ""
+                        report_row = db2.get(Report, durable_report_id)
+                        report_row.plan = [
+                            {**item, "status": "running" if item.get("id") == mid else item.get("status", "pending")}
+                            for item in (report_row.plan or [])
+                        ]
+                        db2.commit()
                     yield sse_event("report_section", section_id=mid,
                                     title=sec_title, markdown=content or "", final=False)
                 elif etype == "section":
                     mid, content = event[1], event[2]
+                    row = db2.scalar(select(ReportSection).where(
+                        ReportSection.report_id == durable_report_id,
+                        ReportSection.section_key == mid,
+                    ))
+                    if row:
+                        row.status = "done"
+                        row.content = content or ""
+                        report_row = db2.get(Report, durable_report_id)
+                        report_row.plan = [
+                            {**item, "status": "done" if item.get("id") == mid else item.get("status", "pending")}
+                            for item in (report_row.plan or [])
+                        ]
+                        db2.commit()
                     yield sse_event("report_section", section_id=mid,
                                     markdown=content or "", final=True)
                 elif etype == "graph_done":
                     break
             await graph_task
             if graph_error:
+                report_row = db2.get(Report, durable_report_id)
+                report_row.status = "failed"
+                report_row.error_message = str(graph_error[0])
+                db2.commit()
                 _update_message(db2, msg, "", status="failed", citations={"status_steps": status_steps})
                 yield sse_event("error", message="Something went wrong while generating this report.")
                 return
@@ -322,6 +396,12 @@ async def report_run_stream(request: Request, req: ReportRunRequest,
                     "content": numberer.rewrite(s.get("content") or ""),
                     "confidence": s.get("confidence", "medium"),
                 })
+            if existing_sections:
+                generated = {section["section_id"] for section in final_sections}
+                final_sections = [
+                    section for section in existing_sections
+                    if section["section_id"] not in generated
+                ] + final_sections
             answer = sanitize_for_web_preserving_math(state.get("final_answer") or "")
             cited_ids = {str(x) for x in (state.get("cited_paper_ids") or [])}
             papers_for_save = ranked
@@ -367,6 +447,13 @@ async def report_run_stream(request: Request, req: ReportRunRequest,
                 "paper_links": artifact["paper_links"],
             }
             _update_message(db2, msg, answer, status="complete", citations=citations_payload)
+            report_row = db2.get(Report, durable_report_id)
+            report_row.status = "completed"
+            report_row.references = [r.model_dump() for r in references]
+            report_row.plan = [
+                {**item, "status": "done"} for item in (report_row.plan or [])
+            ]
+            db2.commit()
             finished = True
             try:
                 await asyncio.to_thread(save_papers, db2, user_id, req.session_id,
@@ -378,13 +465,28 @@ async def report_run_stream(request: Request, req: ReportRunRequest,
                 yield sse_event("filename", filename=filename)
             yield sse_event("done")
         finally:
-            if not finished and msg.status == "streaming":
+            if not finished and msg.status == "generating":
+                report_row = db2.get(Report, durable_report_id)
+                if report_row:
+                    report_row.status = "paused"
+                    report_row.plan = [
+                        {**item, "status": "pending" if item.get("status") == "running" else item.get("status", "pending")}
+                        for item in (report_row.plan or [])
+                    ]
+                    running = db2.scalars(select(ReportSection).where(
+                        ReportSection.report_id == durable_report_id,
+                        ReportSection.status == "running",
+                    )).all()
+                    for section in running:
+                        section.status = "pending"
+                    db2.commit()
                 _update_message(db2, msg, "", status="stopped", citations={"status_steps": status_steps})
             bridge_cleanup(request_id)
             cancellation.cleanup(request_id)
             db_gen.close()
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream",
+    background_jobs.start(message_id, generation_stream)
+    return StreamingResponse(background_jobs.stream(message_id), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
@@ -426,6 +528,28 @@ async def report_list(session_id: str, user: User = Depends(get_current_user),
         ResearchSession.id == sid, ResearchSession.user_id == user.id))
     if not owned:
         raise HTTPException(status_code=404, detail="Session not found.")
+    durable = db.scalars(select(Report).where(
+        Report.session_id == sid, Report.user_id == user.id
+    ).order_by(Report.updated_at.desc())).all()
+    durable_out = []
+    for report in durable:
+        message = db.scalar(select(Message).where(
+            Message.chat_id == report.chat_id, Message.role == "assistant"
+        ).order_by(Message.created_at.desc()))
+        if not message:
+            continue
+        durable_out.append({
+            "chat_id": str(report.chat_id),
+            "message_id": str(message.id),
+            "title": report.title,
+            "created_at": report.created_at.isoformat(),
+            "updated_at": report.updated_at.isoformat(),
+            "status": report.status,
+            "completed_sections": sum(1 for item in (report.plan or []) if item.get("status") == "done"),
+            "total_sections": len(report.plan or []),
+        })
+    if durable_out:
+        return durable_out
     rows = db.scalars(
         select(Message)
         .join(Chat, Message.chat_id == Chat.id)
@@ -463,6 +587,21 @@ async def report_get(session_id: str, message_id: str,
             or msg.chat.kind != "report"):
         raise HTTPException(status_code=404, detail="Report not found.")
     art = (msg.citations or {}).get("report_artifact")
+    durable = db.scalar(select(Report).where(
+        Report.chat_id == msg.chat_id, Report.user_id == user.id
+    ).order_by(Report.updated_at.desc()))
+    if durable:
+        if not art:
+            art = {}
+        sections = db.scalars(select(ReportSection).where(
+            ReportSection.report_id == durable.id
+        ).order_by(ReportSection.position.asc())).all()
+        art = {
+            **art,
+            "title": durable.title,
+            "sections": [{"section_id": section.section_key, "title": section.title, "content": section.content} for section in sections],
+            "references": durable.references or [],
+        }
     if not art:
         raise HTTPException(status_code=404, detail="Report not found.")
     return {"chat_id": str(msg.chat_id), "message_id": str(msg.id),
@@ -520,7 +659,6 @@ async def report_patch_sections(req: ReportPatchRequest,
         if p:
             if p.content is not None:
                 sec["content"] = p.content
-                # html is the formatted twin of content; no html sent => formatting is gone.
                 _set_or_pop(sec, "html", p.html)
             if p.title:
                 sec["title"] = p.title.strip()
@@ -604,6 +742,15 @@ async def report_refine_stream(request: Request, req: ReportRefineRequest,
     extra_ctx = await _attach_context(req, msg, art)
     guideline = art.get("guideline_text") or ""
     sections = [dict(s) for s in (art.get("sections") or [])]
+    report_for_memory = db.scalar(select(Report).where(Report.chat_id == msg.chat_id))
+    memory_rows = list(db.scalars(select(ReportConversationMessage).where(
+        ReportConversationMessage.report_id == report_for_memory.id
+    ).order_by(ReportConversationMessage.created_at.asc()))) if report_for_memory else []
+    conversation = (
+        [{"role": row.role, "content": row.content} for row in memory_rows]
+        if report_for_memory else list(art.get("conversation") or [])
+    )
+    conversation.append({"role": "user", "content": req.instruction})
     sources = art.get("sources") or []
     texts_by_id = {str(s["id"]): f"{s.get('title','')}. {s.get('excerpt','')}" for s in sources}
     extra = "\n".join([str(r.get("value_raw") or r.get("value") or "")
@@ -618,16 +765,28 @@ async def report_refine_stream(request: Request, req: ReportRefineRequest,
         cancelled = False
         try:
             yield sse_event("progress", label="Understanding your request")
+            guide_titles = extract_guide_titles(guideline)
+            guide_summary = guide_diff(sections, guide_titles) if guide_titles else {"added": [], "kept": [], "removed": []}
+            for added_title in guide_summary["added"]:
+                section_id = f"s_{uuid.uuid4().hex[:8]}"
+                sections.append({"section_id": section_id, "title": added_title, "content": "", "confidence": "medium"})
+            if guide_titles:
+                yield sse_event(
+                    "report_structure",
+                    sections=[{"section_id": s["section_id"], "title": s["title"]} for s in sections],
+                    summary=guide_summary,
+                )
             listing = "\n".join(f"- [{s['section_id']}] {s['title']}" for s in sections)
             target_prompt = (
                 f"INSTRUCTION: {req.instruction}\nSECTIONS:\n{listing}\n"
+                f"REPORT CHAT MEMORY:\n{conversation[-12:]}\n"
                 + (f"GUIDELINE:\n{guideline[:3000]}\n" if req.guideline_text else "")
                 + (f"NEW DATA PREVIEW:\n{extra_ctx[:1500]}\n" if extra_ctx and (req.has_upload or req.data_text) else "")
-                + 'Return JSON only: {"section_ids": [], "global": false, '
-                  '"add": [{"title": "", "after": "<section_id or null>", "brief": ""}], "remove": []}. '
-                  "section_ids: existing sections to rewrite. global=true only if the whole report must be rewritten. "
-                  "add: new sections the user asks for or the guideline/data clearly requires (max 4). "
-                  "remove: section ids, only if the user explicitly asks to delete them.")
+                + 'Return JSON only: {"operation":"replace_section_content","section_ids":[],"add":[],"order":[]}. '
+                  "operation must be one of replace_section_content, remove_section, add_section, reorder, "
+                  "rewrite_all, remove_all_content. remove_all_content clears section bodies but never references. "
+                  "section_ids are the targeted existing sections. add contains {title, after, brief}; "
+                  "order is an ordered list of section ids.")
             try:
                 llm_fast = get_llm(temperature=0, task="fast")
                 raw = await asyncio.to_thread(
@@ -637,14 +796,20 @@ async def report_refine_stream(request: Request, req: ReportRefineRequest,
                     config={"timeout": 8},
                 )
                 d = raw if isinstance(raw, dict) else {}
+                operation = str(d.get("operation") or "replace_section_content")
                 ids = [str(x) for x in d.get("section_ids", [])]
-                glob = bool(d.get("global"))
                 adds = [a for a in d.get("add", []) if isinstance(a, dict)]
-                rems = {str(x) for x in d.get("remove", [])}
+                order = [str(x) for x in d.get("order", [])]
             except Exception:
-                ids, glob, adds, rems = [], False, [], set()
+                operation, ids, adds, order = "replace_section_content", [], [], []
 
             by_id = {s["section_id"]: s for s in sections}
+            remove_all = operation == "remove_all_content"
+            rems = set(ids) if operation == "remove_section" else set()
+            if remove_all:
+                for section in sections:
+                    if section["section_id"] != "references":
+                        section["content"] = ""
             rem_titles = [by_id[i]["title"] for i in rems if i in by_id and i != "references"]
             rems = {i for i in rems if i in by_id and i != "references"}
             sections[:] = [s for s in sections if s["section_id"] not in rems]
@@ -663,11 +828,17 @@ async def report_refine_stream(request: Request, req: ReportRefineRequest,
             by_id = {s["section_id"]: s for s in sections}
             body_ids = [s["section_id"] for s in sections if s["section_id"] != "references"]
             ids = [i for i in ids if i in by_id]
-            if glob:
+            if operation == "rewrite_all":
                 ids = body_ids
+            if operation == "remove_all_content":
+                ids = []
+            if operation == "reorder":
+                ordered = {section_id: index for index, section_id in enumerate(order)}
+                sections.sort(key=lambda section: ordered.get(section["section_id"], len(order)))
+                by_id = {s["section_id"]: s for s in sections}
             ids += [i for i in new_ids if i not in ids]
 
-            if not ids and not rems:
+            if not ids and not rems and not remove_all and operation != "reorder":
                 names = ", ".join(by_id[i]["title"] for i in body_ids)
                 msg_txt = f"I couldn't tell which section you mean. Name one of: {names}."
                 _log_turn(art, req.instruction, "nochange", msg_txt, [])
@@ -697,7 +868,7 @@ async def report_refine_stream(request: Request, req: ReportRefineRequest,
                         f"REPORT TITLE: {art.get('title','')}\nNEW SECTION: {sec['title']}\nPURPOSE: {briefs[sid]}\n"
                         f"OTHER SECTIONS:\n{listing}\n\n{ctx_block}USER INSTRUCTION: {req.instruction}\n\n"
                         f"Write this new section only. Keep every user-provided number exactly as written. "
-                        f"Keep citation markers [N] only with N in {{{allowed}}}. Markdown only, no heading, no <think>.")
+                        f"Keep citation markers [N] only with N in {{{allowed}}}. Body content only, no heading, no <think>.")
                 else:
                     prompt = (
                         f"REPORT TITLE: {art.get('title','')}\nSECTION: {sec['title']}\n"
@@ -707,7 +878,7 @@ async def report_refine_stream(request: Request, req: ReportRefineRequest,
                         f"The result MUST visibly differ from the current content; never return it unchanged.\n"
                         f"Keep every user-provided number exactly as written. "
                         f"Keep citation markers [N] only with N in {{{allowed}}}; cite only what the source states. "
-                        f"Markdown only, no heading, no <think>.")
+                        f"Body content only, no heading, no <think>.")
                 try:
                     raw = await asyncio.to_thread(
                         llm.invoke,
@@ -731,7 +902,7 @@ async def report_refine_stream(request: Request, req: ReportRefineRequest,
                     skipped.append({"section_id": sid, "title": sec["title"], "reason": "unchanged"})
                     continue
 
-                sec["content"] = new
+                sec["content"] = strip_matching_heading(new, sec["title"])
                 sec.pop("html", None)
                 info = {"section_id": sid, "title": sec["title"],
                         "words_before": _wc(before), "words_after": _wc(new)}
@@ -739,6 +910,8 @@ async def report_refine_stream(request: Request, req: ReportRefineRequest,
                 yield sse_event("report_section", section_id=sid, title=sec["title"], markdown=new, final=True)
 
             status, summary = _refine_outcome(changed, skipped)
+            if remove_all:
+                status, summary = "done", "Removed all section content; references kept."
             if cancelled:
                 summary = "Stopped. " + (summary if changed else "No changes were saved.")
             
@@ -747,7 +920,9 @@ async def report_refine_stream(request: Request, req: ReportRefineRequest,
             if rem_titles:
                 summary += f" Removed {', '.join(rem_titles)}."
                 status = "done"
-            art["sections"] = sections           
+            art["sections"] = dedupe_sections(sections)
+            conversation.append({"role": "assistant", "content": summary})
+            art["conversation"] = conversation[-50:]
             _log_turn(art, req.instruction, status, summary, changed)
             answer = _persist(db, msg, art)     
             if new_ids or rems:
@@ -803,6 +978,42 @@ def _log_turn(art: dict, instruction: str, status: str, summary: str, changed: l
 
 def _persist(db, msg, art: dict) -> str:
     answer = _rebuild_answer(art)
+    report = db.scalar(select(Report).where(Report.chat_id == msg.chat_id))
+    if report:
+        report.title = art.get("title") or report.title
+        report.references = art.get("references") or []
+        stored = {section.section_key: section for section in db.scalars(
+            select(ReportSection).where(ReportSection.report_id == report.id)
+        )}
+        for position, section in enumerate(art.get("sections") or []):
+            key = str(section.get("section_id") or section.get("id"))
+            row = stored.get(key)
+            if row:
+                row.title = section.get("title") or row.title
+                row.content = section.get("content") or ""
+                row.position = position
+                row.status = "done" if row.content.strip() else "pending"
+            else:
+                db.add(ReportSection(
+                    report_id=report.id,
+                    section_key=key,
+                    title=section.get("title") or "Untitled section",
+                    content=section.get("content") or "",
+                    position=position,
+                    status="done" if (section.get("content") or "").strip() else "pending",
+                ))
+        for row in db.scalars(select(ReportConversationMessage).where(
+            ReportConversationMessage.report_id == report.id
+        )).all():
+            db.delete(row)
+        for turn in (art.get("conversation") or [])[-50:]:
+            if turn.get("role") in {"user", "assistant"}:
+                db.add(ReportConversationMessage(
+                    report_id=report.id,
+                    role=turn["role"],
+                    content=turn.get("content") or "",
+                ))
+        report.updated_at = datetime.now(timezone.utc)
     cit = dict(msg.citations or {})
     cit["report_artifact"] = art
     _update_message(db, msg, answer, citations=cit)

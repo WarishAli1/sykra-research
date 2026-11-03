@@ -13,7 +13,9 @@ import type {
   StreamEvent,
   ChatResponse,
 } from "@/lib/types";
+import { watchGeneration } from "@/lib/chatGenerationStore";
 import { ChatMessage } from "./ChatMessage";
+import { UploadMenu } from "./UploadMenu";
 import { UploadPreviewCard } from "./UploadPreviewCard";
 import { Dropdown } from "@/components/Dropdown";
 
@@ -38,6 +40,7 @@ function getGreeting(): { title: string; subtitle: string } {
 const noopSubscribe = () => () => {};
 const PINNED_EVENT = "sykra:pinned-change";
 export function ChatPanel({
+  context = "research",
   onUploadComplete,
   uploadedFilename,
   turns,
@@ -48,7 +51,6 @@ export function ChatPanel({
   onOpenGraph,
   onOpenPdf,
   onRegenerated,
-  onDeletePaper,
   uploadState,
   setUploadState,
   hasUpload,
@@ -57,6 +59,7 @@ export function ChatPanel({
   setEvidenceMode,
   wide = false,
 }: {
+  context?: "research" | "studio" | "report";
   onUploadComplete: (data: { filename: string; fileUrl: string; link: string }) => void;
   uploadedFilename: string | null;
   turns: ChatTurn[];
@@ -67,7 +70,6 @@ export function ChatPanel({
   onOpenGraph: () => void;
   onOpenPdf: (url: string) => void;
   onRegenerated?: () => void;
-  onDeletePaper?: (link: string) => Promise<void>;
   uploadState: {
     status: "idle" | "uploading" | "processing" | "done" | "error";
     filename: string;
@@ -270,6 +272,15 @@ export function ChatPanel({
         }));
         break;
 
+      case "generation":
+        watchGeneration(event.chat_id, event.message_id, (snapshot) => {
+          updateTurn(turnId, {
+            text: snapshot.content,
+            streaming: snapshot.status === "generating" || snapshot.status === "streaming",
+          });
+        });
+        break;
+
       case "token":
         if (event.kind === "preview") {
           updateTurn(turnId, (prev) => ({
@@ -325,8 +336,12 @@ export function ChatPanel({
       case "result": {
         if (opts.isChat) {
           const res = event.payload as ChatResponse;
-          if (res.chat_id && !chatId) router.replace(`/app/s/${sessionId}/chat/${res.chat_id}`);
-          onNewPapers(res.papers ?? []);
+          if (context === "research") {
+            if (res.chat_id && !chatId) router.replace(`/app/s/${sessionId}/chat/${res.chat_id}`);
+            onNewPapers(res.papers ?? []);
+          } else if (res.chat_id) {
+            pendingChatRef.current = res.chat_id;
+          }
           updateTurn(turnId, (prev) => {
             const finalAnswer = (res.answer ?? "").trim();
             const nextText =
@@ -511,13 +526,15 @@ export function ChatPanel({
               link: event.payload.link,
               filename: event.payload.filename,
             });
-            setHasUpload(true);
-            setEvidenceMode((prevMode) => (prevMode === "literature" ? "blended" : prevMode));
-            onUploadComplete({
-              filename: event.payload.filename,
-              fileUrl: event.payload.file_url,
-              link: event.payload.link,
-            });
+            if (context === "research") {
+              setHasUpload(true);
+              setEvidenceMode((prevMode) => (prevMode === "literature" ? "blended" : prevMode));
+              onUploadComplete({
+                filename: event.payload.filename,
+                fileUrl: event.payload.file_url,
+                link: event.payload.link,
+              });
+            }
           }
           if (event.type === "error") {
             setError(event.message);
@@ -543,6 +560,9 @@ export function ChatPanel({
   function handleFilesChange(e: React.ChangeEvent<HTMLInputElement>) {
     const selected = Array.from(e.target.files ?? []);
     if (fileInputRef.current) fileInputRef.current.value = "";
+    queueFiles(selected);
+  }
+  function queueFiles(selected: File[]) {
     if (selected.length === 0) return;
 
     setUploads((prev) => {
@@ -611,7 +631,6 @@ export function ChatPanel({
                     setHasUpload(false);
                     setEvidenceMode("literature");
                   }
-                  onDeletePaper?.(link);
                 } else {
                   handlePauseUpload(u.id);
                 }
@@ -622,19 +641,22 @@ export function ChatPanel({
       )}
 
       <div className="flex items-end gap-2 rounded-2xl border border-line bg-paper-dim/70 px-2.5 py-1.5 shadow-sm shadow-black/5 transition-colors focus-within:border-indigo/50">
-        <button
-          onClick={() => fileInputRef.current?.click()}
+        <UploadMenu
+          sessionId={sessionId}
           disabled={uploads.filter((u) => u.status !== "error").length >= MAX_FILES_PER_MESSAGE}
-          aria-label="Attach PDF (up to 3 files)"
+          ariaLabel="Attach PDF (up to 3 files)"
           title={`Attach up to ${MAX_FILES_PER_MESSAGE} PDFs`}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-ink-soft transition-colors hover:bg-paper hover:text-ink disabled:opacity-50"
-        >
-          {uploads.some((u) => u.status === "uploading" || u.status === "processing" || u.status === "queued") ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Paperclip className="h-4 w-4" />
-          )}
-        </button>
+          maxSelect={Math.max(1, MAX_FILES_PER_MESSAGE - uploads.filter((u) => u.status !== "error").length)}
+          onPickComputer={() => fileInputRef.current?.click()}
+          onPickFiles={queueFiles}
+          icon={
+            uploads.some((u) => u.status === "uploading" || u.status === "processing" || u.status === "queued") ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Paperclip className="h-4 w-4" />
+            )
+          }
+        />
         <input
           ref={fileInputRef}
           type="file"
@@ -655,11 +677,11 @@ export function ChatPanel({
           }}
           disabled={isGenerating}
           rows={1}
-          placeholder={"Ask a question, or drop a PDF to ground it"}
-          className="min-h-[24px] max-h-28 flex-1 resize-none overflow-y-auto bg-transparent py-1.5 text-[15px] leading-6 text-ink placeholder:text-ink-soft/60 focus:outline-none"
+          placeholder={context === "studio" ? "Describe what to create…" : context === "report" ? "Tell Sykra what to change…" : "Ask a question, or drop a PDF to ground it"}
+          className="min-h-10 max-h-28 flex-1 resize-none overflow-y-auto bg-transparent py-1.5 text-[15px] leading-6 text-ink placeholder:text-ink-soft/60 placeholder:whitespace-nowrap placeholder:overflow-hidden placeholder:text-ellipsis focus:outline-none"
         />
 
-        <Dropdown
+        {context === "research" && <Dropdown
           value={evidenceMode}
           onChange={setEvidenceMode}
           onDisabledSelect={() => flashToast("To use this mode, please first upload at least 1 file.")}
@@ -682,16 +704,16 @@ export function ChatPanel({
             },
             { value: "literature", label: "Literature only", hint: "Answer from external literature." },
           ]}
-        />
+        />}
 
-        <Dropdown
+        {context === "research" && <Dropdown
           value={responseMode}
           onChange={setResponseMode}
           items={[
             { value: "normal", label: "Normal", hint: "Quick answers and short academic help." },
             { value: "researched", label: "Researched", hint: "Deeper reports with literature synthesis and citations." },
           ]}
-        />
+        />}
 
         {isGenerating ? (
           <button
@@ -716,6 +738,9 @@ export function ChatPanel({
     </div>
   );
 
+  if (!hasConversation && context !== "research") {
+    return <div className="flex h-full flex-col bg-paper"><div className="flex-1 overflow-y-auto p-4">{turns.map((turn) => <div key={turn.id} className={`mb-3 max-w-[90%] rounded-xl px-3 py-2 text-sm ${turn.role === "user" ? "ml-auto bg-accent text-white" : "bg-paper-dim text-ink"}`}>{turn.text}</div>)}</div><div className="border-t border-line p-3">{composer}</div></div>;
+  }
   if (!hasConversation) {
     const greeting = hasMounted ? getGreeting() : { title: "Research", subtitle: "Search papers, ask follow-ups, or upload a PDF to ground answers in it." };
     return (
@@ -825,10 +850,7 @@ export function ChatPanel({
           style={{
             paddingTop: 64,
             paddingBottom: 40,
-            background:
-              "radial-gradient(900px 420px at 50% -8%, rgba(218,241,222,.65), transparent 70%)," +
-              "radial-gradient(rgba(14,107,98,.07) 1px, transparent 1px) 0 0/22px 22px," +
-              "var(--surface)",
+            background: "var(--chat-bg)",
           }}
         >
           <div className={`mx-auto w-full space-y-10 transition-[max-width] duration-200 ease-out ${wide ? "max-w-[920px]" : "max-w-[760px]"}`}>

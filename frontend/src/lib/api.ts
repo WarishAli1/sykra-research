@@ -27,6 +27,7 @@ import type {
   StatusStep,
   EvidenceMode,
   ReportListItem,
+  SessionFile,
 } from "./types";
 
 export class ApiError extends Error {
@@ -200,6 +201,22 @@ export const api = {
   },
   listLibraryPapers(sessionId: string, chatId?: string): Promise<Paper[]> {
     return request(`/library/session/${encodeURIComponent(sessionId)}/papers${queryString({ chat_id: chatId })}`, { method: "GET" });
+  },
+  listFiles(sessionId: string): Promise<SessionFile[]> {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 10000);
+    return request<SessionFile[]>(`/files/${encodeURIComponent(sessionId)}`, { method: "GET", signal: controller.signal })
+      .finally(() => window.clearTimeout(timeout));
+  },
+  deleteFile(sessionId: string, fileId: string): Promise<{ status: string; references_removed: number }> {
+    return request(`/files/${encodeURIComponent(sessionId)}/${encodeURIComponent(fileId)}`, { method: "DELETE" });
+  },
+  linkFile(sessionId: string, fileId: string, destination: { chat_id?: string; report_id?: string }): Promise<{ status: string; indexed: boolean }> {
+    return request(`/files/${encodeURIComponent(sessionId)}/${encodeURIComponent(fileId)}/link`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(destination),
+    });
   },
   createSession(name: string): Promise<{ id: string; name: string }> {
     return request("/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
@@ -416,10 +433,10 @@ export const api = {
     });
   },
 
-  uploadPdfStream(file: File, sessionId: string, onEvent: (event: UploadStreamEvent) => void, signal?: AbortSignal, requestId?: string, chatId?: string): Promise<void> {    const formData = new FormData();
+  uploadPdfStream(file: File, sessionId: string, onEvent: (event: UploadStreamEvent) => void, signal?: AbortSignal, requestId?: string, chatId?: string, source: "chat" | "report" | "files" = "chat"): Promise<void> {    const formData = new FormData();
     formData.append("file", file);
     return streamRequest(
-      `/upload/stream${queryString({ session_id: sessionId, request_id: requestId, chat_id: chatId })}`,
+      `/upload/stream${queryString({ session_id: sessionId, request_id: requestId, chat_id: chatId, source })}`,
       { method: "POST", body: formData, signal },
       onEvent
     );

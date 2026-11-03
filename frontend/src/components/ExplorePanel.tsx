@@ -32,7 +32,7 @@ export function ExplorePanel({ projectId, chatId }: { projectId: string; chatId?
 
   if (focusLink) {
     return (
-      <div className="flex h-full flex-col">
+      <div className="flex h-full flex-col bg-paper text-ink">
         <div className="flex items-center gap-2 border-b border-line px-3 py-2.5">
           <button
             onClick={closeFocus}
@@ -133,7 +133,7 @@ export function ExplorePanel({ projectId, chatId }: { projectId: string; chatId?
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col bg-paper text-ink">
       <div className="flex items-center gap-2 border-b border-line px-4 py-3">
         <Network className="h-4 w-4 text-indigo" />
         <span className="font-serif text-[15px] font-semibold text-ink">Explore</span>
